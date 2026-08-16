@@ -37,7 +37,11 @@ WORKDIR /app
 # --locked falla si uv.lock no coincide con pyproject.toml en vez de resolver
 # de nuevo en silencio. Es lo que hace que versionar el lock sirva de algo.
 # --no-dev saca 16 paquetes (mypy, ruff, pytest…) que no van a producción.
-RUN --mount=type=cache,target=/root/.cache/uv \
+#
+# El `id=` del cache mount NO es opcional: el builder de Railway rechaza el
+# Dockerfile sin él ("flag is missing an id argument"). Docker en local lo
+# infiere del target, así que sin id funciona acá y falla allá.
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --no-dev
@@ -48,8 +52,8 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 
 # Ahora sí el proyecto. --no-editable lo instala como paquete real y no como
-# enlace a un directorio.
-RUN --mount=type=cache,target=/root/.cache/uv \
+# enlace a un directorio. Mismo `id` que arriba: comparten el caché de uv.
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv sync --locked --no-editable --no-dev
 
 
