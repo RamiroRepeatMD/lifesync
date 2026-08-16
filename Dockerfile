@@ -1,10 +1,16 @@
-# syntax=docker/dockerfile:1.9
 # ============================================================================
 # LifeSync — imagen de producción (PB-007)
 #
-# Multi-stage siguiendo el patrón oficial de uv. El stage `builder` resuelve e
-# instala las dependencias; la imagen final sólo recibe el entorno virtual ya
-# armado y el código, sin uv, sin cachés y sin herramientas de desarrollo.
+# Multi-stage con uv. El stage `builder` resuelve e instala las dependencias;
+# la imagen final sólo recibe el entorno virtual ya armado y el código, sin uv
+# y sin herramientas de desarrollo.
+#
+# Deliberadamente NO se usan `--mount=type=cache` ni `--mount=type=bind`: son
+# extensiones de BuildKit y cada plataforma les pone requisitos distintos (el
+# builder de Railway exige un `id` con un prefijo `cacheKey` propio). Sólo
+# aceleraban el build; el caché por capas de Docker cubre el mismo caso al
+# copiar `pyproject.toml` y `uv.lock` antes que el código. Este Dockerfile usa
+# únicamente instrucciones estándar y construye en cualquier builder.
 #
 # Construir y probar en local:
 #   docker build -t lifesync .
@@ -12,7 +18,6 @@
 # ============================================================================
 
 ARG PYTHON_VERSION=3.13
-ARG UV_VERSION=0.12.5
 
 
 # ---------------------------------------------------------------------------
@@ -24,37 +29,29 @@ FROM python:${PYTHON_VERSION}-slim AS builder
 # públicas y un tag mutable puede darte una versión distinta sin avisar.
 COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
 
-# copy: evita los avisos de hardlink al cruzar el montaje de caché.
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
-# Las dependencias primero, en su propia capa y sin el proyecto. Así un cambio
-# en src/ no reinstala nada: sólo se rehace la capa siguiente.
-#
+# Sólo el manifiesto y el lock: esta capa se rehace únicamente si cambian esos
+# dos archivos, así que tocar src/ no reinstala las dependencias.
+COPY pyproject.toml uv.lock ./
+
 # --locked falla si uv.lock no coincide con pyproject.toml en vez de resolver
 # de nuevo en silencio. Es lo que hace que versionar el lock sirva de algo.
 # --no-dev saca 16 paquetes (mypy, ruff, pytest…) que no van a producción.
-#
-# El `id=` del cache mount NO es opcional: el builder de Railway rechaza el
-# Dockerfile sin él ("flag is missing an id argument"). Docker en local lo
-# infiere del target, así que sin id funciona acá y falla allá.
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev
+# --no-install-project instala sólo las dependencias, todavía no el proyecto.
+RUN uv sync --locked --no-install-project --no-dev
 
-# README.md hace falta: pyproject.toml lo declara como `readme` y hatchling lo
-# lee al construir el paquete.
-COPY pyproject.toml uv.lock README.md ./
+# Ahora el código. README.md hace falta porque pyproject.toml lo declara como
+# `readme` y hatchling lo lee al construir el paquete.
+COPY README.md ./
 COPY src/ ./src/
 
-# Ahora sí el proyecto. --no-editable lo instala como paquete real y no como
-# enlace a un directorio. Mismo `id` que arriba: comparten el caché de uv.
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv sync --locked --no-editable --no-dev
+# El proyecto. --no-editable lo instala como paquete real, no como enlace.
+RUN uv sync --locked --no-editable --no-dev
 
 
 # ---------------------------------------------------------------------------
