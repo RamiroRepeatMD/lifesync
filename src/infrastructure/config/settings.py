@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     supabase_jwt_secret: SecretStr | None = None  # se usa recién en PB-009
     token_encryption_key: SecretStr | None = None
 
+    # --- WhatsApp Cloud API (PB-004) ---
+    whatsapp_token: SecretStr | None = None  # System User token para llamar a Graph
+    whatsapp_phone_number_id: str | None = None  # nuestro número; arma la URL de envío
+    whatsapp_verify_token: SecretStr | None = None  # sólo para el handshake GET
+    whatsapp_app_secret: SecretStr | None = None  # firma HMAC de los POST; NO es el verify token
+
     @property
     def is_production(self) -> bool:
         """True si corremos en producción (endurece defaults, oculta /docs)."""
@@ -84,16 +90,53 @@ class Settings(BaseSettings):
             )
         )
 
+    @property
+    def whatsapp_configurado(self) -> bool:
+        """True si se puede ENVIAR por WhatsApp (token + número propio)."""
+        return all((self.whatsapp_token, self.whatsapp_phone_number_id))
+
+    @property
+    def firma_exigida(self) -> bool:
+        """True si hay que validar `X-Hub-Signature-256` en los POST entrantes.
+
+        Se separa a propósito de `whatsapp_configurado`: colapsarlas dejaría a
+        un desarrollador sin app secret sin poder enviar, o publicaría un
+        webhook que acepta POSTs de cualquiera.
+
+        En producción es siempre True (el validador de abajo garantiza que
+        entonces exista el secreto). En desarrollo se exige sólo si el secreto
+        está configurado, para poder probar con curl sin firmar.
+        """
+        return self.is_production or self.whatsapp_app_secret is not None
+
     @model_validator(mode="after")
     def _exigir_credenciales_en_produccion(self) -> Settings:
-        """Impide desplegar a producción sin persistencia cifrada (RF-18).
+        """Impide desplegar a producción sin persistencia cifrada ni webhook firmado.
 
         En desarrollo y testing la app arranca igual, en modo degradado: es lo
-        que permite trabajar y correr los tests sin un proyecto de Supabase.
+        que permite trabajar y correr los tests sin proyecto de Supabase ni
+        credenciales de Meta.
+
+        El orden importa: Supabase se valida primero para no cambiar el mensaje
+        que ya esperan los tests de PB-003.
         """
-        if self.is_production and not self.supabase_configurado:
+        if not self.is_production:
+            return self
+
+        if not self.supabase_configurado:
             raise ValueError(
                 "En producción son obligatorias SUPABASE_URL, SUPABASE_KEY y TOKEN_ENCRYPTION_KEY."
+            )
+        if not self.whatsapp_configurado:
+            raise ValueError(
+                "En producción son obligatorias WHATSAPP_TOKEN y WHATSAPP_PHONE_NUMBER_ID."
+            )
+        if self.whatsapp_verify_token is None:
+            raise ValueError("En producción es obligatoria WHATSAPP_VERIFY_TOKEN.")
+        if self.whatsapp_app_secret is None:
+            raise ValueError(
+                "En producción es obligatoria WHATSAPP_APP_SECRET: sin ella el webhook "
+                "aceptaría POSTs de cualquiera (RF-18)."
             )
         return self
 

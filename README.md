@@ -175,6 +175,56 @@ cifrado ocurre dentro del adaptador de `infrastructure/persistence/`.
 
 ---
 
+## WhatsApp
+
+El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
+
+### Configurar en Meta
+
+1. Dashboard de Meta → tu app → WhatsApp → **Configuration** → Edit webhook.
+2. Callback URL: `https://<tu-dominio>/webhooks/whatsapp` (requiere HTTPS público:
+   en desarrollo, un túnel; en producción, lo de PB-007).
+3. Verify token: el mismo valor que pusiste en `WHATSAPP_VERIFY_TOKEN`.
+4. Suscribite al campo **messages**.
+
+> **Trampa conocida con números argentinos.** En modo desarrollo, la lista de destinatarios
+> permitidos de Meta matchea **sin** el 9 (`5411…`), pero el webhook entrega el número **con** el 9
+> (`54911…`). Si sólo cargaste una forma, la primera respuesta falla con el error `131030`. Se
+> arregla registrando el número en el dashboard en las dos formas — **no** es algo para corregir en
+> el código.
+
+### Qué contesta hoy
+
+Un router mínimo de comandos: `/ayuda`, `/estado`, y para cualquier otra cosa un mensaje honesto de
+"todavía no sé interpretar lenguaje natural". Es el andamiaje que PB-005 reemplaza por el grafo de
+LangGraph.
+
+### Cómo funciona por dentro
+
+```
+POST → valida firma HMAC sobre los bytes crudos → responde 200 → BackgroundTask:
+       deduplica por wamid → busca o crea el Usuario → decide respuesta → envía por Graph API
+```
+
+Tres decisiones que conviene conocer antes de tocarlo:
+
+- **El POST sólo devuelve 200 o 403.** Cualquier otro código hace que Meta reintente durante horas.
+  Un payload deforme se loguea y se acepta.
+- **El trabajo pesado va en segundo plano** y nunca deja escapar una excepción: corre con la
+  respuesta ya enviada, así que un error que escape se pierde y corta la conexión.
+- **La deduplicación es en memoria** (512 mensajes, 6 h). No sobrevive a un reinicio ni sirve con
+  varias instancias; la red de contención es una ventana de frescura de 12 h sobre el timestamp del
+  mensaje. La versión persistente es deuda anotada para el Sprint 2.
+
+### Deuda técnica anotada
+
+- La identidad del usuario se apoya en el teléfono. Meta está migrando a IDs de usuario (BSUID) y
+  algún día los webhooks pueden llegar sin `wa_id`; el parser ya lo detecta y lo loguea.
+- No se manejan mensajes que no son de texto: se descartan con `whatsapp.tipo_no_soportado`.
+- Fuera de la ventana de 24 h de atención hay que usar plantillas. Hoy sólo se loguea el error 131047.
+
+---
+
 ## Desarrollo
 
 ```bash
@@ -202,6 +252,10 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `SUPABASE_KEY` | — | **service_role** key (ver [Base de datos](#base-de-datos)) |
 | `SUPABASE_JWT_SECRET` | — | Se lee pero todavía no se usa; entra en PB-009 |
 | `TOKEN_ENCRYPTION_KEY` | — | Clave Fernet para cifrar tokens en reposo |
+| `WHATSAPP_TOKEN` | — | Token de acceso a la Graph API |
+| `WHATSAPP_PHONE_NUMBER_ID` | — | ID de nuestro número de negocio |
+| `WHATSAPP_VERIFY_TOKEN` | — | Handshake GET del webhook (lo inventás vos) |
+| `WHATSAPP_APP_SECRET` | — | Firma HMAC de los POST. **No es el verify token** |
 
 Las tres últimas de Supabase son opcionales fuera de producción (modo degradado) y
 **obligatorias** con `ENVIRONMENT=production`: sin ellas el arranque falla, para no desplegar
@@ -229,7 +283,7 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 | PB-001 | Repositorio + estructura Clean Architecture / DDD | ✅ |
 | PB-002 | Setup FastAPI + dependencias + config por entornos | ✅ |
 | PB-003 | Supabase (PostgreSQL + Auth + storage de tokens) | ✅ |
-| PB-004 | Integración WhatsApp Cloud API (webhook + envío/recepción) | ⬜ |
+| PB-004 | Integración WhatsApp Cloud API (webhook + envío/recepción) | ✅ |
 | PB-005 | LangGraph/LangChain + Gemini 1.5 Flash + tool-calling base | ⬜ |
 | PB-006 | Logging estructurado + errores + health checks | 🟡 base lista |
 | PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ⬜ |

@@ -21,33 +21,63 @@ def test_liveness_sigue_ok_sin_supabase(client: TestClient) -> None:
     assert respuesta.json()["status"] == "ok"
 
 
+def _dependencia(respuesta: object, nombre: str) -> dict[str, object]:
+    """Busca una dependencia por nombre y no por posición.
+
+    Indexar por posición haría que agregar una dependencia nueva —WhatsApp en
+    PB-004, el agente en PB-005— rompiera tests que no tienen nada que ver.
+    """
+    cuerpo = respuesta.json()  # type: ignore[attr-defined]
+    for dependencia in cuerpo["dependencies"]:
+        if dependencia["name"] == nombre:
+            return dict(dependencia)
+    raise AssertionError(f"No se reportó la dependencia '{nombre}'.")
+
+
 def test_readiness_da_503_sin_supabase(client: TestClient) -> None:
     respuesta = client.get("/health/ready")
 
     assert respuesta.status_code == 503
-    cuerpo = respuesta.json()
-    assert cuerpo["status"] == "not_ready"
+    assert respuesta.json()["status"] == "not_ready"
 
-    supabase = cuerpo["dependencies"][0]
-    assert supabase["name"] == "supabase"
+    supabase = _dependencia(respuesta, "supabase")
     assert supabase["ready"] is False
-    assert "No configurado" in supabase["detail"]
+    assert "No configurado" in str(supabase["detail"])
+
+
+def test_readiness_reporta_whatsapp_sin_configurar(client: TestClient) -> None:
+    whatsapp = _dependencia(client.get("/health/ready"), "whatsapp")
+
+    assert whatsapp["ready"] is False
+    assert "No configurado" in str(whatsapp["detail"])
 
 
 # --- Con persistencia simulada ----------------------------------------------
 
 
-def test_readiness_da_200_cuando_supabase_responde(
+def test_readiness_reporta_supabase_listo_cuando_responde(
     client_con_supabase: TestClient, supabase_falso: FakeSupabaseClient
 ) -> None:
     supabase_falso.respuestas[TABLA_PING] = []
 
     respuesta = client_con_supabase.get("/health/ready")
 
+    assert _dependencia(respuesta, "supabase") == {
+        "name": "supabase",
+        "ready": True,
+        "detail": None,
+    }
+
+
+def test_readiness_da_200_con_todo_configurado(
+    client_con_whatsapp_y_supabase: TestClient, supabase_falso: FakeSupabaseClient
+) -> None:
+    supabase_falso.respuestas[TABLA_PING] = []
+
+    respuesta = client_con_whatsapp_y_supabase.get("/health/ready")
+
     assert respuesta.status_code == 200
-    cuerpo = respuesta.json()
-    assert cuerpo["status"] == "ready"
-    assert cuerpo["dependencies"][0] == {"name": "supabase", "ready": True, "detail": None}
+    assert respuesta.json()["status"] == "ready"
 
 
 def test_readiness_da_503_cuando_supabase_no_responde(
@@ -58,9 +88,8 @@ def test_readiness_da_503_cuando_supabase_no_responde(
     respuesta = client_con_supabase.get("/health/ready")
 
     assert respuesta.status_code == 503
-    cuerpo = respuesta.json()
-    assert cuerpo["status"] == "not_ready"
-    assert cuerpo["dependencies"][0]["ready"] is False
+    assert respuesta.json()["status"] == "not_ready"
+    assert _dependencia(respuesta, "supabase")["ready"] is False
 
 
 def test_el_readiness_consulta_la_tabla_usuarios(

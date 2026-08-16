@@ -22,14 +22,24 @@ from src.infrastructure.config.settings import LogLevel
 _LOGGERS_A_UNIFICAR = ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi")
 
 # Loggers que se silencian por debajo de WARNING porque emiten datos sensibles
-# (RF-18). httpx registra en INFO la URL completa de cada request, y las
-# consultas a PostgREST llevan los filtros en el query string:
+# (RF-18). Son dos vectores distintos:
 #
-#   GET .../rest/v1/usuarios?telefono_whatsapp=eq.%2B5491122334455
+# 1. Salida. httpx registra en INFO la URL completa de cada request, y las
+#    consultas a PostgREST llevan los filtros en el query string:
 #
-# Eso es un número de WhatsApp —dato personal— en texto plano en cada línea de
-# log. A WARNING seguimos viendo los fallos, pero no el tráfico normal.
-_LOGGERS_SILENCIADOS = ("httpx", "httpcore", "hpack")
+#      GET .../rest/v1/usuarios?telefono_whatsapp=eq.%2B5491122334455
+#
+# 2. Entrada. uvicorn.access registra la línea de request COMPLETA, con query
+#    string incluido. Verificado: el handshake de Meta deja el verify token en
+#    texto plano en stdout:
+#
+#      GET /webhooks/whatsapp?hub.verify_token=<secreto>&hub.challenge=999
+#
+#    Nuestro RequestContextMiddleware ya emite `http.request` con `path` sin
+#    query, así que no se pierde trazabilidad al callarlo.
+#
+# A WARNING seguimos viendo los fallos, pero no el tráfico normal.
+_LOGGERS_SILENCIADOS = ("httpx", "httpx2", "httpcore", "hpack", "uvicorn.access")
 NIVEL_LOGGERS_SILENCIADOS = logging.WARNING
 
 

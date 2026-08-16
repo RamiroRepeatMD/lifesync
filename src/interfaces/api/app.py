@@ -16,6 +16,11 @@ from fastapi import FastAPI
 
 from src.infrastructure.config.logging import configure_logging
 from src.infrastructure.config.settings import Settings, get_settings
+from src.infrastructure.external.whatsapp.cliente import (
+    close_whatsapp_client,
+    create_whatsapp_client,
+)
+from src.infrastructure.external.whatsapp.deduplicador import DeduplicadorDeMensajes
 from src.infrastructure.persistence.encryption import TokenCipher
 from src.infrastructure.persistence.supabase_client import (
     close_supabase_client,
@@ -24,6 +29,7 @@ from src.infrastructure.persistence.supabase_client import (
 from src.interfaces.api.errors import register_exception_handlers
 from src.interfaces.api.middleware.request_context import RequestContextMiddleware
 from src.interfaces.api.routers import health
+from src.interfaces.webhooks import whatsapp as webhook_whatsapp
 
 logger = structlog.get_logger(__name__)
 
@@ -54,10 +60,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     await _iniciar_persistencia(app, settings)
+    _iniciar_whatsapp(app, settings)
     try:
         yield
     finally:
-        await close_supabase_client(app.state.supabase)
+        # Cada recurso en su propio try: que uno falle al cerrar no debe
+        # impedir cerrar el otro.
+        try:
+            await close_supabase_client(app.state.supabase)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="supabase", tipo=type(exc).__name__)
+        try:
+            await close_whatsapp_client(app.state.whatsapp)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="whatsapp", tipo=type(exc).__name__)
         logger.info("app.shutdown")
 
 
@@ -77,6 +93,20 @@ async def _iniciar_persistencia(app: FastAPI, settings: Settings) -> None:
     app.state.token_cipher = TokenCipher(clave_de_cifrado.get_secret_value())
     app.state.supabase = await create_supabase_client(settings)
     logger.info("supabase.conectado", url=settings.supabase_url)
+
+
+def _iniciar_whatsapp(app: FastAPI, settings: Settings) -> None:
+    """Abre el cliente HTTP hacia Graph, si hay credenciales."""
+    if not settings.whatsapp_configurado:
+        logger.warning(
+            "whatsapp.no_configurado",
+            motivo="faltan WHATSAPP_TOKEN o WHATSAPP_PHONE_NUMBER_ID",
+            consecuencia="el webhook responde 200 pero no contesta mensajes",
+        )
+        return
+
+    app.state.whatsapp = create_whatsapp_client(settings)
+    logger.info("whatsapp.conectado", firma_exigida=settings.firma_exigida)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -103,11 +133,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # el lifespan todavía no corrió. Los completa `_iniciar_persistencia`.
     app.state.supabase = None
     app.state.token_cipher = None
+    app.state.whatsapp = None
+    # Vive todo el proceso: es lo que evita responder dos veces cuando Meta
+    # reintrega el mismo mensaje.
+    app.state.deduplicador_whatsapp = DeduplicadorDeMensajes()
 
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
 
     # Fuera del prefijo /api/v1: lo consumen las probes de la plataforma.
     app.include_router(health.router)
+    # Fuera del prefijo /api/v1: la URL la configura Meta y conviene que sea
+    # estable e independiente del versionado de nuestra API.
+    app.include_router(webhook_whatsapp.router)
 
     return app

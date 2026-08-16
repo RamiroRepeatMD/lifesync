@@ -71,7 +71,11 @@ async def traducir_errores(operacion: str) -> AsyncIterator[None]:
             mensaje=exc.message,
             hint=exc.hint,
         )
-        raise _traducir(exc, operacion) from exc
+        # `from None` y no `from exc`: el repr de APIError incluye el detalle
+        # de PostgreSQL, que en una violación de unicidad trae el valor
+        # conflictivo — p. ej. "Key (telefono_whatsapp)=(+549...) already
+        # exists." Encadenar la causa lo volcaría al log vía exc_info (RF-18).
+        raise _traducir(exc, operacion) from None
     except httpx.HTTPError as exc:
         logger.error("persistencia.error_transporte", operacion=operacion, tipo=type(exc).__name__)
         raise ServiceUnavailableError(f"No se pudo llegar a la base en '{operacion}'.") from exc

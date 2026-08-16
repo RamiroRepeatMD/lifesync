@@ -13,7 +13,7 @@ import structlog
 from supabase import AsyncClient
 
 from src.domain.entities.usuario import Usuario
-from src.domain.exceptions import RepositoryError
+from src.domain.exceptions import InvalidValueError, RepositoryError
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.infrastructure.persistence.error_translation import traducir_errores
 from src.infrastructure.persistence.mapeo import (
@@ -63,6 +63,34 @@ class SupabaseUsuarioRepository(UsuarioRepository):
 
         filas = filas_de(respuesta)
         return self._a_entidad(filas[0]) if filas else None
+
+    async def obtener_o_crear(self, telefono: str, nombre: str | None = None) -> Usuario:
+        """Devuelve el usuario de ese teléfono, dándolo de alta si no existe.
+
+        No usa upsert a propósito. El upsert de PostgREST es `ON CONFLICT DO
+        UPDATE`: pondría `nombre` en NULL cada vez que el webhook llega sin
+        `contacts`, y dispararía el trigger de `actualizado_en` en cada mensaje
+        recibido.
+
+        La carrera entre dos mensajes simultáneos de un usuario nuevo la
+        resuelve la base: si el INSERT choca con el UNIQUE, el segundo intento
+        de lectura devuelve la fila que ganó. Volver a leer además distingue
+        una violación de unicidad (el usuario existe) de una violación del
+        CHECK de E.164 (el teléfono es inválido y hay que propagar el error).
+        """
+        existente = await self.obtener_por_telefono(telefono)
+        if existente is not None:
+            return existente
+
+        try:
+            return await self.crear(Usuario(telefono_whatsapp=telefono, nombre=nombre))
+        except InvalidValueError:
+            ganador = await self.obtener_por_telefono(telefono)
+            if ganador is None:
+                # No fue una carrera: el teléfono no pasa el CHECK de la base.
+                raise
+            logger.info("usuario.alta_concurrente_resuelta", usuario_id=str(ganador.id))
+            return ganador
 
     async def obtener_por_telefono(self, telefono: str) -> Usuario | None:
         """Devuelve el usuario con ese número de WhatsApp, o None si no existe."""

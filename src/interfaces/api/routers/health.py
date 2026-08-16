@@ -84,7 +84,7 @@ async def readiness(request: Request, response: Response) -> ReadinessResponse:
     Devuelve 503 en vez de lanzar una excepción: un health check informa
     estado, no es un error de la aplicación.
     """
-    dependencias = [await _estado_de_supabase(request)]
+    dependencias = [await _estado_de_supabase(request), _estado_de_whatsapp(request)]
     listo = all(dependencia.ready for dependencia in dependencias)
 
     if not listo:
@@ -115,3 +115,21 @@ async def _estado_de_supabase(request: Request) -> DependencyStatus:
         )
 
     return DependencyStatus(name="supabase", ready=True)
+
+
+def _estado_de_whatsapp(request: Request) -> DependencyStatus:
+    """Comprueba la configuración de WhatsApp, sin llamar a Meta.
+
+    A diferencia de Supabase, acá no se hace I/O a propósito: `/health/ready`
+    es público y sin límite de tasa, así que una llamada real a Graph por cada
+    sonda serían decenas de miles de pedidos por día y una caída autoinfligida
+    por rate limit. El detalle es un texto fijo, nunca `str(exc)`.
+    """
+    if request.app.state.whatsapp is None:
+        return DependencyStatus(
+            name="whatsapp",
+            ready=False,
+            detail="No configurado: faltan WHATSAPP_TOKEN o WHATSAPP_PHONE_NUMBER_ID.",
+        )
+
+    return DependencyStatus(name="whatsapp", ready=True)

@@ -15,6 +15,14 @@ CREDENCIALES: dict[str, object] = {
     "token_encryption_key": "clave-fernet-de-prueba",
 }
 
+# PB-004 sumó WhatsApp a lo que producción exige.
+CREDENCIALES_WHATSAPP: dict[str, object] = {
+    "whatsapp_token": "token-de-graph-de-prueba",
+    "whatsapp_phone_number_id": "106540352242922",
+    "whatsapp_verify_token": "verify-de-prueba",
+    "whatsapp_app_secret": "app-secret-de-prueba",
+}
+
 
 def _settings(**overrides: object) -> Settings:
     """Settings aisladas del `.env` local, para que el test sea determinístico."""
@@ -23,7 +31,12 @@ def _settings(**overrides: object) -> Settings:
 
 def _settings_produccion(**overrides: object) -> Settings:
     """Settings de producción, con las credenciales que ese entorno exige."""
-    return _settings(environment=Environment.PRODUCTION, **CREDENCIALES, **overrides)
+    return _settings(
+        environment=Environment.PRODUCTION,
+        **CREDENCIALES,
+        **CREDENCIALES_WHATSAPP,
+        **overrides,
+    )
 
 
 # --- Entorno y logging ------------------------------------------------------
@@ -103,3 +116,73 @@ def test_la_clave_sigue_siendo_recuperable_para_usarla() -> None:
 
     assert settings.supabase_key is not None
     assert settings.supabase_key.get_secret_value() == "service-role-de-prueba"
+
+
+# --- WhatsApp (PB-004) ------------------------------------------------------
+
+
+def test_sin_credenciales_whatsapp_queda_deshabilitado() -> None:
+    assert _settings().whatsapp_configurado is False
+
+
+def test_con_token_y_numero_whatsapp_queda_habilitado() -> None:
+    assert _settings(**CREDENCIALES_WHATSAPP).whatsapp_configurado is True
+
+
+@pytest.mark.parametrize("faltante", ["whatsapp_token", "whatsapp_phone_number_id"])
+def test_falta_una_credencial_y_whatsapp_queda_deshabilitado(faltante: str) -> None:
+    incompletas = {k: v for k, v in CREDENCIALES_WHATSAPP.items() if k != faltante}
+
+    assert _settings(**incompletas).whatsapp_configurado is False
+
+
+def test_la_firma_no_se_exige_en_desarrollo_sin_app_secret() -> None:
+    """Permite probar el webhook con curl sin tener que firmar a mano."""
+    assert _settings(whatsapp_token="x", whatsapp_phone_number_id="1").firma_exigida is False
+
+
+def test_la_firma_se_exige_apenas_hay_app_secret() -> None:
+    assert _settings(whatsapp_app_secret="secreto").firma_exigida is True
+
+
+def test_la_firma_siempre_se_exige_en_produccion() -> None:
+    assert _settings_produccion().firma_exigida is True
+
+
+def test_poder_enviar_es_independiente_de_exigir_firma() -> None:
+    """Colapsarlas dejaría a un dev sin app secret sin poder enviar mensajes."""
+    settings = _settings(whatsapp_token="x", whatsapp_phone_number_id="1")
+
+    assert settings.whatsapp_configurado is True
+    assert settings.firma_exigida is False
+
+
+@pytest.mark.parametrize(
+    ("faltante", "esperado"),
+    [
+        ("whatsapp_token", "WHATSAPP_TOKEN"),
+        ("whatsapp_phone_number_id", "WHATSAPP_PHONE_NUMBER_ID"),
+        ("whatsapp_verify_token", "WHATSAPP_VERIFY_TOKEN"),
+        ("whatsapp_app_secret", "WHATSAPP_APP_SECRET"),
+    ],
+)
+def test_produccion_sin_una_credencial_de_whatsapp_no_arranca(faltante: str, esperado: str) -> None:
+    """Nunca se despliega un webhook público sin validación de firma (RF-18)."""
+    incompletas = {k: v for k, v in CREDENCIALES_WHATSAPP.items() if k != faltante}
+
+    with pytest.raises(ValidationError, match=esperado):
+        _settings(environment=Environment.PRODUCTION, **CREDENCIALES, **incompletas)
+
+
+def test_supabase_se_valida_antes_que_whatsapp() -> None:
+    """El orden importa: mantiene el mensaje que ya esperaban los tests de PB-003."""
+    with pytest.raises(ValidationError, match="TOKEN_ENCRYPTION_KEY"):
+        _settings(environment=Environment.PRODUCTION, **CREDENCIALES_WHATSAPP)
+
+
+def test_las_credenciales_de_whatsapp_no_aparecen_en_el_repr() -> None:
+    representacion = repr(_settings(**CREDENCIALES_WHATSAPP))
+
+    assert "token-de-graph-de-prueba" not in representacion
+    assert "app-secret-de-prueba" not in representacion
+    assert "verify-de-prueba" not in representacion

@@ -8,12 +8,17 @@ cifrado y no en claro.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import UUID, uuid4
 
+from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.oauth_token import OAuthToken
+from src.domain.entities.usuario import Usuario
+from src.domain.exceptions import InvalidValueError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
+from src.domain.repositories.usuario_repository import UsuarioRepository
+from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 
 
@@ -122,6 +127,63 @@ class FakeSupabaseClient:
         if not self.llamadas:
             raise AssertionError("No se registró ninguna llamada al cliente.")
         return self.llamadas[-1]
+
+
+class RepositorioUsuarioEnMemoria(UsuarioRepository):
+    """Implementación en memoria del puerto de usuarios, sin base de datos."""
+
+    def __init__(self, fallar_con: Exception | None = None) -> None:
+        self._por_telefono: dict[str, Usuario] = {}
+        self._por_id: dict[UUID, Usuario] = {}
+        # Permite simular una base caída en los tests del borde del webhook.
+        self.fallar_con = fallar_con
+
+    async def crear(self, usuario: Usuario) -> Usuario:
+        self._verificar_falla()
+        if usuario.telefono_whatsapp in self._por_telefono:
+            raise InvalidValueError("Ese registro ya existe.")
+        persistido = replace(usuario, id=uuid4())
+        self._por_telefono[persistido.telefono_whatsapp] = persistido
+        if persistido.id is not None:
+            self._por_id[persistido.id] = persistido
+        return persistido
+
+    async def obtener_o_crear(self, telefono: str, nombre: str | None = None) -> Usuario:
+        self._verificar_falla()
+        existente = self._por_telefono.get(telefono)
+        if existente is not None:
+            return existente
+        return await self.crear(Usuario(telefono_whatsapp=telefono, nombre=nombre))
+
+    async def obtener_por_id(self, usuario_id: UUID) -> Usuario | None:
+        self._verificar_falla()
+        return self._por_id.get(usuario_id)
+
+    async def obtener_por_telefono(self, telefono: str) -> Usuario | None:
+        self._verificar_falla()
+        return self._por_telefono.get(telefono)
+
+    def _verificar_falla(self) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+
+
+class MensajeroFalso(MensajeroWhatsApp):
+    """Doble del puerto de envío: registra lo enviado en vez de llamar a Meta."""
+
+    def __init__(self, fallar_con: Exception | None = None) -> None:
+        self.enviados: list[tuple[NumeroWhatsApp, str]] = []
+        self.fallar_con = fallar_con
+
+    async def enviar_texto(self, destino: NumeroWhatsApp, texto: str) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.enviados.append((destino, texto))
+
+    @property
+    def textos(self) -> list[str]:
+        """Sólo los textos, para aserciones más cortas."""
+        return [texto for _, texto in self.enviados]
 
 
 class RepositorioOAuthTokenEnMemoria(OAuthTokenRepository):
