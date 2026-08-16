@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lifesync"
+version = "0.1.0"
+description = "Asistente personal digital conversacional por WhatsApp (SIP 2026 - USAL)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Ramiro Gracia" }]
+
+dependencies = [
+    "fastapi>=0.141.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "structlog>=24.4.0",
+    "supabase>=2.31.0,<3.0.0",
+    "cryptography>=44.0.0",  # Fernet: cifrado de tokens en reposo (RF-18)
+    "httpx>=0.26,<0.29",     # se importa directo para traducir sus errores de red
+    # `realtime` (dependencia de supabase) exige websockets <16, y eso baja la
+    # versión que trae uvicorn[standard]. Se fija explícito para que el
+    # downgrade sea una decisión visible y no un diff sorpresa.
+    "websockets>=13,<16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "httpx2>=2.0.0", # cliente HTTP que usa starlette.testclient
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "supabase: necesita credenciales reales de Supabase; se saltea si no están.",
+]
+
+# ---------------------------------------------------------------------------
+# Linting / formato
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "ANN", # anotaciones de tipo obligatorias
+    "ASYNC",
+    "S",   # bandit (seguridad)
+    "RUF",
+]
+ignore = [
+    "ANN401", # permitir Any explicito en firmas genericas
+]
+
+# Escribimos docstrings y mensajes en espanol: la tipografia correcta no es un error.
+allowed-confusables = ["–", "—", "…", "‘", "’", "“", "”"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: assert es esperable en tests.
+# S105/S106: bandit marca cualquier literal asignado a algo que se llame
+#            token/secret/key, y los fixtures están llenos de tokens falsos.
+"tests/*" = ["S101", "S105", "S106"]
+
+# ---------------------------------------------------------------------------
+# Tipado estricto (CLAUDE.md: "Usa tipado estricto (Python 3.11+)")
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = true

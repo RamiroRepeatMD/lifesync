@@ -1,24 +1,66 @@
-# Python
+# ---- Python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
-*.egg-info/
+*$py.class
+*.so
+.Python
+
+# ---- Entornos virtuales ----------------------------------------------------
 .venv/
 venv/
+env/
+ENV/
+
+# ---- Build / distribución --------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# ---- Secretos y configuración local ----------------------------------------
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+credentials.json
+token.json
+service-account*.json
 
-# IDE
+# ---- Testing y cobertura ---------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---- Herramientas de calidad -----------------------------------------------
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ---- Logs y datos temporales -----------------------------------------------
+*.log
+logs/
+tmp/
+.cache/
+
+# ---- IDE / editores --------------------------------------------------------
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# OS
+# ---- Sistema operativo -----------------------------------------------------
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
+desktop.ini
 
-# Otros
-*.log
-.coverage
-htmlcov/
-.pytest_cache/
+# ---- Docker ----------------------------------------------------------------
+docker-compose.override.yml

@@ -1,0 +1,84 @@
+"""Dependencias compartidas de FastAPI.
+
+Acá se resuelve la inyección de dependencias de la capa de interfaces: es el
+lugar donde los casos de uso se arman con sus adaptadores concretos, para que
+los routers no conozcan la infraestructura.
+
+Nótese que los alias exportados anotan **las interfaces del dominio**
+(`OAuthTokenRepository`, `UsuarioRepository`), nunca las clases de Supabase:
+un router pide "un repositorio de tokens" y no se entera de quién lo implementa.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import Depends
+from starlette.requests import Request
+from supabase import AsyncClient
+
+from src.domain.exceptions import ServiceUnavailableError
+from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
+from src.domain.repositories.usuario_repository import UsuarioRepository
+from src.infrastructure.config.settings import Settings
+from src.infrastructure.persistence.encryption import TokenCipher
+from src.infrastructure.persistence.supabase_oauth_token_repository import (
+    SupabaseOAuthTokenRepository,
+)
+from src.infrastructure.persistence.supabase_usuario_repository import SupabaseUsuarioRepository
+
+MENSAJE_SIN_PERSISTENCIA = (
+    "La persistencia no está configurada: faltan SUPABASE_URL, SUPABASE_KEY o TOKEN_ENCRYPTION_KEY."
+)
+
+
+def get_app_settings(request: Request) -> Settings:
+    """Configuración asociada a esta aplicación.
+
+    Se lee de `app.state` (no del caché global) para que los tests puedan
+    construir la app con settings propias sin sobreescribir dependencias.
+    """
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def get_supabase_client(request: Request) -> AsyncClient:
+    """Cliente de Supabase abierto en el lifespan.
+
+    Raises:
+        ServiceUnavailableError: Si la app arrancó en modo degradado. Se
+            traduce a 503, no a 500: no es un bug, es una falta de config.
+    """
+    cliente: AsyncClient | None = request.app.state.supabase
+    if cliente is None:
+        raise ServiceUnavailableError(MENSAJE_SIN_PERSISTENCIA)
+    return cliente
+
+
+def get_token_cipher(request: Request) -> TokenCipher:
+    """Cifrador de credenciales construido en el lifespan."""
+    cipher: TokenCipher | None = request.app.state.token_cipher
+    if cipher is None:
+        raise ServiceUnavailableError(MENSAJE_SIN_PERSISTENCIA)
+    return cipher
+
+
+def get_oauth_token_repository(
+    cliente: Annotated[AsyncClient, Depends(get_supabase_client)],
+    cipher: Annotated[TokenCipher, Depends(get_token_cipher)],
+) -> OAuthTokenRepository:
+    """Repositorio de tokens OAuth2, con cifrado en reposo."""
+    return SupabaseOAuthTokenRepository(cliente, cipher)
+
+
+def get_usuario_repository(
+    cliente: Annotated[AsyncClient, Depends(get_supabase_client)],
+) -> UsuarioRepository:
+    """Repositorio de usuarios."""
+    return SupabaseUsuarioRepository(cliente)
+
+
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+SupabaseDep = Annotated[AsyncClient, Depends(get_supabase_client)]
+OAuthTokenRepositoryDep = Annotated[OAuthTokenRepository, Depends(get_oauth_token_repository)]
+UsuarioRepositoryDep = Annotated[UsuarioRepository, Depends(get_usuario_repository)]
