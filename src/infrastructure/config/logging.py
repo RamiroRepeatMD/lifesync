@@ -5,6 +5,7 @@ Objetivos:
 - Correlación por `request_id`, propagado con contextvars a todo el request.
 - Los logs de uvicorn y de la stdlib salen con el mismo formato que los nuestros.
 - Consola legible y coloreada en desarrollo; JSON en staging y producción.
+- Las librerías que loguean datos sensibles se silencian (RF-18).
 """
 
 from __future__ import annotations
@@ -19,6 +20,17 @@ from src.infrastructure.config.settings import LogLevel
 
 # Loggers de terceros que reenrutamos al handler raíz para unificar el formato.
 _LOGGERS_A_UNIFICAR = ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi")
+
+# Loggers que se silencian por debajo de WARNING porque emiten datos sensibles
+# (RF-18). httpx registra en INFO la URL completa de cada request, y las
+# consultas a PostgREST llevan los filtros en el query string:
+#
+#   GET .../rest/v1/usuarios?telefono_whatsapp=eq.%2B5491122334455
+#
+# Eso es un número de WhatsApp —dato personal— en texto plano en cada línea de
+# log. A WARNING seguimos viendo los fallos, pero no el tráfico normal.
+_LOGGERS_SILENCIADOS = ("httpx", "httpcore", "hpack")
+NIVEL_LOGGERS_SILENCIADOS = logging.WARNING
 
 
 def configure_logging(*, log_level: LogLevel = "INFO", json_logs: bool = False) -> None:
@@ -75,6 +87,11 @@ def configure_logging(*, log_level: LogLevel = "INFO", json_logs: bool = False) 
         logger_externo = logging.getLogger(nombre)
         logger_externo.handlers.clear()
         logger_externo.propagate = True
+
+    # Se aplica después del nivel raíz para que lo pise incluso con LOG_LEVEL=DEBUG:
+    # depurar nunca debe habilitar el volcado de datos personales.
+    for nombre in _LOGGERS_SILENCIADOS:
+        logging.getLogger(nombre).setLevel(NIVEL_LOGGERS_SILENCIADOS)
 
 
 def get_logger(nombre: str | None = None) -> structlog.stdlib.BoundLogger:
