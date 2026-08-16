@@ -80,18 +80,18 @@ Detalle completo en [`docs/03-arquitectura-y-stack.md`](docs/03-arquitectura-y-s
 
 ## Puesta en marcha
 
-**Requisitos:** Python 3.11 o superior.
+**Requisitos:** [uv](https://docs.astral.sh/uv/). La versión de Python la fija `.python-version`
+(3.13) y uv la instala solo si no la tenés.
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync
 cp .env.example .env
 ```
 
 Levantar el servidor:
 
 ```bash
-python -m src.main
+uv run python -m src.main
 ```
 
 La app arranca **sin credenciales de Supabase**, en modo degradado: `/health` responde 200 y
@@ -225,15 +225,116 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 ---
 
+## Despliegue
+
+El sistema se despliega en **Railway** desde el `Dockerfile` del repo.
+
+### Por qué Railway
+
+Render duerme los servicios gratuitos a los 15 minutos de inactividad y tarda ~60 s en despertar.
+Para un webhook de WhatsApp eso significa que el primer mensaje después de cada pausa se pierde y
+Meta reintenta. Railway no duerme salvo que actives Serverless a mano: el trial da USD 5 por 30
+días y después Hobby son USD 5/mes (la app consume ~USD 2 de ese crédito).
+
+### 1. Aplicar las migraciones
+
+Antes del primer deploy, correr en el SQL Editor de Supabase los archivos de
+[`db/migrations/`](db/migrations/) en orden. Ver [Base de datos](#base-de-datos).
+
+### 2. Crear el servicio
+
+1. [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub repo**.
+   Verificá la cuenta con GitHub: un trial sin verificar restringe la salida de red y Supabase
+   podría no responder.
+2. Railway detecta el `Dockerfile` solo. `railway.json` ya declara el health check en `/health`,
+   una réplica y la política de reinicio.
+3. **Settings → Networking → Generate Domain.** Sin esto el servicio **no es público** — es el
+   tropiezo más común del primer deploy.
+
+### 3. Cargar las variables
+
+En **Variables**, y **las nueve juntas**: el validador corta en el primer grupo que falla, así que
+de a una necesitarías cuatro deploys para descubrir las cuatro que faltan.
+
+| Variable | Valor |
+|---|---|
+| `ENVIRONMENT` | `production` |
+| `SUPABASE_URL` | URL del proyecto |
+| `SUPABASE_KEY` | **service_role** key |
+| `TOKEN_ENCRYPTION_KEY` | la clave Fernet |
+| `WHATSAPP_TOKEN` | token de Graph API |
+| `WHATSAPP_PHONE_NUMBER_ID` | ID de tu número |
+| `WHATSAPP_VERIFY_TOKEN` | el que pusiste en Meta |
+| `WHATSAPP_APP_SECRET` | App Secret de Meta |
+| `LOG_LEVEL` | `INFO` |
+
+Marcá como **Sealed** las cinco sensibles: una vez selladas, Railway no vuelve a mostrar el valor
+ni por la UI ni por la API.
+
+**No definas `PORT`** (lo inyecta Railway), ni `RELOAD`, ni `LOG_JSON` (en producción el formato ya
+es JSON).
+
+> Una variable declarada **pero vacía** cuenta como ausente y hace fallar el arranque. Es a
+> propósito: si `WHATSAPP_APP_SECRET=` pasara como configurada, el webhook validaría las firmas
+> contra un secreto vacío, que cualquiera puede reproducir.
+
+### 4. Verificar
+
+```bash
+curl https://<tu-servicio>.up.railway.app/health
+curl https://<tu-servicio>.up.railway.app/health/ready
+```
+
+`/health` debe dar 200 y `/health/ready` debe dar 200 con las dos dependencias en `ready: true`.
+`/docs` debe dar **404** — en producción la documentación no se publica.
+
+### 5. Apuntar el webhook de Meta
+
+Callback URL: `https://<tu-servicio>.up.railway.app/webhooks/whatsapp`, con el mismo verify token.
+Ver [WhatsApp → Configurar en Meta](#configurar-en-meta).
+
+**Rotá el verify token después de configurarlo.** Viaja en el query string del handshake GET, y
+aunque nuestro logger lo silencia, el proxy de Railway loguea las peticiones por su cuenta y sus
+docs no aclaran si incluyen el query string. El riesgo es bajo (ese token sólo gatea el handshake;
+lo que autentica los POST es la firma HMAC), pero rotarlo es gratis.
+
+### Probar el contenedor localmente
+
+Antes de desplegar, el mismo contenedor que va a correr en Railway:
+
+```bash
+docker build -t lifesync . && docker run --rm -p 8000:8000 --env-file .env lifesync
+```
+
+El `.env` se pasa en tiempo de ejecución con `--env-file`; **nunca entra a la imagen**, porque
+[`.dockerignore`](.dockerignore) lo excluye. Sin ese archivo el contexto de build sería de 169 MB
+e incluiría tus credenciales y el `.venv` de macOS.
+
+### Limitaciones conocidas
+
+- **Una sola instancia, un solo worker.** El deduplicador de mensajes vive en memoria del proceso:
+  con dos instancias, un reintento de Meta cae en la otra y el usuario recibe la respuesta
+  duplicada. No agregar réplicas hasta que el dedup sea persistente (Sprint 2).
+- **Railway sólo chequea el health al desplegar, nunca después.** Si el proceso se cuelga sin
+  morir, hay que reiniciarlo a mano.
+- **Un redeploy mata las tareas en vuelo.** Meta ya recibió el 200, así que ese mensaje no se
+  responde ni se reintenta. No redeployar durante una demo.
+
+---
+
 ## Desarrollo
 
 ```bash
-pytest                # tests (no necesitan red ni base de datos)
-pytest --cov=src      # tests con cobertura
-ruff check .          # linting
-ruff format .         # formato
-mypy src              # tipado estricto
+uv run pytest                # tests (no necesitan red ni base de datos)
+uv run pytest --cov=src      # tests con cobertura
+uv run ruff check .          # linting
+uv run ruff format .         # formato
+uv run mypy src              # tipado estricto
 ```
+
+Los mismos checks corren en CI en cada push
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), más un build del `Dockerfile` para que no
+se rompa sin que nos enteremos. CI no despliega: de eso se encarga Railway al detectar el push.
 
 ### Configuración
 
@@ -286,7 +387,7 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 | PB-004 | Integración WhatsApp Cloud API (webhook + envío/recepción) | ✅ |
 | PB-005 | LangGraph/LangChain + Gemini 1.5 Flash + tool-calling base | ⬜ |
 | PB-006 | Logging estructurado + errores + health checks | 🟡 base lista |
-| PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ⬜ |
+| PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ✅ |
 | PB-009 | Flujo OAuth2 con Google (inicio) | ⬜ |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).

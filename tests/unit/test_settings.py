@@ -180,6 +180,44 @@ def test_supabase_se_valida_antes_que_whatsapp() -> None:
         _settings(environment=Environment.PRODUCTION, **CREDENCIALES_WHATSAPP)
 
 
+# --- Variables vacías (PB-007) ----------------------------------------------
+#
+# En el panel de una plataforma es trivial dejar una variable declarada pero
+# sin valor. Sin normalizar, `SecretStr('')` no es None y las comprobaciones
+# `is not None` la darían por configurada.
+
+
+@pytest.mark.parametrize("vacio", ["", "   ", "\t"], ids=["vacio", "espacios", "tab"])
+def test_una_variable_vacia_se_trata_como_ausente(vacio: str) -> None:
+    settings = _settings(whatsapp_app_secret=vacio, supabase_url=vacio)
+
+    assert settings.whatsapp_app_secret is None
+    assert settings.supabase_url is None
+
+
+def test_un_app_secret_vacio_no_exige_firma() -> None:
+    """Si quedara como SecretStr(''), el webhook validaría HMAC contra ''."""
+    assert _settings(whatsapp_app_secret="").firma_exigida is False
+
+
+@pytest.mark.parametrize(
+    ("campo", "esperado"),
+    [
+        ("supabase_url", "SUPABASE_URL"),
+        ("token_encryption_key", "TOKEN_ENCRYPTION_KEY"),
+        ("whatsapp_token", "WHATSAPP_TOKEN"),
+        ("whatsapp_verify_token", "WHATSAPP_VERIFY_TOKEN"),
+        ("whatsapp_app_secret", "WHATSAPP_APP_SECRET"),
+    ],
+)
+def test_produccion_rechaza_una_credencial_vacia(campo: str, esperado: str) -> None:
+    """Una variable vacía tiene que fallar igual que una ausente (RF-18)."""
+    todas = {**CREDENCIALES, **CREDENCIALES_WHATSAPP, campo: ""}
+
+    with pytest.raises(ValidationError, match=esperado):
+        _settings(environment=Environment.PRODUCTION, **todas)
+
+
 def test_las_credenciales_de_whatsapp_no_aparecen_en_el_repr() -> None:
     representacion = repr(_settings(**CREDENCIALES_WHATSAPP))
 

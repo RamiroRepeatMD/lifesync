@@ -10,7 +10,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -69,6 +69,35 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str | None = None  # nuestro número; arma la URL de envío
     whatsapp_verify_token: SecretStr | None = None  # sólo para el handshake GET
     whatsapp_app_secret: SecretStr | None = None  # firma HMAC de los POST; NO es el verify token
+
+    @field_validator(
+        "supabase_url",
+        "supabase_key",
+        "supabase_jwt_secret",
+        "token_encryption_key",
+        "whatsapp_token",
+        "whatsapp_phone_number_id",
+        "whatsapp_verify_token",
+        "whatsapp_app_secret",
+        mode="before",
+    )
+    @classmethod
+    def _vacio_es_ausente(cls, valor: object) -> object:
+        """Trata una variable vacía como no configurada.
+
+        En el panel de una plataforma es trivial dejar `WHATSAPP_APP_SECRET=`
+        sin valor. Sin esto, el campo quedaría en `SecretStr('')`, que **no es
+        None**, así que las comprobaciones de tipo `is not None` lo darían por
+        configurado: la app arrancaría en producción y el webhook validaría las
+        firmas HMAC contra un secreto vacío, que cualquiera puede reproducir
+        (RF-18).
+
+        Normalizar acá arregla a todos los consumidores de una vez, en vez de
+        pedirle a cada uno que se acuerde de comprobar el caso.
+        """
+        if isinstance(valor, str) and not valor.strip():
+            return None
+        return valor
 
     @property
     def is_production(self) -> bool:

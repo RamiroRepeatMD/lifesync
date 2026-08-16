@@ -1,0 +1,98 @@
+# ============================================================================
+# Qué NO entra en la imagen (PB-007)
+#
+# OJO: .gitignore y .dockerignore son mecanismos distintos. Que un archivo esté
+# ignorado por git NO lo excluye del contexto de build. Sin este archivo, un
+# `COPY . .` metería en la imagen:
+#
+#   - .env con credenciales reales (y Settings lo LEERÍA, porque model_config
+#     tiene env_file=".env")
+#   - .venv/ de macOS: 147 MB de wheels que no sirven en Linux
+#   - .mypy_cache/: 19 MB
+#
+# Contexto de build: 169 MB sin este archivo, ~1,5 MB con él.
+# ============================================================================
+
+# ---- Secretos: lo más importante de esta lista -----------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+service-account*.json
+
+# ---- Entornos virtuales ----------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Cachés de herramientas ------------------------------------------------
+.uv/
+.uv-cache/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ---- Control de versiones --------------------------------------------------
+.git/
+.gitignore
+.github/
+
+# ---- Cosas que no hacen falta en runtime -----------------------------------
+tests/
+docs/
+db/
+*.md
+# README.md sí entra: pyproject.toml declara `readme = "README.md"` y hatchling
+# lo lee al construir el paquete. Sin esta excepción el build falla con
+# "Readme file does not exist". El orden importa: la exclusión va primero.
+!README.md
+
+# ---- Build artifacts -------------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# ---- Herramientas de agentes de IA -----------------------------------------
+.agents/
+.claude/
+skills-lock.json
+
+# ---- Editores y sistema operativo ------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ---- Docker y despliegue ---------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose*.yml
+railway.json
+
+# ---- Logs ------------------------------------------------------------------
+*.log
+logs/
+tmp/
+.cache/

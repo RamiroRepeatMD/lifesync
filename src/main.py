@@ -26,7 +26,10 @@ def main() -> None:
         "src.main:app",
         host=settings.host,
         port=settings.port,
-        reload=settings.reload,
+        # Nunca autorecarga en producción: `.env.example` trae RELOAD=true, y si
+        # ese valor llega al contenedor arrancaría un supervisor de recarga que
+        # duplica la memoria y rompe el apagado ordenado.
+        reload=settings.reload and not settings.is_production,
         # None: que uvicorn no pise la configuración de structlog.
         log_config=None,
     )
