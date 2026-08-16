@@ -55,6 +55,13 @@ tmp/
 *.swo
 *~
 
+# ---- Herramientas de agentes de IA -----------------------------------------
+# Configuración y skills locales: son tooling del entorno de desarrollo, no
+# parte del entregable del proyecto.
+.agents/
+.claude/
+skills-lock.json
+
 # ---- Sistema operativo -----------------------------------------------------
 .DS_Store
 .DS_Store?
