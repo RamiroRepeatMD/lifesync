@@ -25,7 +25,10 @@ dependencies = [
     "websockets>=13,<16",
 ]
 
-[project.optional-dependencies]
+# Grupo de dependencias PEP 735: `uv sync` lo instala por defecto, y NO se
+# publica como extra del paquete. Es lo correcto para herramientas que sólo
+# hacen falta al desarrollar.
+[dependency-groups]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

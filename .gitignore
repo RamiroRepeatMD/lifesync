@@ -11,6 +11,18 @@ venv/
 env/
 ENV/
 
+# ---- uv --------------------------------------------------------------------
+# Caché y estado local del gestor de entornos.
+.uv/
+.uv-cache/
+#
+# uv.lock NO se ignora a propósito: LifeSync es una aplicación que se despliega
+# (PB-007), y versionar el lock es lo que garantiza que Railway/Render instalen
+# exactamente el mismo árbol de dependencias que se probó local. Es además el
+# registro de resoluciones no obvias, como el downgrade de websockets a <16 que
+# impone `realtime`. Si algún día esto pasara a ser una librería, ahí sí
+# correspondería ignorarlo.
+
 # ---- Build / distribución --------------------------------------------------
 build/
 dist/
