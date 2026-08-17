@@ -18,7 +18,9 @@ from fastapi import Depends
 from starlette.requests import Request
 from supabase import AsyncClient
 
+from src.application.ports.agente import AgenteConversacional
 from src.application.ports.whatsapp import MensajeroWhatsApp
+from src.application.services.agente_degradado import AgenteDegradado
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
 from src.domain.exceptions import ServiceUnavailableError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
@@ -101,17 +103,36 @@ def get_mensajero_whatsapp(request: Request) -> MensajeroWhatsApp | None:
     return ClienteWhatsApp(cliente, settings)
 
 
+def get_agente(request: Request) -> AgenteConversacional:
+    """Agente conversacional, o el degradado si falta `GOOGLE_API_KEY` (PB-005).
+
+    Nunca devuelve None, a diferencia del mensajero: sin agente el sistema
+    igual tiene algo que contestar, así que en vez de propagar un `Optional`
+    hasta el caso de uso se entrega un *null object*.
+    """
+    agente: AgenteConversacional | None = request.app.state.agente
+    return agente if agente is not None else AgenteDegradado()
+
+
 def get_procesador_de_mensajes(request: Request) -> ProcesarMensajeEntrante | None:
     """Caso de uso ya armado, o None si falta la base o el mensajero.
 
     Se construye acá y no dentro del `BackgroundTask` porque ahí el `Request`
     ya no está disponible.
+
+    Que falte el agente NO lo anula: los comandos fijos siguen contestando y el
+    lenguaje natural recibe un aviso honesto. Que falte la base o el canal sí,
+    porque ahí no hay nada que se pueda hacer.
     """
     supabase: AsyncClient | None = request.app.state.supabase
     mensajero = get_mensajero_whatsapp(request)
     if supabase is None or mensajero is None:
         return None
-    return ProcesarMensajeEntrante(SupabaseUsuarioRepository(supabase), mensajero)
+    return ProcesarMensajeEntrante(
+        SupabaseUsuarioRepository(supabase),
+        mensajero,
+        get_agente(request),
+    )
 
 
 def get_deduplicador_whatsapp(request: Request) -> DeduplicadorDeMensajes:
@@ -125,6 +146,7 @@ SupabaseDep = Annotated[AsyncClient, Depends(get_supabase_client)]
 OAuthTokenRepositoryDep = Annotated[OAuthTokenRepository, Depends(get_oauth_token_repository)]
 UsuarioRepositoryDep = Annotated[UsuarioRepository, Depends(get_usuario_repository)]
 MensajeroWhatsAppDep = Annotated[MensajeroWhatsApp | None, Depends(get_mensajero_whatsapp)]
+AgenteDep = Annotated[AgenteConversacional, Depends(get_agente)]
 ProcesadorDeMensajesDep = Annotated[
     ProcesarMensajeEntrante | None, Depends(get_procesador_de_mensajes)
 ]

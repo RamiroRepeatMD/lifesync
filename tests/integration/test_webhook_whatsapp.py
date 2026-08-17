@@ -10,11 +10,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from src.application.services.router_de_comandos import AYUDA, NO_ENTIENDO
+from src.application.services.router_de_comandos import AYUDA
 from src.domain.exceptions import RepositoryError
 from src.infrastructure.external.whatsapp.firma import HEADER_FIRMA, firmar
 from tests.conftest import APP_SECRET, VERIFY_TOKEN
-from tests.dobles import MensajeroFalso, RepositorioUsuarioEnMemoria
+from tests.dobles import AgenteFalso, MensajeroFalso, RepositorioUsuarioEnMemoria
 from tests.payloads_meta import (
     PARAM_CHALLENGE,
     PARAM_MODO,
@@ -140,12 +140,16 @@ def test_da_de_alta_al_usuario_que_escribe(
     assert repositorio_usuarios._por_telefono.get(TELEFONO_E164) is not None
 
 
-def test_contesta_al_lenguaje_natural_con_el_fallback(
-    client_con_whatsapp: TestClient, mensajero_falso: MensajeroFalso
+def test_el_lenguaje_natural_llega_al_agente(
+    client_con_whatsapp: TestClient,
+    mensajero_falso: MensajeroFalso,
+    agente_falso: AgenteFalso,
 ) -> None:
+    """El circuito completo de PB-005: webhook → caso de uso → agente → envío."""
     _postear(client_con_whatsapp, webhook_fresco(texto="agendame algo el jueves"))
 
-    assert mensajero_falso.textos == [NO_ENTIENDO]
+    assert agente_falso.textos == ["agendame algo el jueves"]
+    assert mensajero_falso.textos == [agente_falso.respuesta]
 
 
 def test_un_acuse_de_entrega_no_genera_respuesta(
@@ -224,7 +228,7 @@ def test_si_falla_el_procesamiento_el_mensaje_se_puede_reintentar(
     mensajero_falso.enviados.clear()
     _postear(client_con_whatsapp, cuerpo)
 
-    assert mensajero_falso.textos == [NO_ENTIENDO]
+    assert len(mensajero_falso.textos) == 1
 
 
 def test_en_modo_degradado_devuelve_200_y_no_explota(client: TestClient) -> None:

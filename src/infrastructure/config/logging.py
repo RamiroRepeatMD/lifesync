@@ -38,8 +38,27 @@ _LOGGERS_A_UNIFICAR = ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi")
 #    Nuestro RequestContextMiddleware ya emite `http.request` con `path` sin
 #    query, así que no se pierde trazabilidad al callarlo.
 #
+# 3. El agente (PB-005). El stack de Gemini y de LangChain loguea en DEBUG los
+#    payloads que manda y recibe, y esos payloads son el prompt entero: el
+#    system prompt, el historial de la conversación y lo que acaba de escribir
+#    la persona. `google.auth` y `urllib3` entran por debajo, vía `requests`.
+#    Es el vector más gordo de los tres, porque no filtra un identificador
+#    sino el contenido íntegro de la charla.
+#
 # A WARNING seguimos viendo los fallos, pero no el tráfico normal.
-_LOGGERS_SILENCIADOS = ("httpx", "httpx2", "httpcore", "hpack", "uvicorn.access")
+_LOGGERS_SILENCIADOS = (
+    "httpx",
+    "httpx2",
+    "httpcore",
+    "hpack",
+    "uvicorn.access",
+    "google_genai",
+    "google.auth",
+    "langchain_core",
+    "langchain_google_genai",
+    "langgraph",
+    "urllib3",
+)
 NIVEL_LOGGERS_SILENCIADOS = logging.WARNING
 
 

@@ -84,7 +84,11 @@ async def readiness(request: Request, response: Response) -> ReadinessResponse:
     Devuelve 503 en vez de lanzar una excepción: un health check informa
     estado, no es un error de la aplicación.
     """
-    dependencias = [await _estado_de_supabase(request), _estado_de_whatsapp(request)]
+    dependencias = [
+        await _estado_de_supabase(request),
+        _estado_de_whatsapp(request),
+        _estado_del_agente(request),
+    ]
     listo = all(dependencia.ready for dependencia in dependencias)
 
     if not listo:
@@ -133,3 +137,20 @@ def _estado_de_whatsapp(request: Request) -> DependencyStatus:
         )
 
     return DependencyStatus(name="whatsapp", ready=True)
+
+
+def _estado_del_agente(request: Request) -> DependencyStatus:
+    """Comprueba que el agente esté compilado, sin llamar a Gemini (PB-005).
+
+    Misma razón que con WhatsApp para no hacer I/O: cada llamada al modelo se
+    paga y este endpoint es público y sin límite de tasa. Una sonda cada pocos
+    segundos gastaría la cuota en verificar algo que ya sabemos.
+    """
+    if request.app.state.agente is None:
+        return DependencyStatus(
+            name="agente",
+            ready=False,
+            detail="No configurado: falta GOOGLE_API_KEY. Sólo responden los comandos fijos.",
+        )
+
+    return DependencyStatus(name="agente", ready=True)

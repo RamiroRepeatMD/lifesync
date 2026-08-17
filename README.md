@@ -253,8 +253,8 @@ Antes del primer deploy, correr en el SQL Editor de Supabase los archivos de
 
 ### 3. Cargar las variables
 
-En **Variables**, y **las nueve juntas**: el validador corta en el primer grupo que falla, así que
-de a una necesitarías cuatro deploys para descubrir las cuatro que faltan.
+En **Variables**, y **todas juntas**: el validador corta en el primer grupo que falla, así que
+de a una necesitarías cinco deploys para descubrir las cinco que faltan.
 
 | Variable | Valor |
 |---|---|
@@ -266,10 +266,16 @@ de a una necesitarías cuatro deploys para descubrir las cuatro que faltan.
 | `WHATSAPP_PHONE_NUMBER_ID` | ID de tu número |
 | `WHATSAPP_VERIFY_TOKEN` | el que pusiste en Meta |
 | `WHATSAPP_APP_SECRET` | App Secret de Meta |
+| `GOOGLE_API_KEY` | key de Gemini (PB-005) |
+| `GEMINI_MODEL` | *(opcional)* `gemini-3.5-flash` |
 | `LOG_LEVEL` | `INFO` |
 
-Marcá como **Sealed** las cinco sensibles: una vez selladas, Railway no vuelve a mostrar el valor
+Marcá como **Sealed** las seis sensibles: una vez selladas, Railway no vuelve a mostrar el valor
 ni por la UI ni por la API.
+
+> `GOOGLE_API_KEY` es obligatoria desde PB-005: **cargala antes de desplegar** o el servicio no
+> levanta. Y no alcanza con tenerla: la API "Generative Language" tiene que estar habilitada en el
+> proyecto de Google Cloud, o cada respuesta del agente falla con 403.
 
 **No definas `PORT`** (lo inyecta Railway), ni `RELOAD`, ni `LOG_JSON` (en producción el formato ya
 es JSON).
@@ -357,11 +363,13 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `WHATSAPP_PHONE_NUMBER_ID` | — | ID de nuestro número de negocio |
 | `WHATSAPP_VERIFY_TOKEN` | — | Handshake GET del webhook (lo inventás vos) |
 | `WHATSAPP_APP_SECRET` | — | Firma HMAC de los POST. **No es el verify token** |
+| `GOOGLE_API_KEY` | — | Key de Gemini para el agente conversacional |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Modelo a usar. La cuota gratuita es por modelo y por día |
 
-Las tres últimas de Supabase son opcionales fuera de producción (modo degradado) y
-**obligatorias** con `ENVIRONMENT=production`: sin ellas el arranque falla, para no desplegar
-nunca sin cifrado. Los secretos de WhatsApp, Google y Gemini están documentados en
-`.env.example` y se activan en la tarea que los consume.
+Las tres de Supabase son opcionales fuera de producción (modo degradado) y **obligatorias** con
+`ENVIRONMENT=production`: sin ellas el arranque falla, para no desplegar nunca sin cifrado. Lo
+mismo vale para las de WhatsApp y para `GOOGLE_API_KEY`. Los secretos de Google OAuth están
+documentados en `.env.example` y se activan en la tarea que los consume (PB-009).
 
 ### Logging
 
@@ -385,7 +393,7 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 | PB-002 | Setup FastAPI + dependencias + config por entornos | ✅ |
 | PB-003 | Supabase (PostgreSQL + Auth + storage de tokens) | ✅ |
 | PB-004 | Integración WhatsApp Cloud API (webhook + envío/recepción) | ✅ |
-| PB-005 | LangGraph/LangChain + Gemini 1.5 Flash + tool-calling base | ⬜ |
+| PB-005 | LangGraph/LangChain + Gemini + tool-calling base | ✅ |
 | PB-006 | Logging estructurado + errores + health checks | 🟡 base lista |
 | PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ✅ |
 | PB-009 | Flujo OAuth2 con Google (inicio) | ⬜ |

@@ -8,10 +8,18 @@ cifrado y no en claro.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import UUID, uuid4
 
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
+
+from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
+from src.application.ports.agente import AgenteConversacional
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.usuario import Usuario
@@ -184,6 +192,68 @@ class MensajeroFalso(MensajeroWhatsApp):
     def textos(self) -> list[str]:
         """Sólo los textos, para aserciones más cortas."""
         return [texto for _, texto in self.enviados]
+
+
+class AgenteFalso(AgenteConversacional):
+    """Doble del puerto del agente: registra las consultas en vez de llamar a Gemini."""
+
+    def __init__(self, respuesta: str = "respuesta del agente") -> None:
+        self.consultas: list[ConsultaDelUsuario] = []
+        self.respuesta = respuesta
+        self.fallar_con: Exception | None = None
+
+    async def responder(self, consulta: ConsultaDelUsuario) -> str:
+        self.consultas.append(consulta)
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        return self.respuesta
+
+    @property
+    def textos(self) -> list[str]:
+        """Sólo lo que se le preguntó, para aserciones más cortas."""
+        return [consulta.texto for consulta in self.consultas]
+
+
+class ModeloFalso(BaseChatModel):
+    """Chat model de mentira, para ejercitar el grafo sin red ni API key.
+
+    Devuelve las respuestas de `guion` en orden, una por invocación. Poniendo
+    un `AIMessage` con `tool_calls` en la primera y uno con texto en la segunda
+    se recorre el ciclo completo agente → herramientas → agente.
+
+    Registra cada lista de mensajes que recibió, que es lo que permite afirmar
+    que el system prompt viaja siempre y que el historial se recortó.
+    """
+
+    guion: list[AIMessage] = Field(default_factory=list)
+    recibidos: list[list[BaseMessage]] = Field(default_factory=list)
+    herramientas_asociadas: list[Any] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "modelo-falso"
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> ModeloFalso:
+        """Recuerda con qué herramientas se lo ató y se devuelve a sí mismo.
+
+        Devolver `self` y no un `Runnable` envuelto es a propósito: mantiene
+        accesible `recibidos` después del bind, que es donde están las
+        aserciones.
+        """
+        self.herramientas_asociadas = list(tools)
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.recibidos.append(list(messages))
+        indice = min(len(self.recibidos) - 1, len(self.guion) - 1)
+        respuesta = self.guion[indice] if self.guion else AIMessage("")
+        return ChatResult(generations=[ChatGeneration(message=respuesta)])
 
 
 class RepositorioOAuthTokenEnMemoria(OAuthTokenRepository):

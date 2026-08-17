@@ -18,11 +18,19 @@ dependencies = [
     "structlog>=24.4.0",
     "supabase>=2.31.0,<3.0.0",
     "cryptography>=44.0.0",  # Fernet: cifrado de tokens en reposo (RF-18)
-    "httpx>=0.26,<0.29",     # se importa directo para traducir sus errores de red
+    # El piso lo impone `google-genai` (>=0.28.1); el techo lo elegimos nosotros
+    # para que un 1.0 no entre solo. La ventana real es 0.28.x.
+    "httpx>=0.28.1,<0.29",   # se importa directo para traducir sus errores de red
     # `realtime` (dependencia de supabase) exige websockets <16, y eso baja la
     # versión que trae uvicorn[standard]. Se fija explícito para que el
     # downgrade sea una decisión visible y no un diff sorpresa.
     "websockets>=13,<16",
+    # --- Agente conversacional (PB-005) ---
+    # No se instala el paquete `langchain` completo: con el core, el motor de
+    # grafos y la integración de Gemini alcanza, y la imagen queda más chica.
+    "langgraph>=1.2,<2.0",
+    "langchain-core>=1.5,<2.0",
+    "langchain-google-genai>=4.3,<5.0",
 ]
 
 # Grupo de dependencias PEP 735: `uv sync` lo instala por defecto, y NO se

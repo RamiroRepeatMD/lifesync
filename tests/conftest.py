@@ -13,7 +13,12 @@ from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.persistence.encryption import TokenCipher
 from src.interfaces.api.app import create_app
 from src.interfaces.api.dependencies import get_procesador_de_mensajes
-from tests.dobles import FakeSupabaseClient, MensajeroFalso, RepositorioUsuarioEnMemoria
+from tests.dobles import (
+    AgenteFalso,
+    FakeSupabaseClient,
+    MensajeroFalso,
+    RepositorioUsuarioEnMemoria,
+)
 from tests.payloads_meta import PHONE_NUMBER_ID
 
 # Credenciales de mentira, compartidas por los tests que firman peticiones.
@@ -79,6 +84,12 @@ def mensajero_falso() -> MensajeroFalso:
 
 
 @pytest.fixture
+def agente_falso() -> AgenteFalso:
+    """Doble del puerto del agente conversacional (PB-005)."""
+    return AgenteFalso()
+
+
+@pytest.fixture
 def repositorio_usuarios() -> RepositorioUsuarioEnMemoria:
     """Doble en memoria del repositorio de usuarios."""
     return RepositorioUsuarioEnMemoria()
@@ -89,6 +100,7 @@ def client_con_whatsapp(
     settings_whatsapp: Settings,
     repositorio_usuarios: RepositorioUsuarioEnMemoria,
     mensajero_falso: MensajeroFalso,
+    agente_falso: AgenteFalso,
 ) -> Iterator[TestClient]:
     """App con el webhook operativo y la persistencia simulada.
 
@@ -98,7 +110,7 @@ def client_con_whatsapp(
     """
     app = create_app(settings_whatsapp)
     app.dependency_overrides[get_procesador_de_mensajes] = lambda: ProcesarMensajeEntrante(
-        repositorio_usuarios, mensajero_falso
+        repositorio_usuarios, mensajero_falso, agente_falso
     )
     with TestClient(app) as cliente:
         yield cliente
@@ -110,12 +122,16 @@ def client_con_whatsapp_y_supabase(
     settings_whatsapp: Settings,
     supabase_falso: FakeSupabaseClient,
     cipher: TokenCipher,
+    agente_falso: AgenteFalso,
 ) -> Iterator[TestClient]:
-    """App con ambas dependencias operativas, para el readiness completo."""
+    """App con todas las dependencias operativas, para el readiness completo."""
     app = create_app(settings_whatsapp)
     with TestClient(app) as cliente:
         app.state.supabase = supabase_falso
         app.state.token_cipher = cipher
+        # Se pisa con el doble en vez de configurar GOOGLE_API_KEY para que el
+        # readiness dé 200 sin construir el modelo real.
+        app.state.agente = agente_falso
         yield cliente
 
 

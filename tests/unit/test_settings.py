@@ -23,6 +23,11 @@ CREDENCIALES_WHATSAPP: dict[str, object] = {
     "whatsapp_app_secret": "app-secret-de-prueba",
 }
 
+# PB-005 sumó el agente: sin key, producción arranca pero no interpreta nada.
+CREDENCIALES_AGENTE: dict[str, object] = {
+    "google_api_key": "gemini-key-de-prueba",
+}
+
 
 def _settings(**overrides: object) -> Settings:
     """Settings aisladas del `.env` local, para que el test sea determinístico."""
@@ -35,6 +40,7 @@ def _settings_produccion(**overrides: object) -> Settings:
         environment=Environment.PRODUCTION,
         **CREDENCIALES,
         **CREDENCIALES_WHATSAPP,
+        **CREDENCIALES_AGENTE,
         **overrides,
     )
 
@@ -171,13 +177,54 @@ def test_produccion_sin_una_credencial_de_whatsapp_no_arranca(faltante: str, esp
     incompletas = {k: v for k, v in CREDENCIALES_WHATSAPP.items() if k != faltante}
 
     with pytest.raises(ValidationError, match=esperado):
-        _settings(environment=Environment.PRODUCTION, **CREDENCIALES, **incompletas)
+        _settings(
+            environment=Environment.PRODUCTION,
+            **CREDENCIALES,
+            **incompletas,
+            **CREDENCIALES_AGENTE,
+        )
 
 
 def test_supabase_se_valida_antes_que_whatsapp() -> None:
     """El orden importa: mantiene el mensaje que ya esperaban los tests de PB-003."""
     with pytest.raises(ValidationError, match="TOKEN_ENCRYPTION_KEY"):
         _settings(environment=Environment.PRODUCTION, **CREDENCIALES_WHATSAPP)
+
+
+# --- Agente conversacional (PB-005) -----------------------------------------
+
+
+def test_sin_api_key_el_agente_no_esta_configurado() -> None:
+    assert _settings().agente_configurado is False
+
+
+def test_con_api_key_el_agente_esta_configurado() -> None:
+    assert _settings(google_api_key="una-key").agente_configurado is True
+
+
+@pytest.mark.parametrize("vacio", ["", "   "], ids=["vacio", "espacios"])
+def test_una_api_key_vacia_cuenta_como_ausente(vacio: str) -> None:
+    """Si quedara como SecretStr(''), el agente arrancaría y fallaría en cada turno."""
+    settings = _settings(google_api_key=vacio)
+
+    assert settings.google_api_key is None
+    assert settings.agente_configurado is False
+
+
+def test_produccion_sin_api_key_de_gemini_no_arranca() -> None:
+    """Degradar en silencio en producción es peor que no levantar."""
+    with pytest.raises(ValidationError, match="GOOGLE_API_KEY"):
+        _settings(environment=Environment.PRODUCTION, **CREDENCIALES, **CREDENCIALES_WHATSAPP)
+
+
+def test_el_modelo_por_defecto_es_uno_que_la_cuenta_puede_usar() -> None:
+    """Verificado contra la API real: 1.5 no existe y 2.5 da 404 a cuentas nuevas."""
+    assert _settings().gemini_model == "gemini-3.5-flash"
+
+
+def test_el_modelo_se_puede_cambiar_por_entorno() -> None:
+    """La cuota gratuita es por modelo y por día: cambiarlo es la salida de emergencia."""
+    assert _settings(gemini_model="gemini-3.5-flash-lite").gemini_model == "gemini-3.5-flash-lite"
 
 
 # --- Variables vacías (PB-007) ----------------------------------------------
@@ -208,11 +255,12 @@ def test_un_app_secret_vacio_no_exige_firma() -> None:
         ("whatsapp_token", "WHATSAPP_TOKEN"),
         ("whatsapp_verify_token", "WHATSAPP_VERIFY_TOKEN"),
         ("whatsapp_app_secret", "WHATSAPP_APP_SECRET"),
+        ("google_api_key", "GOOGLE_API_KEY"),
     ],
 )
 def test_produccion_rechaza_una_credencial_vacia(campo: str, esperado: str) -> None:
     """Una variable vacía tiene que fallar igual que una ausente (RF-18)."""
-    todas = {**CREDENCIALES, **CREDENCIALES_WHATSAPP, campo: ""}
+    todas = {**CREDENCIALES, **CREDENCIALES_WHATSAPP, **CREDENCIALES_AGENTE, campo: ""}
 
     with pytest.raises(ValidationError, match=esperado):
         _settings(environment=Environment.PRODUCTION, **todas)

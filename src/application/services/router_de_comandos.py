@@ -1,23 +1,31 @@
-"""Router mínimo de comandos (PB-004, base de RF-11).
+"""Comandos de respuesta fija (RF-11).
 
-Es el andamiaje que ocupa el lugar del agente hasta PB-005: reconoce un puñado
-de comandos fijos y para todo lo demás responde con honestidad que todavía no
-sabe interpretar lenguaje natural.
+Con PB-005 el lenguaje natural pasó a manejarlo el agente, pero los comandos
+siguen siendo determinísticos, y es una decisión, no un resto del andamiaje
+anterior:
 
-Es una **función pura**: sin estado, sin E/S, sin dependencias. Eso hace que se
-pueda testear con una tabla de casos y sin un solo doble, y que PB-005 la
-reemplace cambiando una línea del caso de uso.
+- **RF-11 pide un sistema de ayuda.** Si `/ayuda` dependiera del modelo, la
+  ayuda cambiaría de texto en cada invocación y podría inventar capacidades que
+  el sistema no tiene.
+- **Sigue funcionando sin API key.** Es lo único que contesta igual en modo
+  degradado.
+- No gasta tokens ni latencia en algo cuya respuesta ya conocemos.
+
+Es una **función pura**: sin estado, sin E/S, sin dependencias. Se testea con
+una tabla de casos y sin un solo doble.
 """
 
 from __future__ import annotations
 
 AYUDA = (
     "Soy LifeSync, tu asistente personal.\n\n"
-    "Todavía estoy en construcción. Por ahora entiendo:\n"
+    "Escribime en lenguaje natural y hago lo que pueda: preguntame la hora, "
+    "pedime que te ayude a organizarte o contame qué necesitás.\n\n"
+    "Comandos fijos:\n"
     "• /ayuda — esta lista\n"
     "• /estado — qué cuentas tenés conectadas\n\n"
-    "Muy pronto vas a poder pedirme cosas en lenguaje natural: agendar "
-    "reuniones, crear recordatorios y consultar tu correo."
+    "Todavía estoy en construcción: cuando conectes tu cuenta de Google voy a "
+    "poder gestionar tu calendario, tus tareas y tu correo."
 )
 
 ESTADO = (
@@ -26,23 +34,23 @@ ESTADO = (
     "pueda gestionar tu calendario y tu correo."
 )
 
-NO_ENTIENDO = (
-    "Todavía no sé interpretar mensajes libres, pero ya te estoy escuchando.\n\n"
-    "Escribí /ayuda para ver lo que puedo hacer hoy."
-)
+_RESPUESTAS: dict[str, str] = {
+    "/ayuda": AYUDA,
+    "/estado": ESTADO,
+}
 
 
-def decidir_respuesta(texto: str) -> str:
-    """Devuelve el texto con el que hay que contestar un mensaje entrante.
+def respuesta_fija(texto: str) -> str | None:
+    """Devuelve la respuesta canónica de un comando, o None si no es un comando.
+
+    `None` significa "esto es lenguaje natural": el caso de uso se lo pasa al
+    agente. Devolver None en vez de un texto de descarte es lo que permite que
+    el agente sea el que decide, y no este router.
 
     El comando se toma del primer token, así que "/Ayuda" y "/ayuda por favor"
     funcionan igual.
     """
     primer_token = texto.strip().lower().split(maxsplit=1)
-    comando = primer_token[0] if primer_token else ""
-
-    if comando == "/ayuda":
-        return AYUDA
-    if comando == "/estado":
-        return ESTADO
-    return NO_ENTIENDO
+    if not primer_token:
+        return None
+    return _RESPUESTAS.get(primer_token[0])

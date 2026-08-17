@@ -18,7 +18,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from src.domain.exceptions import (
+    AgenteNoDisponibleError,
     ConfirmationRequiredError,
+    CuotaDeAgenteAgotadaError,
     DomainError,
     EncryptionError,
     EntityNotFoundError,
@@ -43,6 +45,12 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     # DomainError, así que sin entrada propia el recorrido del MRO las dejaría
     # en 400 y una caída de la base se reportaría como "pediste algo mal".
     ServiceUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    # El modelo no contestó: es una dependencia externa caída o lenta, no un
+    # bug nuestro, así que 503 y no 500 (PB-005). La falta de cuota va también
+    # a 503 y no a 429: el que se quedó sin cupo somos nosotros contra Google,
+    # no el cliente contra nuestra API.
+    CuotaDeAgenteAgotadaError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    AgenteNoDisponibleError: status.HTTP_503_SERVICE_UNAVAILABLE,
     RepositoryError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     EncryptionError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     InfrastructureError: status.HTTP_500_INTERNAL_SERVER_ERROR,

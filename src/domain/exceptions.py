@@ -87,6 +87,30 @@ class ServiceUnavailableError(InfrastructureError):
     mensaje_usuario = "El servicio no está disponible por ahora. Probá más tarde."
 
 
+class AgenteNoDisponibleError(InfrastructureError):
+    """El agente conversacional no pudo producir una respuesta (PB-005).
+
+    Cubre todo lo que puede salir mal del lado del modelo: que no responda a
+    tiempo, que rechace la petición, que devuelva vacío. Se distingue de
+    `MensajeNoEnviadoError` porque el canal de WhatsApp sigue sano: el aviso de
+    RF-19 le llega igual al usuario.
+    """
+
+    mensaje_usuario = "No pude pensar una respuesta ahora mismo. Probá de nuevo en un minuto."
+
+
+class CuotaDeAgenteAgotadaError(AgenteNoDisponibleError):
+    """Se acabó la cuota de la API del modelo (PB-005).
+
+    Se separa de su madre porque el usuario puede hacer algo al respecto:
+    esperar. Decirle "hubo un problema técnico" cuando en realidad hay que
+    aguantar un minuto lo deja probando una y otra vez, y cada intento gasta
+    más cuota.
+    """
+
+    mensaje_usuario = "Estoy al límite de consultas por ahora. Probá de nuevo en un minuto."
+
+
 class EncryptionError(InfrastructureError):
     """No se pudo cifrar o descifrar un dato sensible (RF-18).
 

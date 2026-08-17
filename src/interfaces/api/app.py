@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await _iniciar_persistencia(app, settings)
     _iniciar_whatsapp(app, settings)
+    _iniciar_agente(app, settings)
     try:
         yield
     finally:
@@ -109,6 +110,28 @@ def _iniciar_whatsapp(app: FastAPI, settings: Settings) -> None:
     logger.info("whatsapp.conectado", firma_exigida=settings.firma_exigida)
 
 
+def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
+    """Compila el grafo del agente, si hay API key (PB-005).
+
+    Se hace una sola vez: el grafo lleva adentro la memoria de todas las
+    conversaciones (RF-09), así que rearmarlo por mensaje sería empezar cada
+    charla de cero.
+    """
+    if not settings.agente_configurado:
+        logger.warning(
+            "agente.no_configurado",
+            motivo="falta GOOGLE_API_KEY",
+            consecuencia="los comandos siguen andando; el lenguaje natural no",
+        )
+        return
+
+    # Import diferido: sin key no se paga el costo de importar todo el stack de
+    # LangChain, que es casi un segundo de arranque.
+    from src.infrastructure.llm.agente_gemini import crear_agente_gemini
+
+    app.state.agente = crear_agente_gemini(settings)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Construye y configura la aplicación.
 
@@ -134,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.supabase = None
     app.state.token_cipher = None
     app.state.whatsapp = None
+    app.state.agente = None
     # Vive todo el proceso: es lo que evita responder dos veces cuando Meta
     # reintrega el mismo mensaje.
     app.state.deduplicador_whatsapp = DeduplicadorDeMensajes()

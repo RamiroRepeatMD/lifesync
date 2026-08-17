@@ -70,6 +70,24 @@ class Settings(BaseSettings):
     whatsapp_verify_token: SecretStr | None = None  # sólo para el handshake GET
     whatsapp_app_secret: SecretStr | None = None  # firma HMAC de los POST; NO es el verify token
 
+    # --- Agente conversacional (PB-005) ---
+    google_api_key: SecretStr | None = None  # key de Gemini (Google AI Studio)
+    # Elegido por descarte, y cada descarte está verificado contra la API real:
+    #
+    #   gemini-1.5-flash  el del documento de arquitectura. Ya no existe.
+    #   gemini-2.5-flash  aparece en el listado de modelos de la cuenta, pero
+    #                     al invocarlo da 404 "no longer available to new
+    #                     users". Estar listado no es estar habilitado.
+    #   gemini-3.6-flash  anda, pero el plan gratuito da 20 peticiones POR DÍA
+    #                     (GenerateRequestsPerDayPerProjectPerModel-FreeTier).
+    #                     No alcanza para probar y demostrar el mismo día.
+    #
+    # gemini-3.5-flash es GA, sin fecha de baja, contesta en ~1,6-2,1 s y hace
+    # tool-calling bien. La cuota gratuita es POR MODELO Y POR DÍA, así que si
+    # se agota alcanza con mover esta variable —por ejemplo a
+    # gemini-3.5-flash-lite, medido en ~0,7-1,5 s— sin tocar código.
+    gemini_model: str = "gemini-3.5-flash"
+
     @field_validator(
         "supabase_url",
         "supabase_key",
@@ -79,6 +97,7 @@ class Settings(BaseSettings):
         "whatsapp_phone_number_id",
         "whatsapp_verify_token",
         "whatsapp_app_secret",
+        "google_api_key",
         mode="before",
     )
     @classmethod
@@ -125,6 +144,11 @@ class Settings(BaseSettings):
         return all((self.whatsapp_token, self.whatsapp_phone_number_id))
 
     @property
+    def agente_configurado(self) -> bool:
+        """True si el agente conversacional puede hablar con Gemini (PB-005)."""
+        return self.google_api_key is not None
+
+    @property
     def firma_exigida(self) -> bool:
         """True si hay que validar `X-Hub-Signature-256` en los POST entrantes.
 
@@ -166,6 +190,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "En producción es obligatoria WHATSAPP_APP_SECRET: sin ella el webhook "
                 "aceptaría POSTs de cualquiera (RF-18)."
+            )
+        if not self.agente_configurado:
+            raise ValueError(
+                "En producción es obligatoria GOOGLE_API_KEY: sin ella el asistente arranca "
+                "pero contesta que no puede interpretar mensajes, y eso es peor que no arrancar."
             )
         return self
 
