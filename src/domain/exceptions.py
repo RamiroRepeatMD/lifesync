@@ -70,6 +70,17 @@ class RepositoryError(InfrastructureError):
     mensaje_usuario = "No pudimos guardar o recuperar tu información en este momento."
 
 
+class MensajeNoEnviadoError(InfrastructureError):
+    """No se pudo entregar un mensaje al usuario por su canal.
+
+    Se distingue de `RepositoryError` a propósito: cuando falla el canal, no
+    tiene sentido intentar avisarle al usuario *por ese mismo canal*. Si en
+    cambio lo que falló fue la base, el canal sigue sano y el aviso llega.
+    """
+
+    mensaje_usuario = "No pude responderte en este momento."
+
+
 class ServiceUnavailableError(InfrastructureError):
     """Un servicio del que dependemos no está configurado o no responde."""
 

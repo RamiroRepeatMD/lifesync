@@ -14,7 +14,7 @@ import httpx
 import structlog
 
 from src.application.ports.whatsapp import MensajeroWhatsApp
-from src.domain.exceptions import RepositoryError, ServiceUnavailableError
+from src.domain.exceptions import MensajeNoEnviadoError, ServiceUnavailableError
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.infrastructure.config.settings import Settings
 
@@ -33,7 +33,44 @@ TIMEOUT_CONEXION_SEGUNDOS = 5.0
 ENVIOS_CONCURRENTES = 8
 
 # Códigos de Meta que no tiene sentido reintentar: el problema no se arregla solo.
-CODIGOS_PERMANENTES = frozenset({131026, 131047, 131051, 100, 131030})
+# 190 = token vencido o inválido; reintentar con el mismo token no cambia nada.
+CODIGOS_PERMANENTES = frozenset({131026, 131047, 131051, 100, 131030, 190})
+
+# --- El 9 de los móviles argentinos -----------------------------------------
+#
+# El circuito argentino es asimétrico y hay que corregirlo justo acá, en el
+# borde de salida. Verificado empíricamente contra la Graph API con un número
+# real:
+#
+#   to: "+5491160007044"  -> 131030 "Recipient phone number not in allowed list"
+#   to: "5491160007044"   -> 131030
+#   to: "+541160007044"   -> entregado, y la respuesta trae wa_id "5491160007044"
+#   to: "541160007044"    -> entregado, mismo wa_id
+#
+# Es decir: Meta ENTREGA los webhooks con el 9, pero al ENVIAR exige el número
+# SIN el 9 y le re-agrega el 9 por su cuenta al resolver el destinatario. El
+# "+" es indistinto para ese matcheo.
+#
+# Por eso la corrección vive en el adaptador y no en `NumeroWhatsApp`: la
+# identidad del usuario —la que se guarda en Supabase y con la que se lo
+# busca— sigue siendo la que Meta entregó, con el 9. Lo único que cambia es
+# el formato de cable del campo `to`.
+PREFIJO_AR_MOVIL = "+549"
+PREFIJO_AR = "+54"
+
+
+def destino_para_meta(numero: NumeroWhatsApp) -> str:
+    """Convierte el número canónico al formato que Meta acepta en `to`.
+
+    Para los móviles argentinos saca el `9` (ver el comentario de
+    PREFIJO_AR_MOVIL). Para el resto devuelve el número tal cual.
+
+    No modifica la identidad del usuario: `numero.valor` sigue siendo lo que
+    se persiste y con lo que se lo busca.
+    """
+    if numero.valor.startswith(PREFIJO_AR_MOVIL):
+        return PREFIJO_AR + numero.valor[len(PREFIJO_AR_MOVIL) :]
+    return numero.valor
 
 
 class ClienteWhatsApp(MensajeroWhatsApp):
@@ -50,9 +87,9 @@ class ClienteWhatsApp(MensajeroWhatsApp):
         cuerpo: dict[str, Any] = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
-            # Con el "+": si se omite, Meta antepone el código de país de
-            # nuestro número y el mensaje se entrega a otra persona.
-            "to": destino.valor,
+            # Siempre con el "+": si se omite, Meta antepone el código de país
+            # de nuestro número de negocio y el mensaje se entrega a otro.
+            "to": destino_para_meta(destino),
             "type": "text",
             "text": {"preview_url": False, "body": texto},
         }
@@ -68,7 +105,7 @@ class ClienteWhatsApp(MensajeroWhatsApp):
             return await self._cliente.post(self._url_de_envio(), json=cuerpo)
         except httpx.HTTPError as exc:
             logger.error("whatsapp.envio.error_transporte", tipo=type(exc).__name__)
-            raise ServiceUnavailableError("No se pudo contactar a WhatsApp.") from None
+            raise MensajeNoEnviadoError("No se pudo contactar a WhatsApp.") from None
 
     def _url_de_envio(self) -> str:
         """Arma la URL desde la configuración, nunca desde el payload entrante.
@@ -82,14 +119,21 @@ class ClienteWhatsApp(MensajeroWhatsApp):
     def _revisar_respuesta(self, respuesta: httpx.Response, destino: NumeroWhatsApp) -> None:
         """Interpreta la respuesta de Meta y loguea el resultado."""
         if respuesta.status_code >= httpx.codes.BAD_REQUEST:
-            codigo = _codigo_de_error(respuesta)
+            error = _error_de(respuesta)
+            codigo = error.get("code")
             logger.error(
                 "whatsapp.envio.rechazado",
                 status_code=respuesta.status_code,
                 codigo_meta=codigo,
+                subcodigo=error.get("error_subcode"),
+                # Meta explica el rechazo en texto; sin esto hay que salir a
+                # reproducir la llamada con curl para saber qué pasó. No es
+                # dato personal: son diagnósticos de la API.
+                mensaje_meta=error.get("message"),
+                detalle_meta=_detalle_de(error),
                 permanente=codigo in CODIGOS_PERMANENTES,
             )
-            raise RepositoryError(f"WhatsApp rechazó el envío (código {codigo}).")
+            raise MensajeNoEnviadoError(f"WhatsApp rechazó el envío (código {codigo}).")
 
         self._avisar_si_meta_normalizo(respuesta, destino)
         logger.info("whatsapp.mensaje.enviado", status_code=respuesta.status_code)
@@ -122,16 +166,30 @@ class ClienteWhatsApp(MensajeroWhatsApp):
             )
 
 
-def _codigo_de_error(respuesta: httpx.Response) -> int | None:
-    """Extrae `error.code` del cuerpo de una respuesta fallida."""
+def _error_de(respuesta: httpx.Response) -> dict[str, Any]:
+    """Extrae el objeto `error` del cuerpo de una respuesta fallida.
+
+    Devuelve un diccionario vacío si el cuerpo no es JSON o no tiene la forma
+    esperada, para que el llamador no tenga que defenderse.
+    """
     try:
         error = respuesta.json().get("error")
     except ValueError:
+        return {}
+    return error if isinstance(error, dict) else {}
+
+
+def _detalle_de(error: dict[str, Any]) -> str | None:
+    """Saca el texto explicativo de `error.error_data.details`.
+
+    Es donde Meta escribe la causa concreta: por ejemplo, que el destinatario
+    no está en la lista de autorizados.
+    """
+    datos = error.get("error_data")
+    if not isinstance(datos, dict):
         return None
-    if not isinstance(error, dict):
-        return None
-    codigo = error.get("code")
-    return codigo if isinstance(codigo, int) else None
+    detalle = datos.get("details")
+    return detalle if isinstance(detalle, str) else None
 
 
 def create_whatsapp_client(settings: Settings) -> httpx.AsyncClient:

@@ -32,7 +32,7 @@ from starlette.requests import Request
 
 from src.application.dto.mensaje_entrante import MensajeEntrante
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
-from src.domain.exceptions import LifeSyncError
+from src.domain.exceptions import LifeSyncError, MensajeNoEnviadoError
 from src.infrastructure.external.whatsapp.deduplicador import DeduplicadorDeMensajes
 from src.infrastructure.external.whatsapp.firma import HEADER_FIRMA, firma_valida
 from src.infrastructure.external.whatsapp.parser import parsear
@@ -233,7 +233,17 @@ async def _avisar_del_error(
     mensaje: MensajeEntrante,
     exc: Exception,
 ) -> None:
-    """Intenta avisarle al usuario que algo falló (RF-19). Best effort."""
+    """Intenta avisarle al usuario que algo falló (RF-19). Best effort.
+
+    Si lo que falló fue justamente el envío, avisar por el mismo canal roto no
+    puede funcionar: sólo gasta una segunda llamada a Meta y, acumulado,
+    perjudica la calificación de calidad de la cuenta. En ese caso queda el
+    log y nada más.
+    """
+    if isinstance(exc, MensajeNoEnviadoError):
+        logger.info("whatsapp.aviso_de_error_omitido", wamid=mensaje.wamid)
+        return
+
     texto = exc.mensaje_usuario if isinstance(exc, LifeSyncError) else MENSAJE_DE_ERROR
     try:
         await procesador.avisar(mensaje.remitente, texto)
