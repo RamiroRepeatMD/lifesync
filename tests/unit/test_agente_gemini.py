@@ -103,7 +103,12 @@ async def test_devuelve_el_texto_del_ultimo_mensaje() -> None:
 
 async def test_entiende_el_contenido_en_bloques() -> None:
     """Gemini devuelve una lista de bloques cuando mezcla partes."""
-    contenido = [{"type": "text", "text": "primera"}, {"type": "text", "text": "segunda"}]
+    # Anotado y no inferido: `list` es invariante, así que un
+    # `list[dict[str, str]]` no entra donde se espera `list[str | dict]`.
+    contenido: list[str | dict[Any, Any]] = [
+        {"type": "text", "text": "primera"},
+        {"type": "text", "text": "segunda"},
+    ]
     grafo = GrafoFalso([AIMessage(contenido)])
 
     respuesta = await AgenteGemini(grafo).responder(_consulta())

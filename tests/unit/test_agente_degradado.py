@@ -50,7 +50,7 @@ def test_no_depende_del_stack_de_langchain() -> None:
     fuente = Path(agente_degradado.__file__).read_text(encoding="utf-8")
     arbol = ast.parse(fuente)
 
-    modulos = set()
+    modulos: set[str] = set()
     for nodo in ast.walk(arbol):
         if isinstance(nodo, ast.Import):
             modulos.update(alias.name for alias in nodo.names)
