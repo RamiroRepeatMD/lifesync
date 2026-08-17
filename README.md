@@ -399,3 +399,6 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 | PB-009 | Flujo OAuth2 con Google (inicio) | ⬜ |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
+
+<img width="303" height="626" alt="image" src="https://github.com/user-attachments/assets/9f26247e-41ec-4545-a528-68d3e2cb91c2" />
+
