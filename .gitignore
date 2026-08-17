@@ -73,6 +73,10 @@ tmp/
 .agents/
 .claude/
 skills-lock.json
+# Contexto de trabajo para el asistente. Vive sólo en local: no es parte del
+# entregable académico. OJO: existe únicamente en esta máquina, así que si se
+# pierde el disco se pierde el documento.
+docs/CLAUDE.md
 
 # ---- Sistema operativo -----------------------------------------------------
 .DS_Store
