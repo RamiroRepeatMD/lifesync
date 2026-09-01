@@ -68,6 +68,34 @@ class ConectarGoogle:
         )
         return usuario_id
 
+    async def desconectar(self, usuario_id: UUID) -> bool:
+        """Revoca la autorización y borra las credenciales (RF-12).
+
+        El orden importa: primero se revoca contra Google (mientras todavía
+        tenemos el token) y después se borra de la base. La revocación es
+        best-effort — si Google no responde, se borra igual, porque quedarse
+        el token "para reintentar" sería conservar una credencial que la
+        persona pidió eliminar.
+
+        Returns:
+            True si Google confirmó la revocación; False si sólo se borró de
+            nuestro lado (el llamador se lo cuenta a la persona).
+        """
+        token = await self._tokens.obtener(usuario_id, PROVEEDOR)
+        if token is None:
+            return True  # no había nada: el estado final es el pedido
+
+        credencial = token.refresh_token or token.access_token
+        revocado = await self._autorizador.revocar(credencial)
+        await self._tokens.eliminar(usuario_id, PROVEEDOR)
+
+        logger.info(
+            "google.cuenta_desconectada",
+            usuario_id=str(usuario_id),
+            revocado_en_google=revocado,
+        )
+        return revocado
+
     async def esta_conectado(self, usuario_id: UUID) -> bool:
         """Indica si la persona ya autorizó su cuenta de Google (RF-12)."""
         return await self._tokens.obtener(usuario_id, PROVEEDOR) is not None

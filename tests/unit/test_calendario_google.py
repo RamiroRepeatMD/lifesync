@@ -487,3 +487,70 @@ async def test_al_crear_no_se_loguea_el_titulo() -> None:
 
     assert eventos
     assert "Cita médica" not in json.dumps(eventos, default=str)
+
+
+async def test_modificar_patchea_el_evento_correcto() -> None:
+    from src.domain.entities.evento import Evento
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(
+        pedidos,
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "id-x",
+                "summary": "Nuevo",
+                "start": {"dateTime": "2026-09-05T16:00:00-03:00"},
+                "end": {"dateTime": "2026-09-05T16:30:00-03:00"},
+            },
+        ),
+    )
+
+    inicio = datetime(2026, 9, 5, 19, 0, tzinfo=UTC)
+    await calendario.modificar_evento(
+        USUARIO,
+        Evento(titulo="Nuevo", inicio=inicio, fin=inicio + timedelta(minutes=30), id="id-x"),
+    )
+
+    assert pedidos[0].method == "PATCH"
+    assert str(pedidos[0].url).endswith("/calendars/primary/events/id-x")
+    cuerpo = json.loads(pedidos[0].content)
+    assert cuerpo["summary"] == "Nuevo"
+    assert "dateTime" in cuerpo["start"]
+
+
+async def test_modificar_un_dia_completo_manda_date_y_no_datetime() -> None:
+    """Mandar dateTime a un all-day lo convertiría sin que nadie lo pidiera."""
+    from src.domain.entities.evento import Evento
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(pedidos, lambda _: httpx.Response(200, json={"id": "id-x"}))
+
+    await calendario.modificar_evento(
+        USUARIO,
+        Evento(
+            titulo="Cumple",
+            inicio=datetime(2026, 9, 6, tzinfo=UTC),
+            todo_el_dia=True,
+            id="id-x",
+        ),
+    )
+
+    cuerpo = json.loads(pedidos[0].content)
+    assert cuerpo["start"] == {"date": "2026-09-06"}
+    assert "dateTime" not in json.dumps(cuerpo)
+
+
+async def test_modificar_algo_que_ya_no_existe_es_un_error_con_nombre() -> None:
+    """A diferencia de eliminar: acá no hay estado final equivalente."""
+    from src.domain.entities.evento import Evento
+    from src.domain.exceptions import EntityNotFoundError
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(pedidos, lambda _: httpx.Response(404, json={}))
+
+    with pytest.raises(EntityNotFoundError):
+        await calendario.modificar_evento(
+            USUARIO,
+            Evento(titulo="X", inicio=datetime(2026, 9, 5, 10, 0, tzinfo=UTC), id="fantasma"),
+        )

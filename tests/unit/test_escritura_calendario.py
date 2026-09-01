@@ -289,3 +289,184 @@ async def test_el_titulo_del_evento_no_se_loguea() -> None:
     registrado = json.dumps(eventos, default=str)
     assert "Terapia" not in registrado
     assert "Pérez" not in registrado
+
+
+# --- Modificar (PB-017) ------------------------------------------------------
+#
+# Mismo esqueleto que eliminar, más el merge. Los tests del merge son los que
+# importan: "sólo el título" no puede tocar horarios, y "sólo la hora" no puede
+# cambiar la duración.
+
+
+def _pedido_modificar(**cambios: Any) -> AIMessage:
+    return AIMessage(
+        "",
+        tool_calls=[
+            {
+                "name": "modificar_evento_del_calendario",
+                "args": {"fecha": "2026-09-05", "titulo": "dentista", **cambios},
+                "id": "t1",
+            }
+        ],
+    )
+
+
+def _dentista() -> Evento:
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)  # 10:00 en Buenos Aires
+    return Evento(
+        titulo="Dentista",
+        inicio=inicio,
+        fin=inicio + timedelta(minutes=30),  # dura 30, no 60: para ver el merge
+        id="id-dentista",
+    )
+
+
+async def test_modificar_sin_confirmacion_no_patchea() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
+
+    estado = await _preguntar(grafo, "cambiale la hora al dentista")
+
+    assert "__interrupt__" in estado
+    assert calendario.modificados == []
+
+
+async def test_el_resumen_muestra_antes_y_despues() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
+
+    estado = await _preguntar(grafo, "pasalo a las 16")
+
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    assert "10:00" in resumen  # el antes
+    assert "16:00" in resumen  # el después
+    assert "→" in resumen
+
+
+async def test_cambiar_solo_la_hora_conserva_la_duracion() -> None:
+    """El dentista dura 30 minutos: movido a las 16 tiene que durar 30, no 60."""
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
+
+    await _preguntar(grafo, "pasalo a las 16")
+    await _reanudar(grafo, aprobado=True)
+
+    _, deseado = calendario.modificados[0]
+    assert deseado.fin is not None
+    assert deseado.fin - deseado.inicio == timedelta(minutes=30)
+    assert deseado.titulo == "Dentista"  # el título no se tocó
+
+
+async def test_cambiar_solo_el_titulo_no_toca_los_horarios() -> None:
+    original = _dentista()
+    calendario = CalendarioFalso(eventos=(original,))
+    grafo = _grafo_con(calendario, _pedido_modificar(nuevo_titulo="Odontóloga"), AIMessage("ok"))
+
+    await _preguntar(grafo, "renombralo")
+    await _reanudar(grafo, aprobado=True)
+
+    _, deseado = calendario.modificados[0]
+    assert deseado.titulo == "Odontóloga"
+    assert deseado.inicio == original.inicio
+    assert deseado.fin == original.fin
+
+
+async def test_cambiar_la_duracion_explicita_gana() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_duracion_minutos=90), AIMessage("ok"))
+
+    await _preguntar(grafo, "que dure una hora y media")
+    await _reanudar(grafo, aprobado=True)
+
+    _, deseado = calendario.modificados[0]
+    assert deseado.fin is not None
+    assert deseado.fin - deseado.inicio == timedelta(minutes=90)
+
+
+async def test_darle_hora_a_un_dia_completo_lo_convierte() -> None:
+    """Es lo que la persona pide al decir "ponelo a las 15"."""
+    cumple = Evento(
+        titulo="Cumple", inicio=datetime(2026, 9, 5, tzinfo=UTC), todo_el_dia=True, id="id-c"
+    )
+    calendario = CalendarioFalso(eventos=(cumple,))
+    grafo = _grafo_con(
+        calendario,
+        _pedido_modificar(titulo="cumple", nueva_hora_inicio="15:00"),
+        AIMessage("ok"),
+    )
+
+    await _preguntar(grafo, "ponele hora al cumple")
+    await _reanudar(grafo, aprobado=True)
+
+    _, deseado = calendario.modificados[0]
+    assert deseado.todo_el_dia is False
+    assert deseado.inicio.hour == 15  # hora local, construida en la zona
+
+
+async def test_modificar_sin_ningun_cambio_pregunta_que() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(), AIMessage("¿qué le cambio?"))
+
+    estado = await _preguntar(grafo, "modificá el dentista")
+
+    assert "__interrupt__" not in estado
+    assert calendario.modificados == []
+    assert calendario.consultados == []  # ni siquiera fue a buscar
+
+
+async def test_modificar_con_varias_coincidencias_pide_precision() -> None:
+    dos = (
+        Evento(titulo="Dentista Norte", inicio=datetime(2026, 9, 5, 10, 0, tzinfo=UTC), id="a"),
+        Evento(titulo="Dentista Sur", inicio=datetime(2026, 9, 5, 15, 0, tzinfo=UTC), id="b"),
+    )
+    calendario = CalendarioFalso(eventos=dos)
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
+
+    estado = await _preguntar(grafo, "cambiá el dentista")
+
+    assert "__interrupt__" not in estado
+    assert calendario.modificados == []
+
+
+async def test_rechazar_no_modifica_nada() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
+
+    await _preguntar(grafo, "pasalo a las 16")
+    await _reanudar(grafo, aprobado=False)
+
+    assert calendario.modificados == []
+
+
+def test_el_modelo_tampoco_ve_el_usuario_en_modificar() -> None:
+    herramientas = {h.name: h for h in construir_herramientas(CalendarioFalso())}
+    esquema = herramientas["modificar_evento_del_calendario"].tool_call_schema
+    assert isinstance(esquema, type) and issubclass(esquema, BaseModel)
+
+    props = set(esquema.model_json_schema()["properties"])
+    assert props == {
+        "fecha",
+        "titulo",
+        "nuevo_titulo",
+        "nueva_fecha",
+        "nueva_hora_inicio",
+        "nueva_duracion_minutos",
+    }
+
+
+async def test_los_titulos_no_se_loguean_al_modificar() -> None:
+    calendario = CalendarioFalso(eventos=(_dentista(),))
+    grafo = _grafo_con(
+        calendario,
+        _pedido_modificar(nuevo_titulo="Sesión con la psicóloga"),
+        AIMessage("listo"),
+    )
+
+    with structlog.testing.capture_logs() as eventos:
+        await _preguntar(grafo, "renombralo")
+        await _reanudar(grafo, aprobado=True)
+
+    assert eventos
+    registrado = json.dumps(eventos, default=str)
+    assert "psicóloga" not in registrado
+    assert "Dentista" not in registrado

@@ -27,6 +27,7 @@ from src.domain.entities.evento import Evento
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
+    EntityNotFoundError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
@@ -175,6 +176,36 @@ class CalendarioGoogle(Calendario):
         )
         return creado
 
+    async def modificar_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
+        """Aplica el estado deseado con un PATCH al calendario principal."""
+        if evento.id is None:
+            raise EntityNotFoundError("El evento a modificar no tiene identificador.")
+
+        token = await self._credencial(usuario_id)
+        cuerpo: dict[str, Any] = {"summary": evento.titulo}
+        if evento.todo_el_dia:
+            # Los de día completo van con `date`: mandar dateTime los convierte.
+            cuerpo["start"] = {"date": evento.inicio.date().isoformat()}
+            fin = evento.fin if evento.fin is not None else evento.inicio
+            cuerpo["end"] = {"date": fin.date().isoformat()}
+        else:
+            cuerpo["start"] = {"dateTime": evento.inicio.isoformat()}
+            cuerpo["end"] = {
+                "dateTime": (evento.fin if evento.fin is not None else evento.inicio).isoformat()
+            }
+
+        datos = await self._mandar(
+            "PATCH",
+            f"{BASE}/calendars/primary/events/{httpx.URL(evento.id)}",
+            token,
+            json=cuerpo,
+            # A diferencia de eliminar, acá un 404 SÍ es un error: modificar
+            # algo que no existe no tiene un estado final equivalente.
+            error_404=EntityNotFoundError("El evento ya no existe en el calendario."),
+        )
+        logger.info("calendar.evento_modificado", usuario_id=str(usuario_id))
+        return _a_evento(datos, "") or evento
+
     async def eliminar_evento(self, usuario_id: UUID, evento_id: str) -> None:
         """Elimina un evento del calendario principal. Idempotente."""
         token = await self._credencial(usuario_id)
@@ -194,8 +225,14 @@ class CalendarioGoogle(Calendario):
         token: str,
         json: dict[str, Any] | None = None,
         tolerar: frozenset[int] = frozenset(),
+        error_404: Exception | None = None,
     ) -> dict[str, Any]:
-        """POST/DELETE autenticado, con la misma traducción de errores del GET."""
+        """Petición de escritura autenticada, con la traducción de errores común.
+
+        `error_404` permite que cada operación le dé su semántica al 404:
+        eliminar lo tolera (ya-borrado es el mismo estado final), modificar lo
+        convierte en "no existe".
+        """
         try:
             respuesta = await self._cliente.request(
                 metodo, url, json=json, headers={"Authorization": f"Bearer {token}"}
@@ -206,6 +243,8 @@ class CalendarioGoogle(Calendario):
 
         if respuesta.status_code in tolerar:
             return {}
+        if respuesta.status_code == httpx.codes.NOT_FOUND and error_404 is not None:
+            raise error_404
         self._traducir_rechazo(respuesta)
         return _json_o_vacio(respuesta)
 

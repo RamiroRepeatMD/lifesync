@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import structlog
@@ -27,6 +28,7 @@ from src.domain.entities.evento import Evento
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
+    EntityNotFoundError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
@@ -122,6 +124,10 @@ def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...
         con los datos. Nunca digas que el evento ya se creó hasta que la
         herramienta te lo confirme.
 
+        Si la persona NO dijo a qué hora, PREGUNTALE antes de llamar esta
+        herramienta: la hora no se inventa. La fecha relativa sí la resolvés
+        vos con la fecha de hoy de tus instrucciones.
+
         Args:
             titulo: Nombre del evento, corto y claro.
             fecha: Día del evento, en formato AAAA-MM-DD.
@@ -139,7 +145,8 @@ def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...
 
         Buscá siempre por el día y el nombre aproximado: el sistema encuentra
         el evento exacto y pide la confirmación. Nunca digas que se eliminó
-        hasta que la herramienta te lo confirme.
+        hasta que la herramienta te lo confirme. Si la persona no dijo qué día
+        está el evento, preguntale antes de llamar.
 
         Args:
             fecha: Día en que está el evento, en formato AAAA-MM-DD.
@@ -147,11 +154,50 @@ def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...
         """
         return await _eliminar_evento(calendario, runtime, fecha, titulo)
 
+    @tool
+    async def modificar_evento_del_calendario(
+        fecha: str,
+        titulo: str,
+        nuevo_titulo: str = "",
+        nueva_fecha: str = "",
+        nueva_hora_inicio: str = "",
+        nueva_duracion_minutos: int = 0,
+        *,
+        runtime: Runtime,
+    ) -> str:
+        """Modifica un evento existente del calendario, previa confirmación.
+
+        Buscá el evento por su día y su nombre actual, y pasá SOLAMENTE lo que
+        la persona quiere cambiar: lo que no menciones se conserva. Nunca digas
+        que se modificó hasta que la herramienta te lo confirme. Si falta el
+        dato nuevo —"cambiale la hora" sin decir a cuál— preguntá antes.
+
+        Args:
+            fecha: Día en que está HOY el evento, en formato AAAA-MM-DD.
+            titulo: Nombre actual (o parte del nombre) del evento.
+            nuevo_titulo: Nombre nuevo, sólo si lo quiere renombrar.
+            nueva_fecha: Día nuevo en AAAA-MM-DD, sólo si lo quiere mover de día.
+            nueva_hora_inicio: Hora nueva en HH:MM, sólo si la quiere cambiar.
+            nueva_duracion_minutos: Duración nueva en minutos, sólo si la
+                quiere cambiar. Dejá 0 para conservar la que tiene.
+        """
+        return await _modificar_evento(
+            calendario,
+            runtime,
+            fecha,
+            titulo,
+            nuevo_titulo,
+            nueva_fecha,
+            nueva_hora_inicio,
+            nueva_duracion_minutos,
+        )
+
     return (
         fecha_y_hora_actual,
         eventos_del_calendario,
         crear_evento_en_calendario,
         eliminar_evento_del_calendario,
+        modificar_evento_del_calendario,
     )
 
 
@@ -419,3 +465,162 @@ def _para_buscar(texto: str) -> str:
     return "".join(
         c for c in unicodedata.normalize("NFD", texto.lower()) if unicodedata.category(c) != "Mn"
     ).strip()
+
+
+async def _modificar_evento(
+    calendario: Calendario,
+    runtime: Runtime,
+    fecha: str,
+    titulo: str,
+    nuevo_titulo: str,
+    nueva_fecha: str,
+    nueva_hora_inicio: str,
+    nueva_duracion_minutos: int,
+) -> str:
+    """Modifica un evento del principal: buscar → diff → confirmar → PATCH.
+
+    Mismo esqueleto que eliminar, con una etapa más: el **merge**. Decidir qué
+    cambia y qué se conserva pasa acá, que es donde está el evento original;
+    el puerto recibe el estado final ya resuelto.
+    """
+    usuario_id = runtime.context.usuario_id
+
+    rango = _rango(fecha, fecha)
+    if rango is None or not titulo.strip():
+        return "Necesito el día (AAAA-MM-DD) y el nombre actual del evento a modificar."
+
+    hay_cambios = (
+        any((nuevo_titulo.strip(), nueva_fecha.strip(), nueva_hora_inicio.strip()))
+        or nueva_duracion_minutos > 0
+    )
+    if not hay_cambios:
+        return (
+            "¿Y qué querés cambiarle? Puedo moverlo de día u hora, renombrarlo "
+            "o cambiar cuánto dura."
+        )
+
+    # Igual que en eliminar: esta lectura se re-ejecuta al reanudar, y de paso
+    # re-verifica que el evento siga existiendo.
+    try:
+        eventos = await calendario.eventos_del_principal(usuario_id, *rango)
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso del calendario. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude consultar tu calendario ahora mismo. Probá de nuevo en un minuto."
+
+    candidatos = [
+        e for e in eventos if _para_buscar(titulo) in _para_buscar(e.titulo) and e.id is not None
+    ]
+    if not candidatos:
+        return (
+            f"No encontré ningún evento que se llame algo como eso el {fecha}. "
+            "Sólo busco en tu calendario principal."
+        )
+    if len(candidatos) > 1:
+        lista = "\n".join(f"- {_linea(e, _en_hora_local(e))}" for e in candidatos)
+        return f"Hay varios eventos que coinciden ese día:\n{lista}\n¿Cuál de estos?"
+
+    original = candidatos[0]
+    deseado = _aplicar_cambios(
+        original, nuevo_titulo, nueva_fecha, nueva_hora_inicio, nueva_duracion_minutos
+    )
+    if deseado is None:
+        return (
+            "No entendí los datos nuevos. La fecha va en AAAA-MM-DD, la hora en "
+            f"HH:MM y la duración entre {MINUTOS_MINIMOS} y {MINUTOS_MAXIMOS} minutos."
+        )
+
+    resumen = (
+        f"Cambiar {_linea(original, _en_hora_local(original))}"
+        f" → {_linea(deseado, _en_hora_local(deseado))}"
+        f" ({fecha_en_palabras(_en_hora_local(deseado))})"
+    )
+
+    decision = interrupt({"resumen": resumen})
+    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+        return "La persona lo canceló. No se modificó nada."
+
+    try:
+        await calendario.modificar_evento(usuario_id, deseado)
+    except EntityNotFoundError:
+        return "Ese evento ya no está en el calendario: quizás se borró mientras hablábamos."
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso del calendario. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude modificar el evento ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="modificar_evento_del_calendario",
+        usuario_id=str(usuario_id),
+        # Qué clase de cambio sí; los títulos NUNCA (RF-18).
+        cambio_horario=bool(nueva_fecha.strip() or nueva_hora_inicio.strip())
+        or nueva_duracion_minutos > 0,
+        cambio_titulo=bool(nuevo_titulo.strip()),
+    )
+    return "Evento modificado."
+
+
+def _aplicar_cambios(
+    original: Evento,
+    nuevo_titulo: str,
+    nueva_fecha: str,
+    nueva_hora_inicio: str,
+    nueva_duracion_minutos: int,
+) -> Evento | None:
+    """Construye el estado deseado conservando todo lo que no se pidió cambiar.
+
+    Las reglas del merge, que es donde viven los bugs de esta operación:
+
+    - Sólo título → los horarios no se tocan (ni siquiera se recalculan).
+    - Nueva hora o fecha → se rearma `inicio`; la **duración se conserva**
+      salvo pedido explícito. Un original sin fin cuenta como de 60 minutos.
+    - Darle hora a un evento de día completo lo convierte en evento con
+      horario: es lo que la persona está pidiendo al decir "ponelo a las 15".
+    """
+    if nueva_duracion_minutos and not (
+        MINUTOS_MINIMOS <= nueva_duracion_minutos <= MINUTOS_MAXIMOS
+    ):
+        return None
+
+    titulo = nuevo_titulo.strip() or original.titulo
+    toca_horario = bool(nueva_fecha.strip() or nueva_hora_inicio.strip()) or (
+        nueva_duracion_minutos > 0
+    )
+    if not toca_horario:
+        return replace(original, titulo=titulo)
+
+    local = _en_hora_local(original)
+    fecha = nueva_fecha.strip() or local.date().isoformat()
+    hora = nueva_hora_inicio.strip() or (
+        # A un día completo sin hora nueva se le conserva la fecha como día
+        # completo; con hora nueva, deja de serlo.
+        "" if original.todo_el_dia else f"{local:%H:%M}"
+    )
+
+    if original.todo_el_dia and not hora:
+        # Sigue siendo de día completo: sólo pudo cambiar la fecha (o el título).
+        try:
+            dia = date.fromisoformat(fecha)
+        except ValueError:
+            return None
+        return replace(
+            original, titulo=titulo, inicio=datetime(dia.year, dia.month, dia.day, tzinfo=UTC)
+        )
+
+    inicio = _momento_local(fecha, hora)
+    if inicio is None:
+        return None
+
+    if nueva_duracion_minutos > 0:
+        duracion = timedelta(minutes=nueva_duracion_minutos)
+    elif original.fin is not None and not original.todo_el_dia:
+        duracion = original.fin - original.inicio
+    else:
+        duracion = timedelta(minutes=60)
+
+    return replace(original, titulo=titulo, inicio=inicio, fin=inicio + duracion, todo_el_dia=False)

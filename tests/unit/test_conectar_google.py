@@ -271,3 +271,39 @@ async def test_no_se_loguea_ninguna_credencial() -> None:
     assert "4/codigo-secreto" not in registrado
     assert "access-de-prueba" not in registrado
     assert "refresh-de-prueba" not in registrado
+
+
+# --- Desconexión (PB-011, RF-12) ---------------------------------------------
+
+
+async def test_desconectar_revoca_primero_y_borra_despues() -> None:
+    """El orden importa: revocar necesita el token, así que va antes del borrado."""
+    caso, repo, auth = _caso()
+    await caso.completar("4/codigo", "state", AHORA)
+
+    revocado = await caso.desconectar(USUARIO)
+
+    assert revocado is True
+    assert auth.revocados == ["refresh-de-prueba"]  # se revoca el refresh
+    assert await repo.obtener(USUARIO, GOOGLE) is None
+
+
+async def test_desconectar_sin_cuenta_es_idempotente() -> None:
+    """El estado final es el pedido: no había nada y no hay nada."""
+    caso, _, auth = _caso()
+
+    assert await caso.desconectar(USUARIO) is True
+    assert auth.revocados == []  # no hubo qué revocar
+
+
+async def test_si_la_revocacion_falla_el_token_se_borra_igual() -> None:
+    """Conservarlo "para reintentar" sería quedarse una credencial que pidieron eliminar."""
+    auth = AutorizadorFalso(usuario_fijo=USUARIO)
+    auth.revocacion_exitosa = False
+    caso, repo, _ = _caso(auth)
+    await caso.completar("4/codigo", "state", AHORA)
+
+    revocado = await caso.desconectar(USUARIO)
+
+    assert revocado is False
+    assert await repo.obtener(USUARIO, GOOGLE) is None

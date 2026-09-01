@@ -81,6 +81,23 @@ class Calendario(ABC):
         """
 
     @abstractmethod
+    async def modificar_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
+        """Aplica al evento el estado deseado (PB-017).
+
+        `evento.id` identifica cuál; `titulo`, `inicio`, `fin` y `todo_el_dia`
+        son cómo tiene que quedar. El merge —decidir qué cambia y qué se
+        conserva— es responsabilidad de quien llama, que conoce el original:
+        este puerto es deliberadamente tonto.
+
+        Raises:
+            EntityNotFoundError: Si el evento ya no existe.
+            CuentaNoConectadaError: Si la persona nunca autorizó su cuenta.
+            PermisoInsuficienteError: Si el token no tiene permiso de escritura.
+            AutorizacionFallidaError: Si la autorización venció o fue revocada.
+            ServiceUnavailableError: Si el proveedor no responde.
+        """
+
+    @abstractmethod
     async def eliminar_evento(self, usuario_id: UUID, evento_id: str) -> None:
         """Elimina un evento del calendario principal.
 

@@ -66,6 +66,19 @@ class AutorizadorGoogle(ABC):
         """
 
     @abstractmethod
+    async def revocar(self, token: str) -> bool:
+        """Invalida la credencial del lado del proveedor (RF-12).
+
+        Borrar el token de nuestra base no lo mata: el proveedor lo seguiría
+        aceptando. Revocarlo acá es lo que convierte "desconectar" en una
+        promesa cierta.
+
+        Returns:
+            True si el proveedor confirmó la revocación; False si no se pudo
+            (se maneja como best-effort: el llamador decide qué contar).
+        """
+
+    @abstractmethod
     async def refrescar(self, refresh_token: str) -> CredencialesGoogle:
         """Pide un access_token nuevo con el refresh_token.
 

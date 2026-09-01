@@ -65,6 +65,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "supabase: necesita credenciales reales de Supabase; se saltea si no están.",
+    "gemini: llama al modelo real (gasta cuota); se saltea sin GOOGLE_API_KEY.",
 ]
 
 # ---------------------------------------------------------------------------

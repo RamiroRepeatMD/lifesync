@@ -35,6 +35,7 @@ AYUDA = (
     "Comandos:\n"
     "• /ayuda — esta lista\n"
     "• /conectar — vincular tu cuenta de Google\n"
+    "• /desconectar — desvincularla y revocar el permiso\n"
     "• /estado — qué cuentas tenés conectadas\n\n"
     "Cuando conectes tu Google voy a poder consultarte la agenda."
 )
@@ -45,12 +46,12 @@ ESTADO_SIN_CUENTAS = (
 )
 
 # Este texto sólo puede prometer lo que el agente sabe hacer de verdad (la
-# regla viene de PB-015, cuando prometió el calendario antes de tiempo). Desde
-# PB-016: leer, crear y eliminar sí — modificar todavía no.
+# regla viene de PB-015, cuando prometió el calendario antes de tiempo).
+# Desde PB-017 el calendario está completo: leer, crear, modificar y eliminar.
 ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
-    "Puedo leer tu calendario, crear eventos y eliminarlos —siempre te pido "
-    "confirmación antes de tocar algo. Modificar eventos todavía no sé."
+    "Puedo leer tu calendario, y crear, modificar o eliminar eventos —siempre "
+    "te pido confirmación antes de tocar algo."
 )
 
 CONECTAR_NO_DISPONIBLE = (
@@ -59,6 +60,29 @@ CONECTAR_NO_DISPONIBLE = (
 )
 
 CONECTAR_ERROR = "No pude generar el enlace para conectar tu cuenta. Probá de nuevo en un minuto."
+
+DESCONECTAR_SIN_CUENTA = "No tenés ninguna cuenta conectada, así que no hay nada que desconectar."
+
+# Confirmación en dos pasos SIN estado: lo pendiente vive en el texto del
+# segundo comando, no en memoria. Es la versión para comandos de la regla de
+# RF-08 — los comandos no pasan por el grafo, así que acá no hay interrupt.
+DESCONECTAR_PIDE_CONFIRMACION = (
+    "Vas a desconectar tu cuenta de Google: dejo de poder ver tu calendario y "
+    "de gestionar tus eventos.\n\n"
+    "Para confirmar, escribí: /desconectar confirmar"
+)
+
+DESCONECTAR_LISTO = (
+    "Listo, desconecté tu cuenta de Google y revoqué el permiso. "
+    "Cuando quieras reconectarla: /conectar"
+)
+
+# La revocación es best-effort: si Google no contestó, el token igual se borró
+# de nuestro lado, y la persona merece saber cómo cerrar el círculo.
+DESCONECTAR_SIN_REVOCAR = (
+    "Borré tu cuenta de mi lado, pero no pude confirmar la revocación con "
+    "Google. Si querés estar seguro, revisá myaccount.google.com/permissions"
+)
 
 
 def _texto_del_enlace(enlace: str) -> str:
@@ -101,6 +125,10 @@ class ManejadorDeComandos:
             return await self._estado(usuario)
         if comando == "/conectar":
             return await self._conectar(usuario, ahora)
+        if comando == "/desconectar":
+            resto = texto.strip().lower().split(maxsplit=1)
+            confirmado = len(resto) > 1 and resto[1].strip() == "confirmar"
+            return await self._desconectar(usuario, confirmado)
         return None
 
     async def _estado(self, usuario: Usuario) -> str:
@@ -110,6 +138,33 @@ class ManejadorDeComandos:
 
         conectado = await self._conectar_google.esta_conectado(usuario.id)
         return ESTADO_CON_GOOGLE if conectado else ESTADO_SIN_CUENTAS
+
+    async def _desconectar(self, usuario: Usuario, confirmado: bool) -> str:
+        """Desconecta la cuenta de Google, con confirmación en dos pasos (RF-12).
+
+        Es una acción destructiva, así que RF-08 aplica también acá — pero los
+        comandos no pasan por el grafo, y el interrupt no existe. La
+        confirmación vive en el texto: `/desconectar` sólo explica, y
+        `/desconectar confirmar` ejecuta. Determinístico y sin memoria.
+        """
+        if self._conectar_google is None or usuario.id is None:
+            return DESCONECTAR_SIN_CUENTA
+
+        if not await self._conectar_google.esta_conectado(usuario.id):
+            return DESCONECTAR_SIN_CUENTA
+
+        if not confirmado:
+            return DESCONECTAR_PIDE_CONFIRMACION
+
+        try:
+            revocado = await self._conectar_google.desconectar(usuario.id)
+        except Exception as exc:  # el comando nunca deja a la persona sin respuesta
+            logger.error(
+                "google.desconexion_fallida", usuario_id=str(usuario.id), tipo=type(exc).__name__
+            )
+            return "No pude desconectar tu cuenta ahora mismo. Probá de nuevo en un minuto."
+
+        return DESCONECTAR_LISTO if revocado else DESCONECTAR_SIN_REVOCAR
 
     async def _conectar(self, usuario: Usuario, ahora: datetime) -> str:
         """Arma el enlace de consentimiento para esta persona."""

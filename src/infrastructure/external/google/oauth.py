@@ -27,6 +27,7 @@ logger = structlog.get_logger(__name__)
 
 URL_CONSENTIMIENTO = "https://accounts.google.com/o/oauth2/v2/auth"
 URL_TOKENS = "https://oauth2.googleapis.com/token"
+URL_REVOCACION = "https://oauth2.googleapis.com/revoke"
 
 # Lectura + escritura de eventos (PB-015 · PB-016). El readonly se conserva
 # aunque parezca redundante: `calendarList` —la lista de calendarios que lee
@@ -101,6 +102,26 @@ class OAuthGoogle(AutorizadorGoogle):
             },
             operacion="canje",
         )
+
+    async def revocar(self, token: str) -> bool:
+        """Invalida la credencial en Google. Best-effort: nunca lanza.
+
+        Se revoca el refresh_token, que arrastra a sus access_tokens. Google
+        contesta 200 si lo mató y 400 si ya no era válido — los dos casos
+        terminan en el mismo estado, así que los dos cuentan como éxito.
+        """
+        try:
+            respuesta = await self._cliente.post(URL_REVOCACION, data={"token": token})
+        except httpx.HTTPError as exc:
+            logger.warning("google.oauth.revocacion_fallida", tipo=type(exc).__name__)
+            return False
+
+        exito = respuesta.status_code in (httpx.codes.OK, httpx.codes.BAD_REQUEST)
+        logger.info(
+            "google.oauth.revocado" if exito else "google.oauth.revocacion_rechazada",
+            status_code=respuesta.status_code,
+        )
+        return exito
 
     async def refrescar(self, refresh_token: str) -> CredencialesGoogle:
         """Pide un access_token nuevo con el refresh_token."""

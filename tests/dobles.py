@@ -284,6 +284,7 @@ class CalendarioFalso(Calendario):
         # RF-08 — "sin resume no hay escritura" se afirma sobre estas listas.
         self.creados: list[tuple[UUID, Evento]] = []
         self.eliminados: list[tuple[UUID, str]] = []
+        self.modificados: list[tuple[UUID, Evento]] = []
 
     async def eventos_entre(
         self, usuario_id: UUID, desde: datetime, hasta: datetime
@@ -311,6 +312,12 @@ class CalendarioFalso(Calendario):
             raise self.fallar_con
         self.eliminados.append((usuario_id, evento_id))
 
+    async def modificar_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.modificados.append((usuario_id, evento))
+        return evento
+
 
 class AutorizadorFalso(AutorizadorGoogle):
     """Doble del puerto de autorización: no habla con Google.
@@ -336,6 +343,8 @@ class AutorizadorFalso(AutorizadorGoogle):
         self.fallar_refresco: Exception | None = None
         self.codigos_canjeados: list[str] = []
         self.refresh_usados: list[str] = []
+        self.revocados: list[str] = []
+        self.revocacion_exitosa = True
 
     def url_de_autorizacion(self, usuario_id: UUID, ahora: datetime) -> str:
         return f"https://accounts.google.com/o/oauth2/v2/auth?state=firmado-{usuario_id}"
@@ -344,6 +353,10 @@ class AutorizadorFalso(AutorizadorGoogle):
         if self.estado_invalido is not None:
             raise self.estado_invalido
         return self.usuario_fijo
+
+    async def revocar(self, token: str) -> bool:
+        self.revocados.append(token)
+        return self.revocacion_exitosa
 
     async def canjear_codigo(self, codigo: str) -> CredencialesGoogle:
         self.codigos_canjeados.append(codigo)
