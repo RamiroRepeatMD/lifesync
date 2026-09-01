@@ -25,7 +25,9 @@ from src.application.ports.autorizador_google import (
     AutorizadorGoogle,
     CredencialesGoogle,
 )
+from src.application.ports.calendario import Calendario
 from src.application.ports.whatsapp import MensajeroWhatsApp
+from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.usuario import Usuario
 from src.domain.exceptions import InvalidValueError
@@ -259,6 +261,34 @@ class ModeloFalso(BaseChatModel):
         indice = min(len(self.recibidos) - 1, len(self.guion) - 1)
         respuesta = self.guion[indice] if self.guion else AIMessage("")
         return ChatResult(generations=[ChatGeneration(message=respuesta)])
+
+
+class CalendarioFalso(Calendario):
+    """Doble del puerto de calendario: registra a quién se le consultó qué.
+
+    `consultados` es lo que permite afirmar la propiedad de seguridad de
+    PB-015: que la agenda que se lee es la de quien escribe y no la que pida
+    el texto del mensaje.
+    """
+
+    def __init__(
+        self,
+        eventos: tuple[Evento, ...] | None = None,
+        fallar_con: Exception | None = None,
+    ) -> None:
+        self.eventos = eventos if eventos is not None else ()
+        self.fallar_con = fallar_con
+        self.consultados: list[UUID] = []
+        self.rangos: list[tuple[datetime, datetime]] = []
+
+    async def eventos_entre(
+        self, usuario_id: UUID, desde: datetime, hasta: datetime
+    ) -> tuple[Evento, ...]:
+        self.consultados.append(usuario_id)
+        self.rangos.append((desde, hasta))
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        return self.eventos
 
 
 class AutorizadorFalso(AutorizadorGoogle):

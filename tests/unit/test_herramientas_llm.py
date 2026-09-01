@@ -7,11 +7,8 @@ from datetime import UTC, datetime
 
 import structlog
 
-from src.infrastructure.llm.herramientas import (
-    HERRAMIENTAS,
-    ZONA_HORARIA,
-    fecha_y_hora_actual,
-)
+from src.infrastructure.config.zona import ZONA_HORARIA
+from src.infrastructure.llm.herramientas import construir_herramientas, fecha_y_hora_actual
 
 
 def _invocar() -> str:
@@ -47,11 +44,12 @@ def test_el_modelo_ve_un_docstring_que_explica_cuando_usarla() -> None:
     descripcion = fecha_y_hora_actual.description.lower()
 
     assert "fecha" in descripcion
-    assert "mañana" in descripcion
+    assert "hora" in descripcion
 
 
-def test_esta_registrada_para_el_grafo() -> None:
-    assert [h.name for h in HERRAMIENTAS] == ["fecha_y_hora_actual"]
+def test_sin_calendario_solo_queda_la_fecha() -> None:
+    """Sin OAuth configurado no se ofrece una herramienta que va a fallar siempre."""
+    assert [h.name for h in construir_herramientas(None)] == ["fecha_y_hora_actual"]
 
 
 def test_se_loguea_la_invocacion() -> None:

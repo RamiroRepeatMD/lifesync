@@ -8,21 +8,26 @@ doble. Ése es el motivo de que `construir_grafo` no arme el modelo adentro.
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import MAX_MENSAJES_DE_HISTORIAL, construir_grafo
-from src.infrastructure.llm.herramientas import HERRAMIENTAS
-from src.infrastructure.llm.prompt import INSTRUCCIONES
-from tests.dobles import ModeloFalso
+from src.infrastructure.llm.herramientas import construir_herramientas
+from tests.dobles import CalendarioFalso, ModeloFalso
 
 PEDIDO_DE_HERRAMIENTA = AIMessage(
     "", tool_calls=[{"name": "fecha_y_hora_actual", "args": {}, "id": "llamada-1"}]
 )
 
 
-def _grafo(*guion: AIMessage, herramientas: Any = HERRAMIENTAS) -> tuple[Any, ModeloFalso]:
+SIN_CALENDARIO = construir_herramientas(None)
+USUARIO = uuid4()
+
+
+def _grafo(*guion: AIMessage, herramientas: Any = SIN_CALENDARIO) -> tuple[Any, ModeloFalso]:
     modelo = ModeloFalso(guion=list(guion))
     return construir_grafo(modelo, herramientas, InMemorySaver()), modelo
 
@@ -31,6 +36,7 @@ async def _preguntar(grafo: Any, texto: str, hilo: str = "hilo-1") -> dict[str, 
     resultado: dict[str, Any] = await grafo.ainvoke(
         {"messages": [HumanMessage(texto)]},
         config={"configurable": {"thread_id": hilo}},
+        context=ContextoDeAgente(usuario_id=USUARIO),
     )
     return resultado
 
@@ -53,7 +59,7 @@ async def test_el_system_prompt_viaja_en_cada_invocacion() -> None:
 
     primero = modelo.recibidos[0][0]
     assert isinstance(primero, SystemMessage)
-    assert primero.content == INSTRUCCIONES
+    assert "Sos LifeSync" in str(primero.content)
 
 
 async def test_las_herramientas_se_le_declaran_al_modelo() -> None:
@@ -144,3 +150,68 @@ async def test_el_recorte_deja_el_historial_empezando_en_la_persona() -> None:
 
     sin_system = [m for m in modelo.recibidos[-1] if not isinstance(m, SystemMessage)]
     assert isinstance(sin_system[0], HumanMessage)
+
+
+# --- El contexto por invocación (PB-015) ------------------------------------
+#
+# Acá se prueba que la inyección ocurre de verdad, atravesando el grafo como en
+# producción. Los casos de comportamiento de la herramienta viven en
+# `test_herramienta_calendario.py`, que la llama directo.
+
+
+async def test_el_contexto_llega_a_la_herramienta() -> None:
+    """Es el mecanismo que hace que la agenda que se lee sea la de quien escribe."""
+    calendario = CalendarioFalso()
+    herramientas = construir_herramientas(calendario)
+    modelo = ModeloFalso(
+        guion=[
+            AIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "name": "eventos_del_calendario",
+                        "args": {"desde": "2026-09-01", "hasta": "2026-09-01"},
+                        "id": "llamada-1",
+                    }
+                ],
+            ),
+            AIMessage("No tenés nada hoy."),
+        ]
+    )
+    grafo = construir_grafo(modelo, herramientas, InMemorySaver())
+
+    await grafo.ainvoke(
+        {"messages": [HumanMessage("¿qué tengo hoy?")]},
+        config={"configurable": {"thread_id": "hilo-1"}},
+        context=ContextoDeAgente(usuario_id=USUARIO),
+    )
+
+    assert calendario.consultados == [USUARIO]
+
+
+async def test_dos_personas_no_se_ven_la_agenda() -> None:
+    """Mismo grafo, mismo proceso, contextos distintos: no se pueden cruzar."""
+    calendario = CalendarioFalso()
+    herramientas = construir_herramientas(calendario)
+    pedido = AIMessage(
+        "",
+        tool_calls=[
+            {
+                "name": "eventos_del_calendario",
+                "args": {"desde": "2026-09-01", "hasta": "2026-09-01"},
+                "id": "x",
+            }
+        ],
+    )
+    modelo = ModeloFalso(guion=[pedido, AIMessage("listo"), pedido, AIMessage("listo")])
+    grafo = construir_grafo(modelo, herramientas, InMemorySaver())
+
+    ana, beto = uuid4(), uuid4()
+    for usuario, hilo in ((ana, "ana"), (beto, "beto")):
+        await grafo.ainvoke(
+            {"messages": [HumanMessage("¿qué tengo hoy?")]},
+            config={"configurable": {"thread_id": hilo}},
+            context=ContextoDeAgente(usuario_id=usuario),
+        )
+
+    assert calendario.consultados == [ana, beto]

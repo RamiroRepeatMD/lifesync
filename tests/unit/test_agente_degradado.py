@@ -13,7 +13,8 @@ from src.application.services.agente_degradado import SIN_AGENTE, AgenteDegradad
 
 
 def _consulta(texto: str = "agendame algo") -> ConsultaDelUsuario:
-    return ConsultaDelUsuario(conversacion_id=uuid4(), texto=texto)
+    identificador = uuid4()
+    return ConsultaDelUsuario(conversacion_id=identificador, usuario_id=identificador, texto=texto)
 
 
 async def test_contesta_el_aviso_en_vez_de_fallar() -> None:

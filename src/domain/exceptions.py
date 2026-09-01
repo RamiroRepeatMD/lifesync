@@ -53,6 +53,19 @@ class ConfirmationRequiredError(DomainError):
     mensaje_usuario = "Necesito que me confirmes antes de hacer este cambio."
 
 
+class CuentaNoConectadaError(DomainError):
+    """Se pidió algo que necesita una cuenta que la persona no conectó (PB-015).
+
+    No es una falla técnica ni un error de la persona: es un paso que falta.
+    Por eso hereda de `DomainError` y no de `InfrastructureError`, y por eso su
+    mensaje dice **qué hacer** en vez de disculparse.
+    """
+
+    mensaje_usuario = (
+        "Todavía no conectaste tu cuenta de Google. Escribí /conectar y te paso el enlace."
+    )
+
+
 class InfrastructureError(LifeSyncError):
     """Falla técnica al hablar con un sistema externo (base de datos, APIs).
 

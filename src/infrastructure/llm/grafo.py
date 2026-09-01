@@ -22,6 +22,7 @@ falso, sin red y sin API key. Es el mismo reparto que en WhatsApp, donde
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -32,7 +33,8 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from src.infrastructure.llm.prompt import INSTRUCCIONES
+from src.infrastructure.llm.contexto import ContextoDeAgente
+from src.infrastructure.llm.prompt import instrucciones
 
 logger = structlog.get_logger(__name__)
 
@@ -96,12 +98,18 @@ def construir_grafo(
             include_system=False,
             allow_partial=False,
         )
+        # Las instrucciones se rearman en cada paso para que lleven la fecha
+        # de hoy: sin eso el modelo tendría que gastar un viaje extra
+        # preguntándola con una herramienta. No se persisten en el historial.
         respuesta = await modelo_con_herramientas.ainvoke(
-            [SystemMessage(INSTRUCCIONES), *historial]
+            [SystemMessage(instrucciones(datetime.now(UTC))), *historial]
         )
         return {"messages": [respuesta]}
 
-    grafo = StateGraph(MessagesState)
+    # `context_schema` es lo que habilita que las herramientas reciban de
+    # quién es la conversación por un canal que el modelo no ve. Ver
+    # `contexto.py`: es el control de seguridad de PB-015.
+    grafo = StateGraph(MessagesState, context_schema=ContextoDeAgente)
     grafo.add_node(NODO_AGENTE, nodo_agente)
     grafo.add_node(NODO_HERRAMIENTAS, ToolNode(herramientas))
 

@@ -14,6 +14,8 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
+from src.application.ports.calendario import Calendario
+from src.application.use_cases.conectar_google import ConectarGoogle
 from src.infrastructure.config.logging import configure_logging
 from src.infrastructure.config.settings import Environment, Settings, get_settings
 from src.infrastructure.external.google.oauth import (
@@ -29,6 +31,9 @@ from src.infrastructure.persistence.encryption import TokenCipher
 from src.infrastructure.persistence.supabase_client import (
     close_supabase_client,
     create_supabase_client,
+)
+from src.infrastructure.persistence.supabase_oauth_token_repository import (
+    SupabaseOAuthTokenRepository,
 )
 from src.interfaces.api.errors import register_exception_handlers
 from src.interfaces.api.middleware.request_context import RequestContextMiddleware
@@ -65,8 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await _iniciar_persistencia(app, settings)
     _iniciar_whatsapp(app, settings)
-    _iniciar_agente(app, settings)
+    # El orden importa: el agente recibe el calendario, y el calendario
+    # necesita el cliente HTTP de Google que abre _iniciar_google_oauth.
     _iniciar_google_oauth(app, settings)
+    _iniciar_agente(app, settings)
     try:
         yield
     finally:
@@ -138,7 +145,33 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
     # LangChain, que es casi un segundo de arranque.
     from src.infrastructure.llm.agente_gemini import crear_agente_gemini
 
-    app.state.agente = crear_agente_gemini(settings)
+    app.state.agente = crear_agente_gemini(settings, _calendario_de(app))
+
+
+def _calendario_de(app: FastAPI) -> Calendario | None:
+    """Arma el lector de calendario, si están las tres piezas que necesita.
+
+    Es `None` cuando falta cualquiera —Supabase, el cifrador o el cliente de
+    Google—, y en ese caso el agente simplemente no ofrece la herramienta. Es
+    la misma degradación de siempre: sin la pieza, la capacidad no existe, pero
+    el resto del sistema sigue en pie.
+    """
+    supabase = app.state.supabase
+    cipher = app.state.token_cipher
+    http = app.state.google_oauth
+    if supabase is None or cipher is None or http is None:
+        logger.info("calendar.no_disponible", motivo="falta Supabase o la conexión con Google")
+        return None
+
+    from src.infrastructure.external.google.calendario import create_calendario_google
+    from src.infrastructure.external.google.oauth import create_autorizador_google
+
+    settings: Settings = app.state.settings
+    conectar = ConectarGoogle(
+        SupabaseOAuthTokenRepository(supabase, cipher),
+        create_autorizador_google(http, settings),
+    )
+    return create_calendario_google(http, conectar)
 
 
 def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:

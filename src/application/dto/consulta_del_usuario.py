@@ -17,10 +17,14 @@ class ConsultaDelUsuario:
     """Un turno de conversación que hay que responder.
 
     Attributes:
-        conversacion_id: Hilo al que pertenece el turno. Hoy es el id del
-            usuario —una conversación por persona—, pero el nombre es el
-            concepto correcto: cuando existan varios hilos por usuario sólo
+        conversacion_id: Hilo al que pertenece el turno. Hoy coincide con el
+            id del usuario —una conversación por persona—, pero el nombre es
+            el concepto correcto: cuando existan varios hilos por usuario sólo
             cambia quién lo completa, no la firma del puerto.
+        usuario_id: De **quién** es el turno. Se separa del hilo a propósito:
+            es la identidad con la que se consultan datos personales —el
+            calendario, por ejemplo—, y confundirla con el hilo sería el tipo
+            de atajo que un día deja a alguien viendo la agenda de otro.
         texto: Lo que escribió la persona. `repr=False` porque es contenido
             privado y no debe aparecer en un traceback ni en un log (RF-18).
         nombre_usuario: Nombre de pila, si se conoce, para que el agente pueda
@@ -28,5 +32,6 @@ class ConsultaDelUsuario:
     """
 
     conversacion_id: UUID
+    usuario_id: UUID
     texto: str = field(repr=False)
     nombre_usuario: str | None = None

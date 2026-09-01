@@ -195,8 +195,12 @@ El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
 
 ### Qué contesta hoy
 
-Lenguaje natural, con el agente de LangGraph + Gemini (PB-005). Los comandos siguen siendo
-determinísticos y no pasan por el modelo: `/ayuda`, `/estado` y `/conectar`.
+Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **consultas reales al
+calendario** de quien escribe si conectó su cuenta de Google (PB-015): "¿qué tengo hoy?",
+"¿qué tengo esta semana?". Sólo lectura.
+
+Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`
+y `/conectar`.
 
 Que la ayuda no dependa del LLM es a propósito: RF-11 pide un sistema de ayuda, y uno que cambia
 de texto en cada invocación —o que inventa funciones que no existen— no lo cumple. Además es lo

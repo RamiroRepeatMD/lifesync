@@ -102,14 +102,14 @@ async def test_el_estado_orienta_hacia_conectar() -> None:
     assert "/conectar" in ESTADO_SIN_CUENTAS
 
 
-async def test_el_estado_conectado_no_promete_lo_que_no_hay() -> None:
-    """Prometer el calendario antes de PB-015 manda a la persona a un callejón.
+async def test_el_estado_conectado_promete_solo_lo_que_hay() -> None:
+    """El prompt le prohíbe al modelo inventar capacidades; los textos fijos igual.
 
-    El prompt le prohíbe al modelo inventar capacidades; los textos fijos
-    tienen que cumplir la misma regla.
+    Con PB-015 la lectura existe, así que se puede ofrecer. La escritura no, y
+    esa aclaración es la que evita un "agendame algo" con final confuso.
     """
-    assert "construcción" in ESTADO_CON_GOOGLE
-    assert "Preguntame, por ejemplo" not in ESTADO_CON_GOOGLE
+    assert "leer tu calendario" in ESTADO_CON_GOOGLE
+    assert "no puedo crear" in ESTADO_CON_GOOGLE
 
 
 # --- /conectar ---------------------------------------------------------------

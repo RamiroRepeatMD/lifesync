@@ -119,6 +119,7 @@ async def test_la_conversacion_es_la_del_usuario() -> None:
     usuario = await repo.obtener_por_telefono(TELEFONO_E164)
     assert usuario is not None
     assert agente.consultas[0].conversacion_id == usuario.id
+    assert agente.consultas[0].usuario_id == usuario.id
 
 
 async def test_el_agente_recibe_el_nombre_de_la_persona() -> None:

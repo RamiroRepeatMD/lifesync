@@ -18,14 +18,16 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
+from src.application.ports.calendario import Calendario
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
     CuotaDeAgenteAgotadaError,
     ServiceUnavailableError,
 )
 from src.infrastructure.config.settings import Settings
+from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, construir_grafo
-from src.infrastructure.llm.herramientas import HERRAMIENTAS
+from src.infrastructure.llm.herramientas import construir_herramientas
 
 logger = structlog.get_logger(__name__)
 
@@ -116,6 +118,10 @@ class AgenteGemini(AgenteConversacional):
             estado: dict[str, Any] = await self._grafo.ainvoke(
                 {"messages": [HumanMessage(consulta.texto)]},
                 config=configuracion,
+                # De quién es la conversación viaja por acá y no por el mensaje:
+                # es lo que impide que el texto del usuario elija de quién es la
+                # agenda que se consulta (PB-015).
+                context=ContextoDeAgente(usuario_id=consulta.usuario_id),
             )
         except Exception as exc:
             sin_cuota = _es_falta_de_cuota(exc)
@@ -204,11 +210,17 @@ def _ajustes_de_razonamiento(modelo: str) -> dict[str, Any]:
     return {}
 
 
-def crear_agente_gemini(settings: Settings) -> AgenteGemini:
-    """Construye el agente completo: modelo, memoria y grafo.
+def crear_agente_gemini(settings: Settings, calendario: Calendario | None = None) -> AgenteGemini:
+    """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
     Se llama una sola vez, en el `lifespan`. El `InMemorySaver` vive tanto como
     el proceso: crear uno por mensaje sería empezar cada conversación de cero.
+
+    Args:
+        settings: Configuración; de acá salen la API key y el modelo.
+        calendario: Adaptador de lectura de calendario. Si es `None` —porque
+            falta la configuración de OAuth— el agente simplemente no ofrece
+            esa herramienta, en vez de ofrecerla y fallar en cada uso.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -230,6 +242,11 @@ def crear_agente_gemini(settings: Settings) -> AgenteGemini:
         **_ajustes_de_razonamiento(settings.gemini_model),
     )
 
-    grafo = construir_grafo(modelo, HERRAMIENTAS, InMemorySaver())
-    logger.info("agente.creado", modelo=settings.gemini_model)
+    herramientas = construir_herramientas(calendario)
+    grafo = construir_grafo(modelo, herramientas, InMemorySaver())
+    logger.info(
+        "agente.creado",
+        modelo=settings.gemini_model,
+        con_calendario=calendario is not None,
+    )
     return AgenteGemini(grafo)

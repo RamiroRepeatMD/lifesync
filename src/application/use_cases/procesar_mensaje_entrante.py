@@ -85,6 +85,7 @@ class ProcesarMensajeEntrante:
         return await self._agente.responder(
             ConsultaDelUsuario(
                 conversacion_id=usuario.id,
+                usuario_id=usuario.id,
                 texto=mensaje.texto,
                 nombre_usuario=usuario.nombre,
             )

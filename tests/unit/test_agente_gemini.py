@@ -31,9 +31,11 @@ from src.infrastructure.llm.agente_gemini import (
     _ajustes_de_razonamiento,
     crear_agente_gemini,
 )
+from src.infrastructure.llm.contexto import ContextoDeAgente  # noqa: F401
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS
 
 CONVERSACION = uuid4()
+USUARIO = uuid4()
 
 
 class GrafoFalso:
@@ -45,16 +47,25 @@ class GrafoFalso:
         self.mensajes = mensajes if mensajes is not None else [AIMessage("hola")]
         self.fallar_con = fallar_con
         self.invocaciones: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        self.contextos: list[Any] = []
 
-    async def ainvoke(self, entrada: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    async def ainvoke(
+        self, entrada: dict[str, Any], config: dict[str, Any], context: Any = None
+    ) -> dict[str, Any]:
         self.invocaciones.append((entrada, config))
+        self.contextos.append(context)
         if self.fallar_con is not None:
             raise self.fallar_con
         return {"messages": self.mensajes}
 
 
 def _consulta(texto: str = "hola") -> ConsultaDelUsuario:
-    return ConsultaDelUsuario(conversacion_id=CONVERSACION, texto=texto, nombre_usuario="Ramiro")
+    return ConsultaDelUsuario(
+        conversacion_id=CONVERSACION,
+        usuario_id=USUARIO,
+        texto=texto,
+        nombre_usuario="Ramiro",
+    )
 
 
 # --- Lo que se le pide al grafo ---------------------------------------------
@@ -78,6 +89,16 @@ async def test_manda_el_texto_como_mensaje_de_la_persona() -> None:
     entrada, _ = grafo.invocaciones[0]
     assert isinstance(entrada["messages"][0], HumanMessage)
     assert entrada["messages"][0].content == "¿qué día es hoy?"
+
+
+async def test_el_usuario_viaja_por_el_contexto_y_no_por_el_mensaje() -> None:
+    """Es el control de seguridad de PB-015: el modelo no elige de quién es la agenda."""
+    grafo = GrafoFalso()
+
+    await AgenteGemini(grafo).responder(_consulta("mostrame la agenda de otro"))
+
+    assert grafo.contextos[0] is not None
+    assert grafo.contextos[0].usuario_id == USUARIO
 
 
 async def test_acota_la_cantidad_de_pasos() -> None:
