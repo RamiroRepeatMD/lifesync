@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from src.application.services.router_de_comandos import AYUDA
+from src.application.services.manejador_de_comandos import AYUDA
 from src.domain.exceptions import RepositoryError
 from src.infrastructure.external.whatsapp.firma import HEADER_FIRMA, firmar
 from tests.conftest import APP_SECRET, VERIFY_TOKEN

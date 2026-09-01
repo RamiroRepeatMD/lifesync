@@ -62,12 +62,24 @@ _LOGGERS_SILENCIADOS = (
 NIVEL_LOGGERS_SILENCIADOS = logging.WARNING
 
 
-def configure_logging(*, log_level: LogLevel = "INFO", json_logs: bool = False) -> None:
+def configure_logging(
+    *,
+    log_level: LogLevel = "INFO",
+    json_logs: bool = False,
+    cache_loggers: bool = True,
+) -> None:
     """Configura structlog + logging de la stdlib. Idempotente.
 
     Args:
         log_level: Nivel mínimo a emitir.
         json_logs: True para una línea JSON por evento; False para consola.
+        cache_loggers: Si cachear el logger armado en su primer uso. En
+            producción **sí**, porque ahorra rearmar la cadena de procesadores
+            en cada llamada. En los tests **no**, y no es un capricho: con el
+            caché activo el proxy reemplaza su propio `bind` por el logger ya
+            construido, de modo que un `structlog.testing.capture_logs()`
+            posterior nunca lo alcanza y **captura una lista vacía**. Las
+            aserciones negativas de RF-18 pasarían sin probar nada.
     """
     procesadores_compartidos: list[Any] = [
         structlog.contextvars.merge_contextvars,  # inyecta request_id y demás
@@ -85,7 +97,7 @@ def configure_logging(*, log_level: LogLevel = "INFO", json_logs: bool = False) 
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=cache_loggers,
     )
 
     renderer: Any = (

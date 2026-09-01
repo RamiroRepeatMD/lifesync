@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse
 
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
+    AutorizacionFallidaError,
     ConfirmationRequiredError,
     CuotaDeAgenteAgotadaError,
     DomainError,
@@ -51,6 +52,8 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     # no el cliente contra nuestra API.
     CuotaDeAgenteAgotadaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     AgenteNoDisponibleError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    # Falla del proveedor externo, no nuestra: 503 y no 500 (PB-009).
+    AutorizacionFallidaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     RepositoryError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     EncryptionError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     InfrastructureError: status.HTTP_500_INTERNAL_SERVER_ERROR,

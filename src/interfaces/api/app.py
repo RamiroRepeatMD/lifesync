@@ -15,7 +15,11 @@ import structlog
 from fastapi import FastAPI
 
 from src.infrastructure.config.logging import configure_logging
-from src.infrastructure.config.settings import Settings, get_settings
+from src.infrastructure.config.settings import Environment, Settings, get_settings
+from src.infrastructure.external.google.oauth import (
+    close_google_oauth_client,
+    create_google_oauth_client,
+)
 from src.infrastructure.external.whatsapp.cliente import (
     close_whatsapp_client,
     create_whatsapp_client,
@@ -28,7 +32,7 @@ from src.infrastructure.persistence.supabase_client import (
 )
 from src.interfaces.api.errors import register_exception_handlers
 from src.interfaces.api.middleware.request_context import RequestContextMiddleware
-from src.interfaces.api.routers import health
+from src.interfaces.api.routers import health, oauth_google
 from src.interfaces.webhooks import whatsapp as webhook_whatsapp
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _iniciar_persistencia(app, settings)
     _iniciar_whatsapp(app, settings)
     _iniciar_agente(app, settings)
+    _iniciar_google_oauth(app, settings)
     try:
         yield
     finally:
@@ -75,6 +80,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_whatsapp_client(app.state.whatsapp)
         except Exception as exc:  # el shutdown no puede romperse
             logger.warning("app.shutdown.error", recurso="whatsapp", tipo=type(exc).__name__)
+        try:
+            await close_google_oauth_client(app.state.google_oauth)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="google_oauth", tipo=type(exc).__name__)
         logger.info("app.shutdown")
 
 
@@ -132,6 +141,25 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
     app.state.agente = crear_agente_gemini(settings)
 
 
+def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:
+    """Abre el cliente HTTP hacia Google, si hay credenciales de OAuth (PB-009).
+
+    A diferencia de las otras nueve variables, éstas NO son obligatorias en
+    producción: sin ellas todo lo demás funciona y /conectar avisa. Es una
+    integración, no el circuito central.
+    """
+    if not settings.google_oauth_configurado:
+        logger.warning(
+            "google_oauth.no_configurado",
+            motivo="faltan GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o GOOGLE_REDIRECT_URI",
+            consecuencia="no se pueden conectar cuentas de Google; el resto anda igual",
+        )
+        return
+
+    app.state.google_oauth = create_google_oauth_client()
+    logger.info("google_oauth.listo")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Construye y configura la aplicación.
 
@@ -139,7 +167,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings: Configuración a usar. Si es None, se lee del entorno.
     """
     settings = settings or get_settings()
-    configure_logging(log_level=settings.log_level, json_logs=settings.use_json_logs)
+    configure_logging(
+        log_level=settings.log_level,
+        json_logs=settings.use_json_logs,
+        # En testing se desactiva el caché de loggers para que `capture_logs`
+        # pueda interceptarlos. Ver el docstring de `configure_logging`.
+        cache_loggers=settings.environment is not Environment.TESTING,
+    )
 
     app = FastAPI(
         title=settings.app_name,
@@ -158,6 +192,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.token_cipher = None
     app.state.whatsapp = None
     app.state.agente = None
+    app.state.google_oauth = None
     # Vive todo el proceso: es lo que evita responder dos veces cuando Meta
     # reintrega el mismo mensaje.
     app.state.deduplicador_whatsapp = DeduplicadorDeMensajes()
@@ -170,5 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Fuera del prefijo /api/v1: la URL la configura Meta y conviene que sea
     # estable e independiente del versionado de nuestra API.
     app.include_router(webhook_whatsapp.router)
+    # Fuera del prefijo /api/v1: la URL queda registrada en Google Cloud
+    # Console y moverla obliga a reconfigurarla allá (PB-009).
+    app.include_router(oauth_google.router)
 
     return app

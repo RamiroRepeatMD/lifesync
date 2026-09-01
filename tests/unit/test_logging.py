@@ -12,6 +12,7 @@ import logging
 from collections.abc import Iterator
 
 import pytest
+import structlog
 
 from src.infrastructure.config.logging import (
     _LOGGERS_SILENCIADOS,
@@ -144,3 +145,41 @@ def test_configure_logging_es_idempotente() -> None:
     configure_logging(log_level="INFO", json_logs=False)
 
     assert len(logging.getLogger().handlers) == 1
+
+
+# --- La trampa de capture_logs (PB-009) -------------------------------------
+#
+# Tercera trampa de la familia, y del mismo tipo que la de caplog: el test pasa
+# por el motivo equivocado. Apareció al escribir la primera aserción POSITIVA
+# sobre un log; las negativas la venían tapando desde PB-004.
+#
+# Mecanismo, verificado quitando el arreglo y viendo fallar los tests: con
+# `cache_logger_on_first_use=True`, el proxy de structlog **reemplaza su propio
+# `bind`** por el logger ya armado en el primer uso. Un `capture_logs`
+# posterior cambia los procesadores globales, pero ese logger ya no los
+# consulta: `eventos` queda vacío y `assert secreto not in eventos` no prueba
+# nada.
+#
+# Por eso `create_app` pasa `cache_loggers=False` en ENVIRONMENT=testing.
+
+
+def test_capture_logs_captura_de_verdad_sin_cache() -> None:
+    """Si esto falla, TODAS las aserciones negativas de RF-18 son papel pintado."""
+    configure_logging(log_level="INFO", json_logs=False, cache_loggers=False)
+    logger = structlog.get_logger("sonda.sin_cache")
+    logger.info("evento.calienta_el_cache")
+
+    with structlog.testing.capture_logs() as eventos:
+        logger.info("evento.esperado")
+
+    assert [e["event"] for e in eventos] == ["evento.esperado"]
+
+
+def test_los_tests_corren_sin_cache_de_loggers() -> None:
+    """El arreglo tiene que estar puesto donde se arma la app, no sólo acá."""
+    from src.infrastructure.config.settings import Environment, Settings
+    from src.interfaces.api.app import create_app
+
+    create_app(Settings(_env_file=None, environment=Environment.TESTING, log_level="WARNING"))
+
+    assert structlog.get_config()["cache_logger_on_first_use"] is False

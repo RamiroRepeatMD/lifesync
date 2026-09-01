@@ -111,6 +111,18 @@ class CuotaDeAgenteAgotadaError(AgenteNoDisponibleError):
     mensaje_usuario = "Estoy al límite de consultas por ahora. Probá de nuevo en un minuto."
 
 
+class AutorizacionFallidaError(InfrastructureError):
+    """No se pudo completar la autorización con un proveedor externo (PB-009).
+
+    Cubre lo que puede fallar del lado del proveedor: que rechace el canje del
+    código, que no devuelva credenciales o que se caiga la renovación. No cubre
+    un `state` inválido —eso es `InvalidValueError`, porque el problema está en
+    lo que llegó, no en el proveedor.
+    """
+
+    mensaje_usuario = "No pude completar la conexión con tu cuenta. Probá de nuevo."
+
+
 class EncryptionError(InfrastructureError):
     """No se pudo cifrar o descifrar un dato sensible (RF-18).
 

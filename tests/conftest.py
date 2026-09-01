@@ -8,6 +8,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
+from src.application.services.manejador_de_comandos import ManejadorDeComandos
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.persistence.encryption import TokenCipher
@@ -110,7 +111,7 @@ def client_con_whatsapp(
     """
     app = create_app(settings_whatsapp)
     app.dependency_overrides[get_procesador_de_mensajes] = lambda: ProcesarMensajeEntrante(
-        repositorio_usuarios, mensajero_falso, agente_falso
+        repositorio_usuarios, mensajero_falso, agente_falso, ManejadorDeComandos(None)
     )
     with TestClient(app) as cliente:
         yield cliente

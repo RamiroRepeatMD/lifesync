@@ -111,6 +111,9 @@ async def test_nunca_se_loguea_el_valor_del_token(
     with structlog.testing.capture_logs() as eventos:
         await _repo(supabase_falso, cipher).guardar(_token(refresh_token=REFRESH_PLANO))
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert TOKEN_PLANO not in registrado
     assert REFRESH_PLANO not in registrado

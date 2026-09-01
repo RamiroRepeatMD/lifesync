@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -20,6 +21,10 @@ from pydantic import Field
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
+from src.application.ports.autorizador_google import (
+    AutorizadorGoogle,
+    CredencialesGoogle,
+)
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.usuario import Usuario
@@ -254,6 +259,52 @@ class ModeloFalso(BaseChatModel):
         indice = min(len(self.recibidos) - 1, len(self.guion) - 1)
         respuesta = self.guion[indice] if self.guion else AIMessage("")
         return ChatResult(generations=[ChatGeneration(message=respuesta)])
+
+
+class AutorizadorFalso(AutorizadorGoogle):
+    """Doble del puerto de autorización: no habla con Google.
+
+    `usuario_del_estado` devuelve `usuario_fijo` sin mirar el `state`, salvo que
+    se cargue `estado_invalido`. La verificación real de la firma se prueba en
+    `test_estado_oauth.py`, que es donde vive esa lógica.
+    """
+
+    def __init__(
+        self,
+        usuario_fijo: UUID | None = None,
+        credenciales: CredencialesGoogle | None = None,
+    ) -> None:
+        self.usuario_fijo = usuario_fijo or uuid4()
+        self.credenciales = credenciales or CredencialesGoogle(
+            access_token="access-de-prueba",
+            refresh_token="refresh-de-prueba",
+            scopes=("https://www.googleapis.com/auth/calendar.readonly",),
+        )
+        self.estado_invalido: Exception | None = None
+        self.fallar_canje: Exception | None = None
+        self.fallar_refresco: Exception | None = None
+        self.codigos_canjeados: list[str] = []
+        self.refresh_usados: list[str] = []
+
+    def url_de_autorizacion(self, usuario_id: UUID, ahora: datetime) -> str:
+        return f"https://accounts.google.com/o/oauth2/v2/auth?state=firmado-{usuario_id}"
+
+    def usuario_del_estado(self, estado: str, ahora: datetime) -> UUID:
+        if self.estado_invalido is not None:
+            raise self.estado_invalido
+        return self.usuario_fijo
+
+    async def canjear_codigo(self, codigo: str) -> CredencialesGoogle:
+        self.codigos_canjeados.append(codigo)
+        if self.fallar_canje is not None:
+            raise self.fallar_canje
+        return self.credenciales
+
+    async def refrescar(self, refresh_token: str) -> CredencialesGoogle:
+        self.refresh_usados.append(refresh_token)
+        if self.fallar_refresco is not None:
+            raise self.fallar_refresco
+        return self.credenciales
 
 
 class RepositorioOAuthTokenEnMemoria(OAuthTokenRepository):

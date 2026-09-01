@@ -10,15 +10,14 @@ que escriban (RF-08)— entra con las primeras integraciones reales.
 
 from __future__ import annotations
 
-from uuid import UUID
-
 import structlog
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.dto.mensaje_entrante import MensajeEntrante
 from src.application.ports.agente import AgenteConversacional
 from src.application.ports.whatsapp import MensajeroWhatsApp
-from src.application.services.router_de_comandos import respuesta_fija
+from src.application.services.manejador_de_comandos import ManejadorDeComandos
+from src.domain.entities.usuario import Usuario
 from src.domain.exceptions import RepositoryError
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
@@ -34,6 +33,7 @@ class ProcesarMensajeEntrante:
         usuarios: UsuarioRepository,
         mensajero: MensajeroWhatsApp,
         agente: AgenteConversacional,
+        comandos: ManejadorDeComandos,
     ) -> None:
         """Recibe sus dependencias por constructor (inyección explícita).
 
@@ -44,6 +44,7 @@ class ProcesarMensajeEntrante:
         self._usuarios = usuarios
         self._mensajero = mensajero
         self._agente = agente
+        self._comandos = comandos
 
     async def ejecutar(self, mensaje: MensajeEntrante) -> None:
         """Procesa un mensaje entrante de punta a punta.
@@ -69,26 +70,23 @@ class ProcesarMensajeEntrante:
             largo_texto=len(mensaje.texto),
         )
 
-        respuesta = await self._decidir_respuesta(mensaje, usuario.id, usuario.nombre)
+        respuesta = await self._decidir_respuesta(mensaje, usuario)
         await self._mensajero.enviar_texto(mensaje.remitente, respuesta)
 
-    async def _decidir_respuesta(
-        self,
-        mensaje: MensajeEntrante,
-        usuario_id: UUID,
-        nombre: str | None,
-    ) -> str:
-        """Comando fijo si lo hay; si no, que lo piense el agente."""
-        fija = respuesta_fija(mensaje.texto)
-        if fija is not None:
+    async def _decidir_respuesta(self, mensaje: MensajeEntrante, usuario: Usuario) -> str:
+        """Comando si lo hay; si no, que lo piense el agente."""
+        del_comando = await self._comandos.responder(mensaje.texto, usuario, mensaje.enviado_en)
+        if del_comando is not None:
             logger.info("whatsapp.respuesta_de_comando", wamid=mensaje.wamid)
-            return fija
+            return del_comando
 
+        # mypy: `ejecutar` ya descartó el id None antes de llegar acá.
+        assert usuario.id is not None  # noqa: S101
         return await self._agente.responder(
             ConsultaDelUsuario(
-                conversacion_id=usuario_id,
+                conversacion_id=usuario.id,
                 texto=mensaje.texto,
-                nombre_usuario=nombre,
+                nombre_usuario=usuario.nombre,
             )
         )
 

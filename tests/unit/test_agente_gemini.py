@@ -197,6 +197,9 @@ async def test_el_texto_de_la_cuota_no_se_loguea() -> None:
     ):
         await AgenteGemini(grafo).responder(_consulta())
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert "AIzaSyFAKEKEY" not in registrado
     assert '"sin_cuota": true' in registrado.lower()
@@ -212,6 +215,9 @@ async def test_el_error_no_arrastra_el_mensaje_de_la_libreria() -> None:
     ):
         await AgenteGemini(grafo).responder(_consulta("mi diagnostico medico"))
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert "mi diagnostico medico" not in registrado
     assert "agente.fallo" in registrado
@@ -226,6 +232,9 @@ async def test_no_se_loguea_ni_la_pregunta_ni_la_respuesta() -> None:
     with structlog.testing.capture_logs() as eventos:
         await AgenteGemini(grafo).responder(_consulta("cuando es mi turno medico"))
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert "cuando es mi turno medico" not in registrado
     assert "tu turno es el martes" not in registrado

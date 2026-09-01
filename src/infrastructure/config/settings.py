@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     # gemini-3.5-flash-lite, medido en ~0,7-1,5 s— sin tocar código.
     gemini_model: str = "gemini-3.5-flash"
 
+    # --- Google OAuth2 (PB-009) ---
+    # Credenciales de la app en Google Cloud Console.
+    #
+    # NO son obligatorias en producción, a diferencia de las otras nueve, y es
+    # deliberado: aquéllas son el circuito central —recibir, entender,
+    # responder— y sin ellas el producto no existe. Google es una integración
+    # opcional: sin configurar, todo lo demás anda y /conectar lo dice.
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    # Tiene que coincidir EXACTAMENTE con el registrado en Google, incluido el
+    # esquema y la barra final: compara el string completo y cualquier
+    # diferencia devuelve `redirect_uri_mismatch`.
+    google_redirect_uri: str | None = None
+
     @field_validator(
         "supabase_url",
         "supabase_key",
@@ -98,6 +112,9 @@ class Settings(BaseSettings):
         "whatsapp_verify_token",
         "whatsapp_app_secret",
         "google_api_key",
+        "google_client_id",
+        "google_client_secret",
+        "google_redirect_uri",
         mode="before",
     )
     @classmethod
@@ -147,6 +164,22 @@ class Settings(BaseSettings):
     def agente_configurado(self) -> bool:
         """True si el agente conversacional puede hablar con Gemini (PB-005)."""
         return self.google_api_key is not None
+
+    @property
+    def google_oauth_configurado(self) -> bool:
+        """True si se puede ofrecer conectar una cuenta de Google (PB-009).
+
+        Las tres van juntas: con dos de las tres el flujo arranca igual y falla
+        recién en el callback, o sea después de que la persona ya dio su
+        consentimiento. Es preferible no ofrecerlo.
+        """
+        return all(
+            (
+                self.google_client_id,
+                self.google_client_secret,
+                self.google_redirect_uri,
+            )
+        )
 
     @property
     def firma_exigida(self) -> bool:

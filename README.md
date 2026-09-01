@@ -29,7 +29,7 @@ La documentación completa está en [`docs/`](docs/).
 | Canal de chat | WhatsApp Cloud API (Meta) |
 | Backend | Python 3.11+ · FastAPI |
 | Agente IA | LangGraph + LangChain |
-| LLM | Google Gemini 1.5 Flash |
+| LLM | Google Gemini 3.5 Flash |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 cifrados |
 | Integraciones | Google APIs · Notion API (OAuth2) |
 | Logging | structlog (estructurado, JSON en producción) |
@@ -195,15 +195,18 @@ El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
 
 ### Qué contesta hoy
 
-Un router mínimo de comandos: `/ayuda`, `/estado`, y para cualquier otra cosa un mensaje honesto de
-"todavía no sé interpretar lenguaje natural". Es el andamiaje que PB-005 reemplaza por el grafo de
-LangGraph.
+Lenguaje natural, con el agente de LangGraph + Gemini (PB-005). Los comandos siguen siendo
+determinísticos y no pasan por el modelo: `/ayuda`, `/estado` y `/conectar`.
+
+Que la ayuda no dependa del LLM es a propósito: RF-11 pide un sistema de ayuda, y uno que cambia
+de texto en cada invocación —o que inventa funciones que no existen— no lo cumple. Además es lo
+único que sigue contestando si falta la API key.
 
 ### Cómo funciona por dentro
 
 ```
 POST → valida firma HMAC sobre los bytes crudos → responde 200 → BackgroundTask:
-       deduplica por wamid → busca o crea el Usuario → decide respuesta → envía por Graph API
+       deduplica por wamid → busca o crea el Usuario → comando fijo o agente → envía por Graph API
 ```
 
 Tres decisiones que conviene conocer antes de tocarlo:
@@ -222,6 +225,41 @@ Tres decisiones que conviene conocer antes de tocarlo:
   algún día los webhooks pueden llegar sin `wa_id`; el parser ya lo detecta y lo loguea.
 - No se manejan mensajes que no son de texto: se descartan con `whatsapp.tipo_no_soportado`.
 - Fuera de la ventana de 24 h de atención hay que usar plantillas. Hoy sólo se loguea el error 131047.
+
+---
+
+## Conectar Google (PB-009)
+
+La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le manda
+un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
+Sólo se piden permisos de **lectura** de calendario.
+
+### Configurar en Google Cloud Console
+
+1. **Habilitar la Google Calendar API** en el proyecto.
+2. **Pantalla de consentimiento de OAuth** → External, en modo *Testing*, y
+   agregarte a vos mismo como *usuario de prueba*.
+3. **Credenciales → Crear credenciales → ID de cliente de OAuth 2.0**, tipo
+   *Aplicación web*.
+4. **URI de redireccionamiento autorizado**, exactamente:
+
+   ```
+   https://<tu-servicio>.up.railway.app/oauth/google/callback
+   ```
+
+   Google compara el string completo: una barra de más devuelve
+   `redirect_uri_mismatch`.
+5. Copiar el ID y el secreto al `.env` y a Railway.
+
+> Con la app en modo *Testing*, **los refresh tokens de Google caducan a los 7
+> días**. Alcanza para el cuatrimestre, pero hay que reconectar cada semana
+> hasta publicar la app.
+
+### Verificar que quedó bien
+
+En Supabase, la fila de `oauth_tokens` tiene que existir con
+`access_token_cifrado` empezando en `gA` y **`refresh_token_cifrado` distinto de
+NULL**. Si el refresh es NULL, faltó `access_type=offline` en la autorización.
 
 ---
 
@@ -364,6 +402,9 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `WHATSAPP_VERIFY_TOKEN` | — | Handshake GET del webhook (lo inventás vos) |
 | `WHATSAPP_APP_SECRET` | — | Firma HMAC de los POST. **No es el verify token** |
 | `GOOGLE_API_KEY` | — | Key de Gemini para el agente conversacional |
+| `GOOGLE_CLIENT_ID` | — | ID de cliente OAuth2 (PB-009). Opcional: sin él sólo se deshabilita /conectar |
+| `GOOGLE_CLIENT_SECRET` | — | Secreto del cliente OAuth2 |
+| `GOOGLE_REDIRECT_URI` | — | Debe coincidir **exactamente** con la registrada en Google |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Modelo a usar. La cuota gratuita es por modelo y por día |
 
 Las tres de Supabase son opcionales fuera de producción (modo degradado) y **obligatorias** con
@@ -396,6 +437,6 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 | PB-005 | LangGraph/LangChain + Gemini + tool-calling base | ✅ |
 | PB-006 | Logging estructurado + errores + health checks | 🟡 base lista |
 | PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ✅ |
-| PB-009 | Flujo OAuth2 con Google (inicio) | ⬜ |
+| PB-009 | Flujo OAuth2 con Google | ✅ |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).

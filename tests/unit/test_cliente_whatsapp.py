@@ -264,6 +264,9 @@ async def test_el_aviso_no_incluye_el_numero() -> None:
     with structlog.testing.capture_logs() as eventos:
         await cliente.enviar_texto(DESTINO, "hola")
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert WA_ID not in registrado
     assert "541141234567" not in registrado

@@ -9,7 +9,11 @@ import pytest
 import structlog
 
 from src.application.dto.mensaje_entrante import MensajeEntrante
-from src.application.services.router_de_comandos import AYUDA, ESTADO
+from src.application.services.manejador_de_comandos import (
+    AYUDA,
+    ESTADO_SIN_CUENTAS,
+    ManejadorDeComandos,
+)
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
 from src.domain.exceptions import AgenteNoDisponibleError, RepositoryError
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
@@ -37,7 +41,10 @@ def _caso(
     repo = usuarios or RepositorioUsuarioEnMemoria()
     men = mensajero or MensajeroFalso()
     age = agente or AgenteFalso()
-    return ProcesarMensajeEntrante(repo, men, age), repo, men, age
+    # Sin OAuth configurado: alcanza para estos tests, y los comandos que
+    # dependen de Google tienen los suyos en test_manejador_de_comandos.py.
+    comandos = ManejadorDeComandos(None)
+    return ProcesarMensajeEntrante(repo, men, age, comandos), repo, men, age
 
 
 # --- Resolución del usuario --------------------------------------------------
@@ -81,7 +88,7 @@ async def test_contesta_al_remitente() -> None:
 
 @pytest.mark.parametrize(
     ("texto", "esperado"),
-    [("/ayuda", AYUDA), ("/estado", ESTADO)],
+    [("/ayuda", AYUDA), ("/estado", ESTADO_SIN_CUENTAS)],
     ids=["ayuda", "estado"],
 )
 async def test_los_comandos_los_contesta_el_router(texto: str, esperado: str) -> None:
@@ -185,6 +192,9 @@ async def test_no_se_loguea_ni_el_telefono_ni_el_texto() -> None:
     with structlog.testing.capture_logs() as eventos:
         await caso.ejecutar(_mensaje(texto="mi diagnostico medico"))
 
+    # Sin esto la aserción negativa de abajo pasaría aunque `capture_logs`
+    # no hubiera capturado nada. Ver `test_logging.py`, sección de la trampa.
+    assert eventos
     registrado = json.dumps(eventos, default=str)
     assert "mi diagnostico medico" not in registrado
     assert WA_ID not in registrado
