@@ -15,6 +15,7 @@ from uuid import UUID
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -43,11 +44,13 @@ logger = structlog.get_logger(__name__)
 # persona no recibe nada. Mejor una respuesta cortada que ninguna.
 LARGO_MAXIMO_WHATSAPP = 4096
 
-# Cuánto esperamos al modelo antes de darlo por perdido. El RNF de eficiencia
-# pide responder en ≤ 3 s y el resto del circuito ya consume ~1,7 s, así que
-# esto no es el objetivo sino el techo: a partir de acá la espera es peor que
-# el aviso de error.
-TIMEOUT_MODELO_SEGUNDOS = 10.0
+# Cuánto esperamos al modelo antes de darlo por perdido. NO es el objetivo de
+# latencia (eso lo mide duracion_ms contra el RNF de 3 s): es la red de
+# contención. Se subió de 10 a 18 con evidencia: contra la API real se
+# midieron llamadas legítimas de 13-16 s (primeras llamadas, colas del free
+# tier), y con 10 s el ReadTimeout las cortaba y dejaba a la persona sin
+# respuesta — peor que esperar.
+TIMEOUT_MODELO_SEGUNDOS = 18.0
 
 # Un reintento, y no más. Probando contra la API real aparecieron
 # `504 DEADLINE_EXCEEDED` propios de Google en turnos que después anduvieron
@@ -346,17 +349,23 @@ def _ajustes_de_razonamiento(modelo: str) -> dict[str, Any]:
     return {}
 
 
-def crear_agente_gemini(settings: Settings, calendario: Calendario | None = None) -> AgenteGemini:
+def crear_agente_gemini(
+    settings: Settings,
+    calendario: Calendario | None = None,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
-    Se llama una sola vez, en el `lifespan`. El `InMemorySaver` vive tanto como
-    el proceso: crear uno por mensaje sería empezar cada conversación de cero.
+    Se llama una sola vez, en el `lifespan`.
 
     Args:
         settings: Configuración; de acá salen la API key y el modelo.
         calendario: Adaptador de lectura de calendario. Si es `None` —porque
             falta la configuración de OAuth— el agente simplemente no ofrece
             esa herramienta, en vez de ofrecerla y fallar en cada uso.
+        checkpointer: Dónde viven las conversaciones y las confirmaciones
+            pendientes (PB-013). Con `None` se usa memoria RAM, que no
+            sobrevive a un redeploy: es el modo degradado, no el normal.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -379,10 +388,13 @@ def crear_agente_gemini(settings: Settings, calendario: Calendario | None = None
     )
 
     herramientas = construir_herramientas(calendario)
-    grafo = construir_grafo(modelo, herramientas, InMemorySaver())
+    grafo = construir_grafo(
+        modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
+    )
     logger.info(
         "agente.creado",
         modelo=settings.gemini_model,
         con_calendario=calendario is not None,
+        memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)

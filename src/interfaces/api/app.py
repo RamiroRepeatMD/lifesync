@@ -70,9 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await _iniciar_persistencia(app, settings)
     _iniciar_whatsapp(app, settings)
-    # El orden importa: el agente recibe el calendario, y el calendario
-    # necesita el cliente HTTP de Google que abre _iniciar_google_oauth.
+    # El orden importa: el agente recibe el calendario y el checkpointer, así
+    # que sus proveedores arrancan antes.
     _iniciar_google_oauth(app, settings)
+    await _iniciar_memoria_del_agente(app, settings)
     _iniciar_agente(app, settings)
     try:
         yield
@@ -91,6 +92,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_google_oauth_client(app.state.google_oauth)
         except Exception as exc:  # el shutdown no puede romperse
             logger.warning("app.shutdown.error", recurso="google_oauth", tipo=type(exc).__name__)
+        try:
+            from src.infrastructure.llm.checkpointer import cerrar_pool
+
+            await cerrar_pool(app.state.checkpointer_pool)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="checkpointer", tipo=type(exc).__name__)
         logger.info("app.shutdown")
 
 
@@ -126,6 +133,36 @@ def _iniciar_whatsapp(app: FastAPI, settings: Settings) -> None:
     logger.info("whatsapp.conectado", firma_exigida=settings.firma_exigida)
 
 
+async def _iniciar_memoria_del_agente(app: FastAPI, settings: Settings) -> None:
+    """Abre la memoria persistida del agente, si está configurada (PB-013).
+
+    Sin `SUPABASE_DB_URL` el agente funciona igual con memoria RAM, pero cada
+    redeploy borra las conversaciones y las confirmaciones pendientes: se avisa
+    fuerte porque es un modo degradado, no una preferencia.
+    """
+    if not settings.checkpointer_configurado:
+        logger.warning(
+            "checkpointer.no_configurado",
+            motivo="falta SUPABASE_DB_URL (o TOKEN_ENCRYPTION_KEY)",
+            consecuencia="la memoria del agente vive en RAM y muere en cada redeploy",
+        )
+        return
+
+    # Import diferido, como el del agente: sin configurar no se paga el costo.
+    from src.infrastructure.llm.checkpointer import crear_checkpointer_postgres
+
+    try:
+        pool, saver = await crear_checkpointer_postgres(settings)
+    except Exception as exc:
+        # Una base inalcanzable no puede impedir que el bot conteste: se
+        # degrada a RAM y queda el error para diagnosticar.
+        logger.error("checkpointer.fallo_al_iniciar", tipo=type(exc).__name__)
+        return
+
+    app.state.checkpointer_pool = pool
+    app.state.checkpointer = saver
+
+
 def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
     """Compila el grafo del agente, si hay API key (PB-005).
 
@@ -145,7 +182,9 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
     # LangChain, que es casi un segundo de arranque.
     from src.infrastructure.llm.agente_gemini import crear_agente_gemini
 
-    app.state.agente = crear_agente_gemini(settings, _calendario_de(app))
+    app.state.agente = crear_agente_gemini(
+        settings, _calendario_de(app), checkpointer=app.state.checkpointer
+    )
 
 
 def _calendario_de(app: FastAPI) -> Calendario | None:
@@ -226,6 +265,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.whatsapp = None
     app.state.agente = None
     app.state.google_oauth = None
+    app.state.checkpointer = None
+    app.state.checkpointer_pool = None
     # Vive todo el proceso: es lo que evita responder dos veces cuando Meta
     # reintrega el mismo mensaje.
     app.state.deduplicador_whatsapp = DeduplicadorDeMensajes()

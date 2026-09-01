@@ -408,6 +408,7 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `WHATSAPP_VERIFY_TOKEN` | — | Handshake GET del webhook (lo inventás vos) |
 | `WHATSAPP_APP_SECRET` | — | Firma HMAC de los POST. **No es el verify token** |
 | `GOOGLE_API_KEY` | — | Key de Gemini para el agente conversacional |
+| `SUPABASE_DB_URL` | — | Session pooler de Supabase (PB-013). Sin ella, la memoria del bot vive en RAM y muere en cada redeploy; con ella, las conversaciones se guardan **cifradas** |
 | `GOOGLE_CLIENT_ID` | — | ID de cliente OAuth2 (PB-009). Opcional: sin él sólo se deshabilita /conectar |
 | `GOOGLE_CLIENT_SECRET` | — | Secreto del cliente OAuth2 |
 | `GOOGLE_REDIRECT_URI` | — | Debe coincidir **exactamente** con la registrada en Google |

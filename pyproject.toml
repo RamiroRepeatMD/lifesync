@@ -31,6 +31,11 @@ dependencies = [
     "langgraph>=1.2,<2.0",
     "langchain-core>=1.5,<2.0",
     "langchain-google-genai>=4.3,<5.0",
+    # Persistencia de la conversación en Postgres/Supabase (PB-013). Trae
+    # psycopg y psycopg-pool: es la única pieza que habla con la base por SQL
+    # directo en vez de PostgREST — el checkpointer de LangGraph necesita
+    # transacciones y tipos que la API REST no da.
+    "langgraph-checkpoint-postgres>=3.1,<4.0",
 ]
 
 # Grupo de dependencias PEP 735: `uv sync` lo instala por defecto, y NO se

@@ -95,6 +95,22 @@ class Settings(BaseSettings):
     # variable a otro modelo es empezar con el tanque lleno.
     gemini_model: str = "gemini-3.5-flash-lite"
 
+    # --- Memoria conversacional persistida (PB-013) ---
+    # Connection string del **Session pooler** de Supabase (Connect → Session
+    # pooler), con el password de la base adentro — por eso es SecretStr. Es
+    # la única pieza que habla con Postgres por SQL directo: el checkpointer
+    # de LangGraph necesita transacciones que PostgREST no da.
+    #
+    # Session pooler y no las otras dos opciones, por motivos verificados:
+    # la conexión directa es IPv6-only en Supabase (y el egress IPv6 de
+    # Railway no está garantizado) y el transaction pooler rompe con los
+    # prepared statements de psycopg.
+    #
+    # Sin esta variable el agente arranca con memoria en RAM y lo avisa:
+    # funciona, pero cada redeploy borra las conversaciones y las
+    # confirmaciones pendientes.
+    supabase_db_url: SecretStr | None = None
+
     # --- Google OAuth2 (PB-009) ---
     # Credenciales de la app en Google Cloud Console.
     #
@@ -119,6 +135,7 @@ class Settings(BaseSettings):
         "whatsapp_verify_token",
         "whatsapp_app_secret",
         "google_api_key",
+        "supabase_db_url",
         "google_client_id",
         "google_client_secret",
         "google_redirect_uri",
@@ -171,6 +188,15 @@ class Settings(BaseSettings):
     def agente_configurado(self) -> bool:
         """True si el agente conversacional puede hablar con Gemini (PB-005)."""
         return self.google_api_key is not None
+
+    @property
+    def checkpointer_configurado(self) -> bool:
+        """True si la memoria del agente puede persistirse en Postgres (PB-013).
+
+        Exige también la clave de cifrado: los checkpoints llevan la
+        conversación completa y no se persisten en claro (RF-18).
+        """
+        return self.supabase_db_url is not None and self.token_encryption_key is not None
 
     @property
     def google_oauth_configurado(self) -> bool:
