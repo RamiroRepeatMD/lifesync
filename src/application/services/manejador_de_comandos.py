@@ -44,9 +44,15 @@ ESTADO_SIN_CUENTAS = (
     "Escribí /conectar para vincular tu Google y que pueda ver tu calendario."
 )
 
+# OJO: este texto no puede prometer lo que el agente todavía no sabe hacer.
+# Hoy la conexión está guardada y verificada, pero **no hay ninguna herramienta
+# que lea el calendario** (eso es PB-015). Decir acá "preguntame qué tenés
+# mañana" mandaba a la persona a un callejón: el agente le contestaba, con
+# razón, que no tiene acceso. Actualizarlo es parte de PB-015.
 ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
-    "Puedo consultar tu calendario. Preguntame, por ejemplo, qué tenés mañana."
+    "Todavía no puedo leer tu calendario: esa parte está en construcción. "
+    "Cuando esté lista, vas a poder preguntarme qué tenés en el día."
 )
 
 CONECTAR_NO_DISPONIBLE = (
