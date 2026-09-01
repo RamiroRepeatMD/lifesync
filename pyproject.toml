@@ -36,6 +36,12 @@ dependencies = [
     # directo en vez de PostgREST — el checkpointer de LangGraph necesita
     # transacciones y tipos que la API REST no da.
     "langgraph-checkpoint-postgres>=3.1,<4.0",
+    # [binary] NO es opcional: el psycopg puro necesita la libpq nativa del
+    # sistema, que python:3.13-slim no trae. Sin esto el contenedor muere al
+    # arrancar con "ImportError: no pq wrapper available" — pasó en el deploy
+    # del 01/09. En macOS funciona igual porque libpq suele estar instalada,
+    # que es exactamente por qué el bug no se ve en local.
+    "psycopg[binary]>=3.2,<4.0",
 ]
 
 # Grupo de dependencias PEP 735: `uv sync` lo instala por defecto, y NO se

@@ -148,14 +148,17 @@ async def _iniciar_memoria_del_agente(app: FastAPI, settings: Settings) -> None:
         )
         return
 
-    # Import diferido, como el del agente: sin configurar no se paga el costo.
-    from src.infrastructure.llm.checkpointer import crear_checkpointer_postgres
-
     try:
+        # El import diferido va ADENTRO del try, y no es prolijidad: quedó
+        # afuera en el deploy del 01/09 y un ImportError (faltaba libpq en la
+        # imagen) mató el arranque completo en vez de degradar a RAM. La
+        # memoria es opcional; su import también tiene que serlo.
+        from src.infrastructure.llm.checkpointer import crear_checkpointer_postgres
+
         pool, saver = await crear_checkpointer_postgres(settings)
     except Exception as exc:
-        # Una base inalcanzable no puede impedir que el bot conteste: se
-        # degrada a RAM y queda el error para diagnosticar.
+        # Una base inalcanzable —o una dependencia rota— no puede impedir que
+        # el bot conteste: se degrada a RAM y queda el error para diagnosticar.
         logger.error("checkpointer.fallo_al_iniciar", tipo=type(exc).__name__)
         return
 
