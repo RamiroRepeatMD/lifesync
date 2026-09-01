@@ -218,13 +218,15 @@ def test_produccion_sin_api_key_de_gemini_no_arranca() -> None:
 
 
 def test_el_modelo_por_defecto_es_uno_que_la_cuenta_puede_usar() -> None:
-    """Verificado contra la API real: 1.5 no existe y 2.5 da 404 a cuentas nuevas."""
-    assert _settings().gemini_model == "gemini-3.5-flash"
+    """Verificado contra la API real: 1.5 no existe, 2.5 da 404, y los flash
+    grandes (3.5 y 3.6) tienen 20 peticiones POR DÍA en el plan gratuito —
+    inviable para ensayar y demostrar el mismo día."""
+    assert _settings().gemini_model == "gemini-3.5-flash-lite"
 
 
 def test_el_modelo_se_puede_cambiar_por_entorno() -> None:
     """La cuota gratuita es por modelo y por día: cambiarlo es la salida de emergencia."""
-    assert _settings(gemini_model="gemini-3.5-flash-lite").gemini_model == "gemini-3.5-flash-lite"
+    assert _settings(gemini_model="gemini-3.5-flash").gemini_model == "gemini-3.5-flash"
 
 
 # --- Variables vacías (PB-007) ----------------------------------------------

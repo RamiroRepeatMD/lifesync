@@ -82,11 +82,18 @@ class Settings(BaseSettings):
     #                     (GenerateRequestsPerDayPerProjectPerModel-FreeTier).
     #                     No alcanza para probar y demostrar el mismo día.
     #
-    # gemini-3.5-flash es GA, sin fecha de baja, contesta en ~1,6-2,1 s y hace
-    # tool-calling bien. La cuota gratuita es POR MODELO Y POR DÍA, así que si
-    # se agota alcanza con mover esta variable —por ejemplo a
-    # gemini-3.5-flash-lite, medido en ~0,7-1,5 s— sin tocar código.
-    gemini_model: str = "gemini-3.5-flash"
+    #   gemini-3.5-flash  anda y hace buen tool-calling, pero su plan gratuito
+    #                     resultó ser TAMBIÉN de 20 peticiones diarias
+    #                     (GenerateRequestsPerDayPerProjectPerModel-FreeTier,
+    #                     verificado el 01/09 agotándolo). Con 2-3 llamadas por
+    #                     turno con herramientas, son ~7 turnos por día: se
+    #                     acaba ensayando, antes de la demo.
+    #
+    # gemini-3.5-flash-lite: cuota diaria más holgada, ~0,7-2,1 s medidos, y el
+    # ciclo completo de tool-calling con confirmación verificado contra Google
+    # real. La cuota gratuita es POR MODELO Y POR DÍA: si se agota, mover esta
+    # variable a otro modelo es empezar con el tanque lleno.
+    gemini_model: str = "gemini-3.5-flash-lite"
 
     # --- Google OAuth2 (PB-009) ---
     # Credenciales de la app en Google Cloud Console.
