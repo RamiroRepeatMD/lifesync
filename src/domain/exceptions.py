@@ -136,6 +136,21 @@ class AutorizacionFallidaError(InfrastructureError):
     mensaje_usuario = "No pude completar la conexión con tu cuenta. Probá de nuevo."
 
 
+class PermisoInsuficienteError(AutorizacionFallidaError):
+    """La credencial es válida pero no alcanza para la operación (PB-016).
+
+    El caso concreto: una cuenta conectada antes de PB-016 tiene sólo el scope
+    de lectura, y la primera escritura devuelve 403. Se separa de su madre
+    porque el remedio es distinto y la persona puede ejecutarlo: volver a
+    autorizar con /conectar, que ahora pide también el permiso de escritura.
+    """
+
+    mensaje_usuario = (
+        "Me falta permiso para modificar tu calendario. Escribí /conectar para "
+        "actualizar la autorización."
+    )
+
+
 class EncryptionError(InfrastructureError):
     """No se pudo cifrar o descifrar un dato sensible (RF-18).
 

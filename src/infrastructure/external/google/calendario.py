@@ -1,4 +1,4 @@
-"""Adaptador de lectura de Google Calendar (PB-015, RF-03).
+"""Adaptador de lectura y escritura de Google Calendar (PB-015 · PB-016, RF-03).
 
 Implementa el puerto `Calendario`. No sabe nada de tokens: se los pide a
 `ConectarGoogle.credencial_vigente()`, que ya resuelve el refresco perezoso
@@ -27,6 +27,7 @@ from src.domain.entities.evento import Evento
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
+    PermisoInsuficienteError,
     ServiceUnavailableError,
 )
 
@@ -138,6 +139,102 @@ class CalendarioGoogle(Calendario):
             duracion_ms=round((time.perf_counter() - comenzo) * 1000),
         )
         return recortados
+
+    async def eventos_del_principal(
+        self, usuario_id: UUID, desde: datetime, hasta: datetime
+    ) -> tuple[Evento, ...]:
+        """Eventos sólo del calendario principal, para la búsqueda previa a borrar."""
+        token = await self._credencial(usuario_id)
+        eventos = await self._eventos_de("primary", "", token, desde, hasta)
+        return tuple(sorted(eventos, key=lambda e: e.inicio))
+
+    # --- Escritura (PB-016) -----------------------------------------------
+    #
+    # Estos métodos NO piden confirmación: ésa es responsabilidad del grafo
+    # del agente, que pausa con `interrupt()` antes de llamarlos (RF-08). Acá
+    # se asume que la decisión ya está tomada.
+
+    async def crear_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
+        """Crea el evento en el calendario principal de la persona."""
+        token = await self._credencial(usuario_id)
+        cuerpo: dict[str, Any] = {
+            "summary": evento.titulo,
+            "start": {"dateTime": evento.inicio.isoformat()},
+            "end": {
+                "dateTime": (evento.fin if evento.fin is not None else evento.inicio).isoformat()
+            },
+        }
+
+        datos = await self._mandar("POST", f"{BASE}/calendars/primary/events", token, json=cuerpo)
+        creado = _a_evento(datos, "") or evento
+        logger.info(
+            "calendar.evento_creado",
+            usuario_id=str(usuario_id),
+            # Que se creó y cuándo sí; el título NUNCA (RF-18).
+            con_id=creado.id is not None,
+        )
+        return creado
+
+    async def eliminar_evento(self, usuario_id: UUID, evento_id: str) -> None:
+        """Elimina un evento del calendario principal. Idempotente."""
+        token = await self._credencial(usuario_id)
+        await self._mandar(
+            "DELETE",
+            f"{BASE}/calendars/primary/events/{httpx.URL(evento_id)}",
+            token,
+            # Ya-borrado no es un error: el estado final es el mismo.
+            tolerar=frozenset({httpx.codes.NOT_FOUND, httpx.codes.GONE}),
+        )
+        logger.info("calendar.evento_eliminado", usuario_id=str(usuario_id))
+
+    async def _mandar(
+        self,
+        metodo: str,
+        url: str,
+        token: str,
+        json: dict[str, Any] | None = None,
+        tolerar: frozenset[int] = frozenset(),
+    ) -> dict[str, Any]:
+        """POST/DELETE autenticado, con la misma traducción de errores del GET."""
+        try:
+            respuesta = await self._cliente.request(
+                metodo, url, json=json, headers={"Authorization": f"Bearer {token}"}
+            )
+        except httpx.HTTPError as exc:
+            logger.error("calendar.error_transporte", tipo=type(exc).__name__)
+            raise ServiceUnavailableError("No se pudo contactar a Google Calendar.") from None
+
+        if respuesta.status_code in tolerar:
+            return {}
+        self._traducir_rechazo(respuesta)
+        return _json_o_vacio(respuesta)
+
+    def _traducir_rechazo(self, respuesta: httpx.Response) -> None:
+        """Convierte un status de error en la excepción del dominio que toca."""
+        if respuesta.status_code < httpx.codes.BAD_REQUEST:
+            return
+
+        if respuesta.status_code == httpx.codes.UNAUTHORIZED:
+            logger.warning("calendar.credencial_rechazada")
+            raise AutorizacionFallidaError(
+                "Google rechazó la credencial. Hay que volver a conectar la cuenta."
+            )
+
+        if respuesta.status_code == httpx.codes.FORBIDDEN:
+            # El caso concreto: la cuenta se conectó cuando el scope era sólo
+            # de lectura, y la primera escritura choca acá. El remedio es de
+            # la persona (/conectar de nuevo), así que merece su excepción.
+            logger.warning("calendar.permiso_insuficiente")
+            raise PermisoInsuficienteError(
+                "El token no tiene permiso de escritura sobre el calendario."
+            )
+
+        logger.error(
+            "calendar.rechazado",
+            status_code=respuesta.status_code,
+            motivo=_motivo_de(respuesta),
+        )
+        raise ServiceUnavailableError("Google Calendar no pudo responder la consulta.")
 
     # --- Credencial ------------------------------------------------------
 
@@ -270,6 +367,7 @@ def _a_evento(item: dict[str, Any], calendario: str) -> Evento | None:
         return None
     fin, _ = _momento(item.get("end"))
 
+    identificador = item.get("id")
     return Evento(
         titulo=item.get("summary") or "",
         inicio=inicio,
@@ -277,6 +375,7 @@ def _a_evento(item: dict[str, Any], calendario: str) -> Evento | None:
         fin=None if todo_el_dia else fin,
         todo_el_dia=todo_el_dia,
         calendario=calendario or None,
+        id=identificador if isinstance(identificador, str) else None,
     )
 
 

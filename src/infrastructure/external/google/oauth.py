@@ -28,11 +28,17 @@ logger = structlog.get_logger(__name__)
 URL_CONSENTIMIENTO = "https://accounts.google.com/o/oauth2/v2/auth"
 URL_TOKENS = "https://oauth2.googleapis.com/token"
 
-# Sólo lectura de calendario: es exactamente lo que necesita PB-015 y nada más.
-# La pantalla de Google dice "ver tus eventos" en vez de "ver y editar", que es
-# bastante más fácil de conceder y de defender. PB-016 la amplía cuando haya
-# algo que escriba.
-SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
+# Lectura + escritura de eventos (PB-015 · PB-016). El readonly se conserva
+# aunque parezca redundante: `calendarList` —la lista de calendarios que lee
+# PB-015— lo necesita; `calendar.events` sólo cubre los eventos.
+#
+# OJO: una cuenta conectada antes de PB-016 tiene guardado sólo el readonly.
+# La lectura le sigue andando; la primera escritura devuelve 403 y el bot le
+# pide reconectar con /conectar (ver PermisoInsuficienteError).
+SCOPES = (
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+)
 
 TIMEOUT_SEGUNDOS = 10.0
 TIMEOUT_CONEXION_SEGUNDOS = 5.0

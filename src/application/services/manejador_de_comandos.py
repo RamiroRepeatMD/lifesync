@@ -44,14 +44,13 @@ ESTADO_SIN_CUENTAS = (
     "Escribí /conectar para vincular tu Google y que pueda ver tu calendario."
 )
 
-# Este texto sólo puede prometer lo que el agente sabe hacer de verdad. Con
-# PB-015 la lectura del calendario existe y está verificada contra Google, así
-# que ahora sí. La escritura NO: sigue siendo PB-016, y decirlo acá evita que
-# alguien pida "agendame algo" y se lleve una respuesta confusa.
+# Este texto sólo puede prometer lo que el agente sabe hacer de verdad (la
+# regla viene de PB-015, cuando prometió el calendario antes de tiempo). Desde
+# PB-016: leer, crear y eliminar sí — modificar todavía no.
 ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
-    "Puedo leer tu calendario: preguntame qué tenés hoy, mañana o esta semana. "
-    "Todavía no puedo crear ni modificar eventos."
+    "Puedo leer tu calendario, crear eventos y eliminarlos —siempre te pido "
+    "confirmación antes de tocar algo. Modificar eventos todavía no sé."
 )
 
 CONECTAR_NO_DISPONIBLE = (
@@ -66,8 +65,8 @@ def _texto_del_enlace(enlace: str) -> str:
     return (
         "Para conectar tu cuenta de Google, entrá acá y autorizá el acceso:\n\n"
         f"{enlace}\n\n"
-        "El enlace vence en 10 minutos. Sólo te voy a pedir permiso para *ver* "
-        "tu calendario, no para modificarlo."
+        "El enlace vence en 10 minutos. Te voy a pedir permiso para ver tu "
+        "calendario y gestionar eventos; nunca toco nada sin confirmarte antes."
     )
 
 

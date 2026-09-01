@@ -280,6 +280,10 @@ class CalendarioFalso(Calendario):
         self.fallar_con = fallar_con
         self.consultados: list[UUID] = []
         self.rangos: list[tuple[datetime, datetime]] = []
+        # Registros de escritura (PB-016): son la evidencia de los tests de
+        # RF-08 — "sin resume no hay escritura" se afirma sobre estas listas.
+        self.creados: list[tuple[UUID, Evento]] = []
+        self.eliminados: list[tuple[UUID, str]] = []
 
     async def eventos_entre(
         self, usuario_id: UUID, desde: datetime, hasta: datetime
@@ -289,6 +293,23 @@ class CalendarioFalso(Calendario):
         if self.fallar_con is not None:
             raise self.fallar_con
         return self.eventos
+
+    async def eventos_del_principal(
+        self, usuario_id: UUID, desde: datetime, hasta: datetime
+    ) -> tuple[Evento, ...]:
+        return await self.eventos_entre(usuario_id, desde, hasta)
+
+    async def crear_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        creado = replace(evento, id="evento-creado-1")
+        self.creados.append((usuario_id, creado))
+        return creado
+
+    async def eliminar_evento(self, usuario_id: UUID, evento_id: str) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.eliminados.append((usuario_id, evento_id))
 
 
 class AutorizadorFalso(AutorizadorGoogle):

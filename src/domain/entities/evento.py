@@ -33,6 +33,8 @@ class Evento:
             día" en lugar de inventar un horario de 00:00.
         calendario: De qué calendario salió. Con varios calendarios en juego,
             sin esto no se puede distinguir el cumpleaños del turno médico.
+        id: Identificador que le asignó el proveedor. Hace falta para poder
+            eliminarlo (PB-016); es None en un evento que todavía no existe.
     """
 
     titulo: str = field(repr=False)
@@ -40,6 +42,7 @@ class Evento:
     fin: datetime | None = None
     todo_el_dia: bool = False
     calendario: str | None = None
+    id: str | None = None
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""

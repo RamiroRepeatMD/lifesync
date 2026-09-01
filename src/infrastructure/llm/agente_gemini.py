@@ -9,12 +9,14 @@ fallas** para que no se filtren hacia adentro.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
@@ -25,6 +27,11 @@ from src.domain.exceptions import (
     ServiceUnavailableError,
 )
 from src.infrastructure.config.settings import Settings
+from src.infrastructure.llm.confirmacion import (
+    VIGENCIA_DE_CONFIRMACION_SEGUNDOS,
+    Decision,
+    clasificar,
+)
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, construir_grafo
 from src.infrastructure.llm.herramientas import construir_herramientas
@@ -67,6 +74,10 @@ SIN_CONTENIDO = (
 
 TEXTO_VACIO = "No te llegué a leer. ¿Me lo escribís de nuevo?"
 
+CONFIRMACION_VENCIDA = (
+    "Esa confirmación quedó vieja, así que la cancelé. Si todavía lo querés, pedímelo de nuevo."
+)
+
 
 class AgenteGemini(AgenteConversacional):
     """Responde invocando el grafo de LangGraph sobre Gemini."""
@@ -76,7 +87,16 @@ class AgenteGemini(AgenteConversacional):
         self._grafo = grafo
 
     async def responder(self, consulta: ConsultaDelUsuario) -> str:
-        """Corre un turno de conversación y devuelve el texto de respuesta."""
+        """Corre un turno de conversación y devuelve el texto de respuesta.
+
+        Si el hilo quedó pausado esperando una confirmación (RF-08), este turno
+        la resuelve **antes** de cualquier otra cosa. No es un detalle: la
+        sonda de diseño mostró que un mensaje común sobre un hilo interrumpido
+        deja el interrupt en el limbo y el historial malformado —un AIMessage
+        con tool_calls sin su ToolMessage—, y Gemini rechaza ese historial con
+        400 en el turno siguiente. Acá no existe ese camino: o se reanuda con
+        una decisión, o no se invoca.
+        """
         if not consulta.texto.strip():
             # Sin esto, un mensaje en blanco se convierte en una llamada paga
             # que Gemini además rechaza por contenido vacío.
@@ -84,12 +104,24 @@ class AgenteGemini(AgenteConversacional):
             return TEXTO_VACIO
 
         comenzo = time.perf_counter()
-        estado = await self._invocar(consulta)
+        configuracion = {
+            "configurable": {"thread_id": _hilo_de(consulta.conversacion_id)},
+            "recursion_limit": LIMITE_DE_PASOS,
+        }
+        contexto = ContextoDeAgente(usuario_id=consulta.usuario_id)
+
+        estado = await self._resolver_pendiente(consulta, configuracion, contexto)
+        if estado is None:
+            # No había confirmación pendiente, o había y se canceló para dar
+            # paso a este mensaje: turno normal.
+            estado = await self._invocar(
+                {"messages": [HumanMessage(consulta.texto)]}, configuracion, contexto
+            )
+
+        texto = self._respuesta_de(estado)
         duracion_ms = round((time.perf_counter() - comenzo) * 1000)
 
         mensajes: list[BaseMessage] = estado.get("messages", [])
-        texto = _recortar(_texto_de(mensajes[-1]) if mensajes else "")
-
         logger.info(
             "agente.respuesta",
             conversacion_id=str(consulta.conversacion_id),
@@ -98,11 +130,99 @@ class AgenteGemini(AgenteConversacional):
             largo_respuesta=len(texto),
             cantidad_tool_calls=_contar_tool_calls(mensajes),
             mensajes_en_el_hilo=len(mensajes),
+            pidio_confirmacion="__interrupt__" in estado,
         )
 
-        return texto or SIN_CONTENIDO
+        return texto
 
-    async def _invocar(self, consulta: ConsultaDelUsuario) -> dict[str, Any]:
+    # --- Confirmaciones pendientes (PB-016, RF-08) ------------------------
+
+    async def _resolver_pendiente(
+        self,
+        consulta: ConsultaDelUsuario,
+        configuracion: dict[str, Any],
+        contexto: ContextoDeAgente,
+    ) -> dict[str, Any] | None:
+        """Si el hilo está pausado, decide qué hacer con este mensaje.
+
+        Returns:
+            El estado resultante de reanudar, o **None** si no había nada
+            pendiente —o si lo pendiente se canceló y este mensaje debe
+            procesarse como un turno normal.
+
+        La decisión de reanudar es **determinística, nunca del modelo**:
+        clasificar un "sí" es una regla, no una interpretación. Y cancelar es
+        el default ante cualquier cosa que no sea un sí explícito.
+        """
+        pendiente = await self._interrupcion_pendiente(configuracion)
+        if pendiente is None:
+            return None
+
+        vencida = pendiente >= VIGENCIA_DE_CONFIRMACION_SEGUNDOS
+        decision = clasificar(consulta.texto)
+
+        if vencida:
+            # Aprobar con un "sí" algo propuesto hace 10 minutos, sin volver a
+            # mostrarlo, es ejecutar lo que la persona quizás ya ni recuerda.
+            await self._invocar(Command(resume={"aprobado": False}), configuracion, contexto)
+            logger.info(
+                "agente.confirmacion_vencida", conversacion_id=str(consulta.conversacion_id)
+            )
+            if decision is Decision.OTRA_COSA:
+                return None  # el mensaje merece su turno normal
+            return {"messages": [], "_texto_directo": CONFIRMACION_VENCIDA}
+
+        if decision is Decision.APRUEBA:
+            logger.info(
+                "agente.confirmacion_aprobada", conversacion_id=str(consulta.conversacion_id)
+            )
+            return await self._invocar(Command(resume={"aprobado": True}), configuracion, contexto)
+
+        # Rechazo explícito u otra cosa: en los dos casos se cancela. La
+        # diferencia es sólo qué pasa después.
+        logger.info(
+            "agente.confirmacion_cancelada",
+            conversacion_id=str(consulta.conversacion_id),
+            explicita=decision is Decision.RECHAZA,
+        )
+        estado = await self._invocar(Command(resume={"aprobado": False}), configuracion, contexto)
+        if decision is Decision.RECHAZA:
+            return estado
+        return None  # cancelada en silencio; el mensaje se procesa como turno nuevo
+
+    async def _interrupcion_pendiente(self, configuracion: dict[str, Any]) -> float | None:
+        """Devuelve la antigüedad en segundos del interrupt pendiente, o None.
+
+        Tolera cualquier fallo consultando el estado: ante la duda se asume
+        que no hay nada pendiente, que es el camino que no ejecuta acciones.
+        """
+        try:
+            estado = await self._grafo.aget_state(configuracion)
+        except Exception:  # un hilo nuevo o un checkpointer vacío no es un error
+            return None
+
+        if not getattr(estado, "interrupts", ()):
+            return None
+
+        creado = getattr(estado, "created_at", None)
+        if isinstance(creado, str):
+            try:
+                momento = datetime.fromisoformat(creado)
+                return max(0.0, (datetime.now(UTC) - momento).total_seconds())
+            except ValueError:
+                pass
+        # Sin timestamp legible se trata como recién creada: mejor pedir la
+        # confirmación de nuevo que ejecutar por un dato que no se pudo leer.
+        return 0.0
+
+    # --- Invocación y extracción ------------------------------------------
+
+    async def _invocar(
+        self,
+        entrada: Any,
+        configuracion: dict[str, Any],
+        contexto: ContextoDeAgente,
+    ) -> dict[str, Any]:
         """Llama al grafo, traduciendo cualquier falla a un error del dominio.
 
         Se atrapa `Exception` a propósito y no una lista de tipos: entre
@@ -110,34 +230,50 @@ class AgenteGemini(AgenteConversacional):
         excepciones posibles, y que aparezca una nueva no puede convertirse en
         un 500 sin aviso para la persona.
         """
-        configuracion = {
-            "configurable": {"thread_id": _hilo_de(consulta.conversacion_id)},
-            "recursion_limit": LIMITE_DE_PASOS,
-        }
         try:
             estado: dict[str, Any] = await self._grafo.ainvoke(
-                {"messages": [HumanMessage(consulta.texto)]},
+                entrada,
                 config=configuracion,
                 # De quién es la conversación viaja por acá y no por el mensaje:
                 # es lo que impide que el texto del usuario elija de quién es la
-                # agenda que se consulta (PB-015).
-                context=ContextoDeAgente(usuario_id=consulta.usuario_id),
+                # agenda que se consulta o modifica (PB-015 · PB-016).
+                context=contexto,
             )
         except Exception as exc:
             sin_cuota = _es_falta_de_cuota(exc)
             # Se loguea el tipo y la clasificación, nunca `str(exc)`: el
             # mensaje de error de la librería puede incluir el prompt, y el
             # prompt lleva lo que escribió la persona (RF-18).
-            logger.error(
-                "agente.fallo",
-                conversacion_id=str(consulta.conversacion_id),
-                tipo=type(exc).__name__,
-                sin_cuota=sin_cuota,
-            )
+            logger.error("agente.fallo", tipo=type(exc).__name__, sin_cuota=sin_cuota)
             if sin_cuota:
                 raise CuotaDeAgenteAgotadaError("Se agotó la cuota del modelo.") from None
             raise AgenteNoDisponibleError("El modelo no pudo responder.") from None
         return estado
+
+    def _respuesta_de(self, estado: dict[str, Any]) -> str:
+        """Extrae el texto que hay que mandarle a la persona.
+
+        Si el grafo quedó pausado esperando confirmación, la respuesta sale
+        **del payload del interrupt y no del modelo**: lo que la persona
+        confirma es exactamente lo que se va a ejecutar, sin reinterpretación.
+        """
+        directo = estado.get("_texto_directo")
+        if isinstance(directo, str):
+            return directo
+
+        interrupciones = estado.get("__interrupt__")
+        if interrupciones:
+            payload = getattr(interrupciones[0], "value", None)
+            resumen = payload.get("resumen") if isinstance(payload, dict) else None
+            if isinstance(resumen, str):
+                return f"{resumen}.\n\n¿Confirmás? Respondé sí o no."
+            # Un interrupt sin resumen es un bug nuestro, pero la persona no
+            # puede quedarse sin respuesta por eso.
+            return "Necesito que me confirmes la acción. ¿Sí o no?"
+
+        mensajes: list[BaseMessage] = estado.get("messages", [])
+        texto = _recortar(_texto_de(mensajes[-1]) if mensajes else "")
+        return texto or SIN_CONTENIDO
 
 
 def _es_falta_de_cuota(exc: Exception) -> bool:

@@ -105,11 +105,13 @@ async def test_el_estado_orienta_hacia_conectar() -> None:
 async def test_el_estado_conectado_promete_solo_lo_que_hay() -> None:
     """El prompt le prohíbe al modelo inventar capacidades; los textos fijos igual.
 
-    Con PB-015 la lectura existe, así que se puede ofrecer. La escritura no, y
-    esa aclaración es la que evita un "agendame algo" con final confuso.
+    Desde PB-016: leer, crear y eliminar sí; modificar todavía no. Y la
+    confirmación previa se anuncia, porque es la promesa central de RF-08.
     """
     assert "leer tu calendario" in ESTADO_CON_GOOGLE
-    assert "no puedo crear" in ESTADO_CON_GOOGLE
+    assert "crear" in ESTADO_CON_GOOGLE
+    assert "confirmación" in ESTADO_CON_GOOGLE
+    assert "Modificar eventos todavía no" in ESTADO_CON_GOOGLE
 
 
 # --- /conectar ---------------------------------------------------------------

@@ -365,3 +365,125 @@ async def test_si_se_loguea_cuantos_calendarios_y_cuantos_eventos() -> None:
     leidos = next(e for e in capturados if e["event"] == "calendar.eventos_leidos")
     assert leidos["calendarios"] == 2
     assert leidos["eventos"] == 1
+
+
+# --- Escritura (PB-016) ------------------------------------------------------
+#
+# Estos métodos no piden confirmación: eso es del grafo (RF-08). Acá se prueba
+# la mecánica HTTP y la traducción de errores.
+
+
+async def test_crear_postea_al_calendario_principal() -> None:
+    pedidos: list[httpx.Request] = []
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "id-nuevo",
+                "summary": "Dentista",
+                "start": {"dateTime": "2026-09-05T10:00:00-03:00"},
+                "end": {"dateTime": "2026-09-05T11:00:00-03:00"},
+            },
+        )
+
+    calendario = await _con_token(pedidos, responder)
+    from src.domain.entities.evento import Evento
+
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)
+    creado = await calendario.crear_evento(
+        USUARIO, Evento(titulo="Dentista", inicio=inicio, fin=inicio + timedelta(hours=1))
+    )
+
+    assert pedidos[0].method == "POST"
+    assert "/calendars/primary/events" in str(pedidos[0].url)
+    cuerpo = json.loads(pedidos[0].content)
+    assert cuerpo["summary"] == "Dentista"
+    assert "+00:00" in cuerpo["start"]["dateTime"] or cuerpo["start"]["dateTime"].endswith("Z")
+    assert creado.id == "id-nuevo"
+
+
+async def test_eliminar_manda_el_delete_correcto() -> None:
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(pedidos, lambda _: httpx.Response(204))
+
+    await calendario.eliminar_evento(USUARIO, "id-a-borrar")
+
+    assert pedidos[0].method == "DELETE"
+    assert str(pedidos[0].url).endswith("/calendars/primary/events/id-a-borrar")
+
+
+@pytest.mark.parametrize("codigo", [404, 410], ids=["not_found", "gone"])
+async def test_eliminar_algo_que_ya_no_existe_no_es_un_error(codigo: int) -> None:
+    """Idempotente: el estado final es el mismo que se pedía."""
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(pedidos, lambda _: httpx.Response(codigo, json={}))
+
+    await calendario.eliminar_evento(USUARIO, "id-fantasma")  # no lanza
+
+
+async def test_un_403_al_escribir_pide_reconectar() -> None:
+    """El caso real: cuenta conectada antes de PB-016, con scope de sólo lectura."""
+    from src.domain.entities.evento import Evento
+    from src.domain.exceptions import PermisoInsuficienteError
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(
+        pedidos, lambda _: httpx.Response(403, json={"error": {"message": "insufficient"}})
+    )
+
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)
+    with pytest.raises(PermisoInsuficienteError) as capturado:
+        await calendario.crear_evento(USUARIO, Evento(titulo="X", inicio=inicio))
+
+    assert "/conectar" in capturado.value.mensaje_usuario
+
+
+async def test_un_401_al_escribir_es_credencial_rechazada() -> None:
+    from src.domain.entities.evento import Evento
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(pedidos, lambda _: httpx.Response(401, json={}))
+
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)
+    with pytest.raises(AutorizacionFallidaError):
+        await calendario.crear_evento(USUARIO, Evento(titulo="X", inicio=inicio))
+
+
+async def test_eventos_del_principal_solo_consulta_primary() -> None:
+    """La búsqueda previa a borrar mira el mismo lugar donde se va a borrar."""
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(
+        pedidos, _respondedor(eventos_por_calendario={"primary": [_evento("Turno")]})
+    )
+
+    eventos = await calendario.eventos_del_principal(USUARIO, DESDE, HASTA)
+
+    urls = [str(p.url) for p in pedidos]
+    assert all("/calendars/primary/events" in u for u in urls)
+    assert "calendarList" not in " ".join(urls)  # ni siquiera lista calendarios
+    assert [e.titulo for e in eventos] == ["Turno"]
+
+
+async def test_al_crear_no_se_loguea_el_titulo() -> None:
+    from src.domain.entities.evento import Evento
+
+    pedidos: list[httpx.Request] = []
+    calendario = await _con_token(
+        pedidos,
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "summary": "Cita médica privada",
+                "start": {"dateTime": "2026-09-05T10:00:00-03:00"},
+            },
+        ),
+    )
+
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)
+    with structlog.testing.capture_logs() as eventos:
+        await calendario.crear_evento(USUARIO, Evento(titulo="Cita médica privada", inicio=inicio))
+
+    assert eventos
+    assert "Cita médica" not in json.dumps(eventos, default=str)

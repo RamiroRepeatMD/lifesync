@@ -104,12 +104,20 @@ def test_la_url_lleva_las_credenciales_y_el_destino() -> None:
     assert parametros["response_type"] == ["code"]
 
 
-def test_solo_se_piden_permisos_de_lectura() -> None:
-    """PB-015 sólo lee. Pedir escritura sin usarla es privilegio de más (RF-18)."""
+def test_se_piden_exactamente_los_permisos_que_se_usan() -> None:
+    """Privilegio mínimo, versión PB-016: lectura + eventos, y nada más.
+
+    El readonly se conserva porque `calendarList` lo necesita; `calendar.events`
+    es lo que usan crear y eliminar. Si alguien suma un scope acá sin sumar la
+    función que lo usa, este test lo delata (RF-18).
+    """
     scopes = _parametros_de_la_url()["scope"][0].split()
 
     assert scopes == list(SCOPES)
-    assert all(scope.endswith(".readonly") for scope in scopes)
+    assert set(scopes) == {
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+    }
 
 
 def test_la_url_lleva_un_state_verificable() -> None:

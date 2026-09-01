@@ -29,6 +29,7 @@ from src.domain.exceptions import (
     InfrastructureError,
     InvalidValueError,
     LifeSyncError,
+    PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
 )
@@ -56,6 +57,9 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     CuotaDeAgenteAgotadaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     AgenteNoDisponibleError: status.HTTP_503_SERVICE_UNAVAILABLE,
     # Falla del proveedor externo, no nuestra: 503 y no 500 (PB-009).
+    # El permiso insuficiente hereda de ella y va al mismo lugar; se registra
+    # explícito por la regla de la casa (PB-016).
+    PermisoInsuficienteError: status.HTTP_503_SERVICE_UNAVAILABLE,
     AutorizacionFallidaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     RepositoryError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     EncryptionError: status.HTTP_500_INTERNAL_SERVER_ERROR,

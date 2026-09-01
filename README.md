@@ -195,9 +195,11 @@ El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
 
 ### Qué contesta hoy
 
-Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **consultas reales al
-calendario** de quien escribe si conectó su cuenta de Google (PB-015): "¿qué tengo hoy?",
-"¿qué tengo esta semana?". Sólo lectura.
+Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **gestión real del
+calendario** de quien escribe si conectó su cuenta de Google: consultas ("¿qué tengo hoy?",
+PB-015) y **creación y eliminación de eventos con confirmación obligatoria** ("agendame
+dentista mañana a las 10" → el bot muestra exactamente qué va a crear y espera un sí,
+PB-016 · RF-08). Modificar eventos todavía no.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`
 y `/conectar`.
