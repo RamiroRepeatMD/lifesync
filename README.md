@@ -28,13 +28,13 @@ La documentación completa está en [`docs/`](docs/).
 |------|------------|
 | Canal de chat | WhatsApp Cloud API (Meta) |
 | Backend | Python 3.11+ · FastAPI |
-| Agente IA | LangGraph + LangChain |
-| LLM | Google Gemini 3.5 Flash |
-| Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 cifrados |
-| Integraciones | Google APIs · Notion API (OAuth2) |
+| Agente IA | LangGraph + langchain-core |
+| LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
+| Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
+| Integraciones | Google Calendar (completa) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest |
-| Hosting | Railway / Render |
+| Testing | pytest · ruff · mypy strict — 577 tests |
+| Hosting | Railway (desde Dockerfile) |
 
 ---
 
@@ -122,10 +122,11 @@ Documentación interactiva de la API (deshabilitada en producción): <http://loc
 
 ### 1. Crear el proyecto y aplicar el esquema
 
-Creá un proyecto en [supabase.com](https://supabase.com), abrí **SQL Editor**, pegá el contenido
-de [`db/migrations/001_usuarios_y_oauth_tokens.sql`](db/migrations/001_usuarios_y_oauth_tokens.sql)
-y ejecutalo. Crea dos tablas —`usuarios` y `oauth_tokens`— con RLS activado y sin políticas
-permisivas (deny-by-default). El script es idempotente: se puede volver a correr.
+Creá un proyecto en [supabase.com](https://supabase.com), abrí **SQL Editor** y ejecutá en orden
+los archivos de [`db/migrations/`](db/migrations/) (001 y 002; la 003 no hace falta aplicarla a
+mano — la aplica la app en cada arranque y el archivo existe como documentación). Crean
+`usuarios` y `oauth_tokens` con RLS activado y sin políticas permisivas (deny-by-default).
+Los scripts son idempotentes: se pueden volver a correr.
 
 ### 2. Generar la clave de cifrado
 
@@ -172,6 +173,23 @@ Como evidencia de RF-18, abrí la tabla `oauth_tokens` en el Table Editor: la co
 
 El dominio nunca ve texto cifrado: `OAuthTokenRepository` recibe y devuelve tokens en claro, y el
 cifrado ocurre dentro del adaptador de `infrastructure/persistence/`.
+
+### Memoria conversacional persistida (PB-013)
+
+Con `SUPABASE_DB_URL` configurada, la conversación de cada usuario vive en Postgres
+**cifrada** (Fernet, clave derivada de `TOKEN_ENCRYPTION_KEY`): sobrevive a los redeploys,
+igual que una confirmación pendiente de "¿Confirmás?". Sin la variable, el bot funciona
+igual pero la memoria vive en RAM y muere con cada deploy.
+
+- El valor es la URI del **Session pooler** (Supabase → Connect → Session pooler) — no la
+  conexión directa (IPv6-only, Railway no la garantiza) ni el transaction pooler (rompe con
+  los prepared statements de psycopg).
+- La app se conecta con un **rol dedicado de mínimo privilegio** (`lifesync_checkpointer`),
+  no con el password maestro de la base.
+- Las tablas del checkpointer se crean solas en el primer arranque, y la app les aplica
+  RLS + revocación de permisos en cada arranque (`db/migrations/003` es la copia documentada).
+- El modelo recibe una ventana de los **últimos 20 mensajes**; lo demás queda guardado pero
+  fuera del contexto. Sin límite de almacenamiento todavía (deuda de Sprint 3).
 
 ---
 
@@ -223,7 +241,7 @@ Tres decisiones que conviene conocer antes de tocarlo:
   respuesta ya enviada, así que un error que escape se pierde y corta la conexión.
 - **La deduplicación es en memoria** (512 mensajes, 6 h). No sobrevive a un reinicio ni sirve con
   varias instancias; la red de contención es una ventana de frescura de 12 h sobre el timestamp del
-  mensaje. La versión persistente es deuda anotada para el Sprint 2.
+  mensaje. La versión persistente es deuda anotada para el Sprint 3.
 
 ### Deuda técnica anotada
 
@@ -238,7 +256,9 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le manda
 un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
-Sólo se piden permisos de **lectura** de calendario.
+Se piden dos permisos de calendario: lectura (`calendar.readonly`) y gestión de
+eventos (`calendar.events`). Para desvincular: `/desconectar` — pide confirmación
+y **revoca el permiso en Google de verdad**, no sólo borra la copia local.
 
 ### Configurar en Google Cloud Console
 
@@ -311,7 +331,8 @@ de a una necesitarías cinco deploys para descubrir las cinco que faltan.
 | `WHATSAPP_VERIFY_TOKEN` | el que pusiste en Meta |
 | `WHATSAPP_APP_SECRET` | App Secret de Meta |
 | `GOOGLE_API_KEY` | key de Gemini (PB-005) |
-| `GEMINI_MODEL` | *(opcional)* `gemini-3.5-flash` |
+| `GEMINI_MODEL` | *(opcional)* `gemini-3.5-flash-lite` es el default; la cuota gratuita es **por modelo** |
+| `SUPABASE_DB_URL` | *(opcional pero recomendada)* Session pooler de Supabase — la memoria del bot (ver [Memoria conversacional](#memoria-conversacional-persistida-pb-013)) |
 | `LOG_LEVEL` | `INFO` |
 
 Marcá como **Sealed** las seis sensibles: una vez selladas, Railway no vuelve a mostrar el valor
@@ -367,8 +388,9 @@ e incluiría tus credenciales y el `.venv` de macOS.
   duplicada. No agregar réplicas hasta que el dedup sea persistente (Sprint 2).
 - **Railway sólo chequea el health al desplegar, nunca después.** Si el proceso se cuelga sin
   morir, hay que reiniciarlo a mano.
-- **Un redeploy mata las tareas en vuelo.** Meta ya recibió el 200, así que ese mensaje no se
-  responde ni se reintenta. No redeployar durante una demo.
+- **Un redeploy mata las tareas en vuelo.** Meta ya recibió el 200, así que ese mensaje puntual
+  no se responde. Desde PB-013 la conversación y las confirmaciones pendientes **sí sobreviven**
+  al redeploy: sólo se pierde la respuesta del mensaje que estaba en el aire.
 
 ---
 
@@ -378,8 +400,16 @@ e incluiría tus credenciales y el `.venv` de macOS.
 uv run pytest                # tests (no necesitan red ni base de datos)
 uv run pytest --cov=src      # tests con cobertura
 uv run ruff check .          # linting
-uv run ruff format .         # formato
-uv run mypy src              # tipado estricto
+uv run ruff format --check . # formato (sin --check, formatea)
+uv run mypy src              # tipado estricto del código
+uv run mypy tests            # ... y de los tests (CI corre ambos)
+```
+
+Hay además una suite de **evaluación del comportamiento del modelo** (RF-10) que llama a
+Gemini de verdad y gasta cuota — por eso es opt-in y CI la saltea:
+
+```bash
+uv run pytest tests/eval/ -m gemini
 ```
 
 Los mismos checks corren en CI en cada push
@@ -412,7 +442,7 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `GOOGLE_CLIENT_ID` | — | ID de cliente OAuth2 (PB-009). Opcional: sin él sólo se deshabilita /conectar |
 | `GOOGLE_CLIENT_SECRET` | — | Secreto del cliente OAuth2 |
 | `GOOGLE_REDIRECT_URI` | — | Debe coincidir **exactamente** con la registrada en Google |
-| `GEMINI_MODEL` | `gemini-3.5-flash` | Modelo a usar. La cuota gratuita es por modelo y por día |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Modelo a usar. La cuota gratuita es **por modelo y por día** (lite: 500/día; flash: 20/día) |
 
 Las tres de Supabase son opcionales fuera de producción (modo degradado) y **obligatorias** con
 `ENVIRONMENT=production`: sin ellas el arranque falla, para no desplegar nunca sin cifrado. Lo
@@ -433,18 +463,34 @@ En producción la misma línea sale como JSON, lista para ingestar en cualquier 
 
 ## Estado del proyecto
 
-**Sprint 1** (entrega 19/08/2026) – Infraestructura + WhatsApp + LangGraph base + OAuth2 inicio.
+**Sprint 1** (entrega 19/08/2026) – Infraestructura + WhatsApp + LangGraph base — **✅ completo**.
 
 | Tarea | Descripción | Estado |
 |-------|-------------|--------|
 | PB-001 | Repositorio + estructura Clean Architecture / DDD | ✅ |
 | PB-002 | Setup FastAPI + dependencias + config por entornos | ✅ |
-| PB-003 | Supabase (PostgreSQL + Auth + storage de tokens) | ✅ |
+| PB-003 | Supabase (PostgreSQL + storage cifrado de tokens) | ✅ |
 | PB-004 | Integración WhatsApp Cloud API (webhook + envío/recepción) | ✅ |
-| PB-005 | LangGraph/LangChain + Gemini + tool-calling base | ✅ |
-| PB-006 | Logging estructurado + errores + health checks | 🟡 base lista |
-| PB-007 | Despliegue inicial (Railway/Render) + variables seguras | ✅ |
-| PB-009 | Flujo OAuth2 con Google | ✅ |
+| PB-005 | LangGraph + Gemini + tool-calling base | ✅ |
+| PB-006 | Logging estructurado + errores + health checks | ✅ absorbido por PB-002/003/004 |
+| PB-007 | Despliegue inicial (Railway) + variables seguras | ✅ |
+
+**Sprint 2** (entrega 02/09/2026) – OAuth completo + calendario + memoria — **✅ completo,
+verificado contra los servicios reales** (Google, Gemini, Supabase, Meta).
+
+| Tarea | Descripción | Estado |
+|-------|-------------|--------|
+| PB-009 | Flujo OAuth2 completo con Google | ✅ |
+| PB-010 | Refresco automático de tokens | ✅ absorbido por PB-009 (refresco perezoso) |
+| PB-011 | Cuentas: `/estado` · `/conectar` · `/desconectar` con revocación real | ✅ |
+| PB-012 | Confirmación explícita (RF-08) | ✅ absorbido por PB-016 (`interrupt` del grafo) |
+| PB-013 | Conversación persistida y cifrada en Supabase (RF-09) | ✅ |
+| PB-014 | Manejo de mensajes ambiguos (RF-10) | ✅ evaluado contra el modelo real |
+| PB-015 | Lectura de Google Calendar | ✅ |
+| PB-016 | Crear/eliminar eventos con confirmación obligatoria | ✅ |
+| PB-017 | Modificar eventos | ✅ (adelantado de Sprint 3) |
+
+**Sprint 3** (próximo): Google Tasks (Épica 4), dedup persistente, purga de checkpoints.
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 
