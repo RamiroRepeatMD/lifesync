@@ -164,3 +164,27 @@ async def test_completar_algo_inexistente_es_error_con_nombre() -> None:
 
     with pytest.raises(EntityNotFoundError):
         await tareas.completar(USUARIO, "fantasma")
+
+
+async def test_api_deshabilitada_no_manda_a_reconectar() -> None:
+    """El 403 de SERVICE_DISABLED lo arregla el operador, no la persona.
+
+    Pasó el 15/09: la API de Tasks no estaba habilitada en Cloud Console y el
+    bot mandó a /conectar dos veces en vano. Ese 403 no es PermisoInsuficiente.
+    """
+    from src.domain.exceptions import ServiceUnavailableError
+
+    cuerpo = {
+        "error": {
+            "code": 403,
+            "message": "Google Tasks API has not been used in project X before or it is disabled.",
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "SERVICE_DISABLED"}
+            ],
+        }
+    }
+    tareas = await _con_token([], lambda _: httpx.Response(403, json=cuerpo))
+
+    with pytest.raises(ServiceUnavailableError):
+        await tareas.pendientes(USUARIO)

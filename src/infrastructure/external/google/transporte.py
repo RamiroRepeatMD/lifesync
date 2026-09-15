@@ -40,10 +40,22 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
         )
 
     if respuesta.status_code == httpx.codes.FORBIDDEN:
-        # El caso concreto: la cuenta se conectó cuando ese scope todavía no
-        # se pedía, y el primer uso choca acá. El remedio es de la persona
-        # (/conectar de nuevo), así que merece su excepción.
-        logger.warning(f"{servicio}.permiso_insuficiente")
+        # Dos 403 con remedios distintos, y confundirlos manda a la persona a
+        # /conectar en vano (pasó el 15/09 con Tasks):
+        #
+        # - SERVICE_DISABLED: la API no está habilitada en el proyecto de
+        #   Cloud Console. Lo arregla EL OPERADOR en la consola; reconectar
+        #   no cambia nada. El log fuerte trae el mensaje de Google, que
+        #   incluye el link exacto para habilitarla.
+        # - El resto: al token le falta el scope (cuenta conectada antes de
+        #   que se pidiera). Eso sí lo arregla la persona con /conectar.
+        motivo = motivo_de(respuesta)
+        if _es_api_deshabilitada(respuesta):
+            logger.error(f"{servicio}.api_deshabilitada", motivo=motivo)
+            raise ServiceUnavailableError(
+                f"La API de {servicio} no está habilitada en el proyecto de Google Cloud."
+            )
+        logger.warning(f"{servicio}.permiso_insuficiente", motivo=motivo)
         raise PermisoInsuficienteError(f"El token no tiene el permiso que {servicio} necesita.")
 
     logger.error(
@@ -52,6 +64,21 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
         motivo=motivo_de(respuesta),
     )
     raise ServiceUnavailableError("Google no pudo responder la consulta.")
+
+
+def _es_api_deshabilitada(respuesta: httpx.Response) -> bool:
+    """Detecta el 403 de "API not enabled" por su marca estable.
+
+    Google lo señala con `reason: SERVICE_DISABLED` en los detalles del
+    error (el texto del mensaje puede cambiar; la razón es contrato).
+    """
+    error = json_o_vacio(respuesta).get("error")
+    if not isinstance(error, dict):
+        return False
+    for detalle in error.get("details") or []:
+        if isinstance(detalle, dict) and detalle.get("reason") == "SERVICE_DISABLED":
+            return True
+    return False
 
 
 def motivo_de(respuesta: httpx.Response) -> str | None:
