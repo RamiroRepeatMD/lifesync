@@ -146,7 +146,7 @@ class PermisoInsuficienteError(AutorizacionFallidaError):
     """
 
     mensaje_usuario = (
-        "Me falta permiso para modificar tu calendario. Escribí /conectar para "
+        "Me falta un permiso de tu cuenta de Google. Escribí /conectar para "
         "actualizar la autorización."
     )
 

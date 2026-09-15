@@ -28,9 +28,9 @@ from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
     EntityNotFoundError,
-    PermisoInsuficienteError,
     ServiceUnavailableError,
 )
+from src.infrastructure.external.google.transporte import traducir_rechazo
 
 logger = structlog.get_logger(__name__)
 
@@ -250,30 +250,7 @@ class CalendarioGoogle(Calendario):
 
     def _traducir_rechazo(self, respuesta: httpx.Response) -> None:
         """Convierte un status de error en la excepción del dominio que toca."""
-        if respuesta.status_code < httpx.codes.BAD_REQUEST:
-            return
-
-        if respuesta.status_code == httpx.codes.UNAUTHORIZED:
-            logger.warning("calendar.credencial_rechazada")
-            raise AutorizacionFallidaError(
-                "Google rechazó la credencial. Hay que volver a conectar la cuenta."
-            )
-
-        if respuesta.status_code == httpx.codes.FORBIDDEN:
-            # El caso concreto: la cuenta se conectó cuando el scope era sólo
-            # de lectura, y la primera escritura choca acá. El remedio es de
-            # la persona (/conectar de nuevo), así que merece su excepción.
-            logger.warning("calendar.permiso_insuficiente")
-            raise PermisoInsuficienteError(
-                "El token no tiene permiso de escritura sobre el calendario."
-            )
-
-        logger.error(
-            "calendar.rechazado",
-            status_code=respuesta.status_code,
-            motivo=_motivo_de(respuesta),
-        )
-        raise ServiceUnavailableError("Google Calendar no pudo responder la consulta.")
+        traducir_rechazo(respuesta, "calendar")
 
     # --- Credencial ------------------------------------------------------
 

@@ -39,6 +39,9 @@ URL_REVOCACION = "https://oauth2.googleapis.com/revoke"
 SCOPES = (
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
+    # PB-028: tareas (lectura y escritura van juntas en este scope). Una
+    # cuenta conectada antes recibe 403 al usar tareas → /conectar de nuevo.
+    "https://www.googleapis.com/auth/tasks",
 )
 
 TIMEOUT_SEGUNDOS = 10.0

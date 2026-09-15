@@ -50,7 +50,8 @@ ESTADO_SIN_CUENTAS = (
 # Desde PB-017 el calendario está completo: leer, crear, modificar y eliminar.
 ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
-    "Puedo leer tu calendario, y crear, modificar o eliminar eventos —siempre "
+    "Puedo leer tu calendario y crear, modificar o eliminar eventos; también "
+    "ver tus tareas pendientes, anotar nuevas y marcarlas como hechas —siempre "
     "te pido confirmación antes de tocar algo."
 )
 

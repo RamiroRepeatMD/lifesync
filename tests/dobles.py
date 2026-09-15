@@ -26,9 +26,11 @@ from src.application.ports.autorizador_google import (
     CredencialesGoogle,
 )
 from src.application.ports.calendario import Calendario
+from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
+from src.domain.entities.tarea import Tarea
 from src.domain.entities.usuario import Usuario
 from src.domain.exceptions import InvalidValueError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
@@ -317,6 +319,38 @@ class CalendarioFalso(Calendario):
             raise self.fallar_con
         self.modificados.append((usuario_id, evento))
         return evento
+
+
+class TareasFalsas(Tareas):
+    """Doble del puerto `Tareas` (PB-028), con registro de escrituras."""
+
+    def __init__(
+        self,
+        pendientes: tuple[Tarea, ...] = (),
+        fallar_con: Exception | None = None,
+    ) -> None:
+        self.lista = pendientes
+        self.fallar_con = fallar_con
+        self.consultados: list[UUID] = []
+        self.creadas: list[tuple[UUID, Tarea]] = []
+        self.completadas: list[tuple[UUID, str]] = []
+
+    async def pendientes(self, usuario_id: UUID) -> tuple[Tarea, ...]:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.consultados.append(usuario_id)
+        return self.lista
+
+    async def crear(self, usuario_id: UUID, tarea: Tarea) -> Tarea:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.creadas.append((usuario_id, tarea))
+        return tarea
+
+    async def completar(self, usuario_id: UUID, tarea_id: str) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.completadas.append((usuario_id, tarea_id))
 
 
 class AutorizadorFalso(AutorizadorGoogle):

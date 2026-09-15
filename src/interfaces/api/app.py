@@ -15,6 +15,7 @@ import structlog
 from fastapi import FastAPI
 
 from src.application.ports.calendario import Calendario
+from src.application.ports.tareas import Tareas
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.infrastructure.config.logging import configure_logging
 from src.infrastructure.config.settings import Environment, Settings, get_settings
@@ -186,8 +187,35 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
     from src.infrastructure.llm.agente_gemini import crear_agente_gemini
 
     app.state.agente = crear_agente_gemini(
-        settings, _calendario_de(app), checkpointer=app.state.checkpointer
+        settings,
+        _calendario_de(app),
+        _tareas_de(app),
+        checkpointer=app.state.checkpointer,
     )
+
+
+def _tareas_de(app: FastAPI) -> Tareas | None:
+    """Arma el adaptador de tareas, con las mismas tres piezas del calendario.
+
+    Comparten el `ConectarGoogle` conceptual pero cada uno construye el suyo:
+    son objetos baratos sin estado propio, y así ninguno depende del otro.
+    """
+    supabase = app.state.supabase
+    cipher = app.state.token_cipher
+    http = app.state.google_oauth
+    if supabase is None or cipher is None or http is None:
+        logger.info("tasks.no_disponible", motivo="falta Supabase o la conexión con Google")
+        return None
+
+    from src.infrastructure.external.google.oauth import create_autorizador_google
+    from src.infrastructure.external.google.tareas import create_tareas_google
+
+    settings: Settings = app.state.settings
+    conectar = ConectarGoogle(
+        SupabaseOAuthTokenRepository(supabase, cipher),
+        create_autorizador_google(http, settings),
+    )
+    return create_tareas_google(http, conectar)
 
 
 def _calendario_de(app: FastAPI) -> Calendario | None:

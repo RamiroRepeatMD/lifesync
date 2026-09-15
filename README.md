@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Notion API (pendiente) |
+| Integraciones | Google Calendar (completa) · **Google Tasks** (listar/crear/completar) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 577 tests |
+| Testing | pytest · ruff · mypy strict — 602 tests |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -217,7 +217,9 @@ Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **gestión com
 calendario** de quien escribe si conectó su cuenta de Google (RF-03): consultas ("¿qué
 tengo hoy?"), creación, **modificación** ("cambiale la hora al dentista") y eliminación —
 toda escritura pasa por una **confirmación obligatoria** que el modelo no puede saltear
-(RF-08: es una pausa del grafo, no una instrucción del prompt).
+(RF-08: es una pausa del grafo, no una instrucción del prompt). Desde el Sprint 3 también
+gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…")
+y marcarlas como hechas — el criterio es simple: con hora es un evento, sin hora es una tarea.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
 `/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google).
@@ -256,9 +258,10 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le manda
 un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
-Se piden dos permisos de calendario: lectura (`calendar.readonly`) y gestión de
-eventos (`calendar.events`). Para desvincular: `/desconectar` — pide confirmación
-y **revoca el permiso en Google de verdad**, no sólo borra la copia local.
+Se piden tres permisos: lectura de calendario (`calendar.readonly`), gestión de
+eventos (`calendar.events`) y tareas (`tasks`). Para desvincular: `/desconectar` —
+pide confirmación y **revoca el permiso en Google de verdad**, no sólo borra la
+copia local.
 
 ### Configurar en Google Cloud Console
 
@@ -490,7 +493,10 @@ verificado contra los servicios reales** (Google, Gemini, Supabase, Meta).
 | PB-016 | Crear/eliminar eventos con confirmación obligatoria | ✅ |
 | PB-017 | Modificar eventos | ✅ (adelantado de Sprint 3) |
 
-**Sprint 3** (próximo): Google Tasks (Épica 4), dedup persistente, purga de checkpoints.
+**Sprint 3** (entrega 16/09/2026) – Tareas + cierre del núcleo. PB-018/022/023/024 se
+adelantaron en el Sprint 2; PB-028 (Google Tasks: modelo + listar/crear/completar) ✅;
+PB-019/020 cubiertos por `/ayuda`, `/estado` y RF-19. Pendiente del sprint: PB-029
+(posponer/eliminar tareas) llega en el Sprint 4 según plan.
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 

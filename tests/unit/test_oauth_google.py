@@ -105,11 +105,12 @@ def test_la_url_lleva_las_credenciales_y_el_destino() -> None:
 
 
 def test_se_piden_exactamente_los_permisos_que_se_usan() -> None:
-    """Privilegio mínimo, versión PB-016: lectura + eventos, y nada más.
+    """Privilegio mínimo, versión PB-028: calendario + tareas, y nada más.
 
     El readonly se conserva porque `calendarList` lo necesita; `calendar.events`
-    es lo que usan crear y eliminar. Si alguien suma un scope acá sin sumar la
-    función que lo usa, este test lo delata (RF-18).
+    es lo que usan crear/modificar/eliminar; `tasks` es la lista de tareas.
+    Si alguien suma un scope acá sin sumar la función que lo usa, este test lo
+    delata (RF-18).
     """
     scopes = _parametros_de_la_url()["scope"][0].split()
 
@@ -117,6 +118,7 @@ def test_se_piden_exactamente_los_permisos_que_se_usan() -> None:
     assert set(scopes) == {
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/tasks",
     }
 
 

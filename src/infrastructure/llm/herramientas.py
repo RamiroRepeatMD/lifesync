@@ -24,7 +24,9 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import interrupt
 
 from src.application.ports.calendario import Calendario
+from src.application.ports.tareas import Tareas
 from src.domain.entities.evento import Evento
+from src.domain.entities.tarea import Tarea
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
@@ -82,7 +84,9 @@ def fecha_y_hora_actual() -> str:
     return f"{fecha_en_palabras(ahora)} de {ahora.year}, {ahora:%H:%M} (hora de Argentina)"
 
 
-def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...]:
+def construir_herramientas(
+    calendario: Calendario | None, tareas: Tareas | None = None
+) -> tuple[BaseTool, ...]:
     """Arma la lista de herramientas del agente.
 
     El `Calendario` entra por acá y no por el contexto de la invocación porque
@@ -93,7 +97,10 @@ def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...
     simplemente no se ofrece, en vez de ofrecerse y fallar siempre.
     """
     if calendario is None:
-        return (fecha_y_hora_actual,)
+        sin_agenda: list[BaseTool] = [fecha_y_hora_actual]
+        if tareas is not None:
+            sin_agenda += _herramientas_de_tareas(tareas)
+        return tuple(sin_agenda)
 
     @tool
     async def eventos_del_calendario(desde: str, hasta: str, runtime: Runtime) -> str:
@@ -192,13 +199,68 @@ def construir_herramientas(calendario: Calendario | None) -> tuple[BaseTool, ...
             nueva_duracion_minutos,
         )
 
-    return (
+    herramientas: list[BaseTool] = [
         fecha_y_hora_actual,
         eventos_del_calendario,
         crear_evento_en_calendario,
-        eliminar_evento_del_calendario,
         modificar_evento_del_calendario,
-    )
+        eliminar_evento_del_calendario,
+    ]
+    if tareas is not None:
+        herramientas += _herramientas_de_tareas(tareas)
+    return tuple(herramientas)
+
+
+def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
+    """Las tres herramientas de tareas (PB-028), cerradas sobre el puerto.
+
+    Van en su propia función porque las tareas y el calendario se habilitan
+    por separado: cada capacidad existe sólo si su puerto está.
+    """
+
+    @tool
+    async def tareas_pendientes(runtime: Runtime) -> str:
+        """Lista las tareas pendientes de la persona.
+
+        Usala cuando pregunte qué tiene que hacer, qué tareas tiene o qué
+        le queda pendiente. Las tareas no tienen hora: si preguntan por la
+        agenda de un día, eso es el calendario.
+        """
+        return await _listar_tareas(tareas, runtime)
+
+    @tool
+    async def crear_tarea(
+        titulo: str, fecha_limite: str = "", notas: str = "", *, runtime: Runtime
+    ) -> str:
+        """Anota una tarea pendiente, previa confirmación del sistema.
+
+        Usala cuando la persona quiera acordarse de hacer algo SIN una hora
+        concreta ("tengo que...", "anotá que...", "acordate que..."). Si dijo
+        una hora puntual, NO es una tarea: ofrecé crear un evento en el
+        calendario. Nunca digas que la tarea quedó anotada hasta que la
+        herramienta te lo confirme.
+
+        Args:
+            titulo: Qué hay que hacer, corto y claro.
+            fecha_limite: Fecha límite en AAAA-MM-DD, sólo si la persona dio
+                un día. Las tareas no llevan hora.
+            notas: Detalle extra, sólo si la persona lo dio.
+        """
+        return await _crear_tarea(tareas, runtime, titulo, fecha_limite, notas)
+
+    @tool
+    async def completar_tarea(titulo: str, *, runtime: Runtime) -> str:
+        """Marca una tarea pendiente como hecha, previa confirmación.
+
+        Buscá por el nombre (o parte del nombre) de la tarea. Nunca digas que
+        quedó completada hasta que la herramienta te lo confirme.
+
+        Args:
+            titulo: Nombre (o parte del nombre) de la tarea que ya se hizo.
+        """
+        return await _completar_tarea(tareas, runtime, titulo)
+
+    return [tareas_pendientes, crear_tarea, completar_tarea]
 
 
 async def _consultar_agenda(
@@ -624,3 +686,136 @@ def _aplicar_cambios(
         duracion = timedelta(minutes=60)
 
     return replace(original, titulo=titulo, inicio=inicio, fin=inicio + duracion, todo_el_dia=False)
+
+
+# --- Tareas (PB-028) ---------------------------------------------------------
+
+
+async def _listar_tareas(tareas: Tareas, runtime: Runtime) -> str:
+    """Lee las pendientes y las redacta para WhatsApp."""
+    usuario_id = runtime.context.usuario_id
+    try:
+        pendientes = await tareas.pendientes(usuario_id)
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso de tu cuenta de Google. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude consultar tus tareas ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="tareas_pendientes",
+        usuario_id=str(usuario_id),
+        cantidad=len(pendientes),
+    )
+    if not pendientes:
+        return "No hay tareas pendientes en tu lista."
+    lineas = [_linea_de_tarea(t) for t in pendientes]
+    return "Tareas pendientes:\n" + "\n".join(lineas)
+
+
+def _linea_de_tarea(tarea: Tarea) -> str:
+    if tarea.vencimiento is None:
+        return f"- {tarea.titulo}"
+    dia = datetime(
+        tarea.vencimiento.year, tarea.vencimiento.month, tarea.vencimiento.day, tzinfo=UTC
+    )
+    return f"- {tarea.titulo} (para el {fecha_en_palabras(dia)})"
+
+
+async def _crear_tarea(
+    tareas: Tareas, runtime: Runtime, titulo: str, fecha_limite: str, notas: str
+) -> str:
+    """Anota una tarea: validar → confirmar → POST. La forma de RF-08."""
+    usuario_id = runtime.context.usuario_id
+
+    titulo = titulo.strip()
+    if not titulo:
+        return "Necesito saber qué hay que hacer para anotarlo."
+
+    vencimiento: date | None = None
+    if fecha_limite.strip():
+        try:
+            vencimiento = date.fromisoformat(fecha_limite.strip())
+        except ValueError:
+            return "No entendí la fecha límite. Va en formato AAAA-MM-DD, sin hora."
+
+    nueva = Tarea(titulo=titulo, vencimiento=vencimiento, notas=notas.strip() or None)
+    resumen = f"Anotar la tarea: {_linea_de_tarea(nueva)[2:]}"
+
+    decision = interrupt({"resumen": resumen})
+    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+        return "La persona lo canceló. No se anotó nada."
+
+    try:
+        await tareas.crear(usuario_id, nueva)
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso de tu cuenta de Google. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude anotar la tarea ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="crear_tarea",
+        usuario_id=str(usuario_id),
+        con_vencimiento=vencimiento is not None,
+    )
+    return "Tarea anotada."
+
+
+async def _completar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
+    """Marca una pendiente como hecha: buscar → desambiguar → confirmar → PATCH."""
+    usuario_id = runtime.context.usuario_id
+
+    if not titulo.strip():
+        return "¿Cuál tarea querés marcar como hecha? Decime el nombre."
+
+    # Esta búsqueda se re-ejecuta al reanudar el interrupt, y de paso
+    # re-verifica que la tarea siga pendiente.
+    try:
+        pendientes = await tareas.pendientes(usuario_id)
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso de tu cuenta de Google. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude consultar tus tareas ahora mismo. Probá de nuevo en un minuto."
+
+    candidatas = [
+        t for t in pendientes if _para_buscar(titulo) in _para_buscar(t.titulo) and t.id is not None
+    ]
+    if not candidatas:
+        return "No encontré ninguna tarea pendiente que se llame algo como eso."
+    if len(candidatas) > 1:
+        lista = "\n".join(_linea_de_tarea(t) for t in candidatas)
+        return f"Hay varias tareas que coinciden:\n{lista}\n¿Cuál de estas?"
+
+    elegida = candidatas[0]
+    identificador = elegida.id
+    if identificador is None:  # el filtro de arriba ya lo garantiza
+        return "No encontré ninguna tarea pendiente que se llame algo como eso."
+
+    decision = interrupt({"resumen": f"Marcar como hecha: {elegida.titulo}"})
+    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+        return "La persona lo canceló. La tarea sigue pendiente."
+
+    try:
+        await tareas.completar(usuario_id, identificador)
+    except EntityNotFoundError:
+        return "Esa tarea ya no está en la lista: quizás se borró mientras hablábamos."
+    except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
+        return exc.mensaje_usuario
+    except AutorizacionFallidaError:
+        return "Se venció el permiso de tu cuenta de Google. Escribí /conectar para renovarlo."
+    except ServiceUnavailableError:
+        return "No pude marcar la tarea ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="completar_tarea",
+        usuario_id=str(usuario_id),
+    )
+    return "Tarea marcada como hecha."

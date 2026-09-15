@@ -27,7 +27,7 @@ from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.entities.evento import Evento
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.llm.agente_gemini import AgenteGemini, crear_agente_gemini
-from tests.dobles import CalendarioFalso
+from tests.dobles import CalendarioFalso, TareasFalsas
 
 pytestmark = [
     pytest.mark.gemini,
@@ -41,7 +41,7 @@ SENAL_DE_CONFIRMACION = "¿Confirmás?"
 
 
 @pytest_asyncio.fixture
-async def agente() -> AsyncIterator[tuple[AgenteGemini, CalendarioFalso]]:
+async def agente() -> AsyncIterator[tuple[AgenteGemini, CalendarioFalso, TareasFalsas]]:
     """Agente real (modelo de verdad) con calendario falso y memoria limpia."""
     manana = datetime.now(UTC) + timedelta(days=1)
     calendario = CalendarioFalso(
@@ -59,7 +59,8 @@ async def agente() -> AsyncIterator[tuple[AgenteGemini, CalendarioFalso]]:
         environment=Environment.TESTING,
         google_api_key=os.environ["GOOGLE_API_KEY"],
     )
-    yield crear_agente_gemini(settings, calendario), calendario
+    tareas = TareasFalsas()
+    yield crear_agente_gemini(settings, calendario, tareas), calendario, tareas
 
 
 async def _turno(agente: AgenteGemini, texto: str) -> str:
@@ -70,9 +71,9 @@ async def _turno(agente: AgenteGemini, texto: str) -> str:
 
 
 async def test_crear_sin_hora_pregunta_en_vez_de_inventar(
-    agente: tuple[AgenteGemini, CalendarioFalso],
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
 ) -> None:
-    modelo, calendario = agente
+    modelo, calendario, _ = agente
 
     respuesta = await _turno(modelo, "agendame una reunión mañana")
 
@@ -82,9 +83,9 @@ async def test_crear_sin_hora_pregunta_en_vez_de_inventar(
 
 
 async def test_eliminar_sin_dia_pregunta_cual(
-    agente: tuple[AgenteGemini, CalendarioFalso],
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
 ) -> None:
-    modelo, calendario = agente
+    modelo, calendario, _ = agente
 
     respuesta = await _turno(modelo, "borrá la reunión")
 
@@ -94,9 +95,9 @@ async def test_eliminar_sin_dia_pregunta_cual(
 
 
 async def test_modificar_sin_el_dato_nuevo_pregunta(
-    agente: tuple[AgenteGemini, CalendarioFalso],
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
 ) -> None:
-    modelo, calendario = agente
+    modelo, calendario, _ = agente
 
     respuesta = await _turno(modelo, "cambiale la hora al dentista de mañana")
 
@@ -106,11 +107,25 @@ async def test_modificar_sin_el_dato_nuevo_pregunta(
 
 
 async def test_un_pedido_completo_no_sobre_pregunta(
-    agente: tuple[AgenteGemini, CalendarioFalso],
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
 ) -> None:
     """El control del otro lado: con todos los datos, va directo a confirmar."""
-    modelo, _ = agente
+    modelo, _, _ = agente
 
     respuesta = await _turno(modelo, "agendame dentista mañana a las 15:00")
 
     assert SENAL_DE_CONFIRMACION in respuesta
+
+
+async def test_tengo_que_sin_hora_es_tarea_y_no_evento(
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
+) -> None:
+    """El criterio nuevo de PB-028: sin hora, es una tarea."""
+    modelo, calendario, _ = agente
+
+    respuesta = await _turno(modelo, "acordate que tengo que llamar al banco")
+
+    assert calendario.creados == []  # NO fue al calendario
+    # Puede proponer la tarea (¿Confirmás?) o repreguntar; ambas son válidas.
+    # Lo inválido es haber creado un evento o no haber hecho nada con sentido.
+    assert SENAL_DE_CONFIRMACION in respuesta or "?" in respuesta
