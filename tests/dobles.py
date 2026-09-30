@@ -26,13 +26,15 @@ from src.application.ports.autorizador_google import (
     CredencialesGoogle,
 )
 from src.application.ports.calendario import Calendario
+from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
+from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.tarea import Tarea
 from src.domain.entities.usuario import Usuario
-from src.domain.exceptions import InvalidValueError
+from src.domain.exceptions import EntityNotFoundError, InvalidValueError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
@@ -370,6 +372,33 @@ class TareasFalsas(Tareas):
         if self.fallar_con is not None:
             raise self.fallar_con
         self.eliminadas.append((usuario_id, tarea_id))
+
+
+class CorreosFalsos(Correos):
+    """Doble del puerto `Correos` (PB-033): una bandeja fija, sin filtrar."""
+
+    def __init__(
+        self, correos: tuple[Correo, ...] = (), fallar_con: Exception | None = None
+    ) -> None:
+        self.bandeja = correos
+        self.fallar_con = fallar_con
+        self.busquedas: list[tuple[UUID, str, int]] = []
+        self.leidos: list[tuple[UUID, str]] = []
+
+    async def buscar(self, usuario_id: UUID, consulta: str, cantidad: int) -> tuple[Correo, ...]:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.busquedas.append((usuario_id, consulta, cantidad))
+        return self.bandeja
+
+    async def leer(self, usuario_id: UUID, correo_id: str) -> Correo:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.leidos.append((usuario_id, correo_id))
+        for correo in self.bandeja:
+            if correo.id == correo_id:
+                return correo
+        raise EntityNotFoundError("Ese correo no existe.")
 
 
 class AutorizadorFalso(AutorizadorGoogle):

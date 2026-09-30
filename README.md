@@ -31,7 +31,7 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · **Google Tasks** (listar/crear/completar) · Notion API (pendiente) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
 | Testing | pytest · ruff · mypy strict — 602 tests |
 | Hosting | Railway (desde Dockerfile) |
@@ -222,7 +222,9 @@ después de ejecutar una acción, el bot igual cuenta lo que hizo: así nadie re
 algo que ya quedó hecho. Desde el Sprint 3 también
 gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…"),
 marcarlas como hechas, posponerlas y eliminarlas — el criterio es simple: con hora es un evento,
-sin hora es una tarea.
+sin hora es una tarea. En el Sprint 4 sumó **Gmail**: buscar
+correos y abrirlos para contar qué dicen. Como un correo lo escribe cualquiera, su contenido le
+llega al modelo enmarcado como dato de un tercero, nunca como instrucción.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
 `/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google).
@@ -261,8 +263,10 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le manda
 un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
-Se piden tres permisos: lectura de calendario (`calendar.readonly`), gestión de
-eventos (`calendar.events`) y tareas (`tasks`). Para desvincular: `/desconectar` —
+Se piden cuatro permisos: lectura de calendario (`calendar.readonly`), gestión de
+eventos (`calendar.events`), tareas (`tasks`) y lectura de correo (`gmail.readonly`).
+Para Gmail, además de pedir el permiso, hay que **habilitar la Gmail API** en el proyecto de
+Google Cloud: son dos llaves distintas. Para desvincular: `/desconectar` —
 pide confirmación y **revoca el permiso en Google de verdad**, no sólo borra la
 copia local.
 

@@ -42,6 +42,9 @@ SCOPES = (
     # PB-028: tareas (lectura y escritura van juntas en este scope). Una
     # cuenta conectada antes recibe 403 al usar tareas → /conectar de nuevo.
     "https://www.googleapis.com/auth/tasks",
+    # PB-033: leer y buscar correos. Scope RESTRINGIDO de Google: en modo
+    # Testing anda para los usuarios de prueba. El de envío entra con PB-032.
+    "https://www.googleapis.com/auth/gmail.readonly",
 )
 
 TIMEOUT_SEGUNDOS = 10.0

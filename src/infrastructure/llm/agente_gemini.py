@@ -23,6 +23,7 @@ from langgraph.types import Command
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
 from src.application.ports.calendario import Calendario
+from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
@@ -419,6 +420,7 @@ def crear_agente_gemini(
     settings: Settings,
     calendario: Calendario | None = None,
     tareas: Tareas | None = None,
+    correos: Correos | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
@@ -454,7 +456,7 @@ def crear_agente_gemini(
         **_ajustes_de_razonamiento(settings.gemini_model),
     )
 
-    herramientas = construir_herramientas(calendario, tareas)
+    herramientas = construir_herramientas(calendario, tareas, correos)
     grafo = construir_grafo(
         modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
     )
@@ -463,6 +465,7 @@ def crear_agente_gemini(
         modelo=settings.gemini_model,
         con_calendario=calendario is not None,
         con_tareas=tareas is not None,
+        con_correo=correos is not None,
         memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)

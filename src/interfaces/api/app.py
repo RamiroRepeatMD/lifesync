@@ -11,10 +11,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 import structlog
 from fastapi import FastAPI
 
 from src.application.ports.calendario import Calendario
+from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.infrastructure.config.logging import configure_logging
@@ -190,58 +192,67 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
         settings,
         _calendario_de(app),
         _tareas_de(app),
+        _correos_de(app),
         checkpointer=app.state.checkpointer,
     )
 
 
-def _tareas_de(app: FastAPI) -> Tareas | None:
-    """Arma el adaptador de tareas, con las mismas tres piezas del calendario.
+def _conectar_google_de(
+    app: FastAPI, capacidad: str
+) -> tuple[httpx.AsyncClient, ConectarGoogle] | None:
+    """Las piezas que necesita cualquier integración con Google, o None.
 
-    Comparten el `ConectarGoogle` conceptual pero cada uno construye el suyo:
-    son objetos baratos sin estado propio, y así ninguno depende del otro.
+    Es `None` cuando falta cualquiera —Supabase, el cifrador o el cliente de
+    Google—, y entonces el agente simplemente no ofrece esa capacidad. Es la
+    degradación de siempre: sin la pieza, la capacidad no existe, pero el resto
+    del sistema sigue en pie. Cada integración construye su `ConectarGoogle`:
+    son objetos baratos sin estado propio, y así ninguna depende de otra.
     """
     supabase = app.state.supabase
     cipher = app.state.token_cipher
     http = app.state.google_oauth
     if supabase is None or cipher is None or http is None:
-        logger.info("tasks.no_disponible", motivo="falta Supabase o la conexión con Google")
+        logger.info(f"{capacidad}.no_disponible", motivo="falta Supabase o la conexión con Google")
         return None
 
     from src.infrastructure.external.google.oauth import create_autorizador_google
-    from src.infrastructure.external.google.tareas import create_tareas_google
 
     settings: Settings = app.state.settings
     conectar = ConectarGoogle(
         SupabaseOAuthTokenRepository(supabase, cipher),
         create_autorizador_google(http, settings),
     )
-    return create_tareas_google(http, conectar)
+    return http, conectar
 
 
 def _calendario_de(app: FastAPI) -> Calendario | None:
-    """Arma el lector de calendario, si están las tres piezas que necesita.
-
-    Es `None` cuando falta cualquiera —Supabase, el cifrador o el cliente de
-    Google—, y en ese caso el agente simplemente no ofrece la herramienta. Es
-    la misma degradación de siempre: sin la pieza, la capacidad no existe, pero
-    el resto del sistema sigue en pie.
-    """
-    supabase = app.state.supabase
-    cipher = app.state.token_cipher
-    http = app.state.google_oauth
-    if supabase is None or cipher is None or http is None:
-        logger.info("calendar.no_disponible", motivo="falta Supabase o la conexión con Google")
+    """El adaptador de Google Calendar (PB-015), si están sus piezas."""
+    piezas = _conectar_google_de(app, "calendar")
+    if piezas is None:
         return None
-
     from src.infrastructure.external.google.calendario import create_calendario_google
-    from src.infrastructure.external.google.oauth import create_autorizador_google
 
-    settings: Settings = app.state.settings
-    conectar = ConectarGoogle(
-        SupabaseOAuthTokenRepository(supabase, cipher),
-        create_autorizador_google(http, settings),
-    )
-    return create_calendario_google(http, conectar)
+    return create_calendario_google(*piezas)
+
+
+def _tareas_de(app: FastAPI) -> Tareas | None:
+    """El adaptador de Google Tasks (PB-028), si están sus piezas."""
+    piezas = _conectar_google_de(app, "tasks")
+    if piezas is None:
+        return None
+    from src.infrastructure.external.google.tareas import create_tareas_google
+
+    return create_tareas_google(*piezas)
+
+
+def _correos_de(app: FastAPI) -> Correos | None:
+    """El adaptador de Gmail (PB-033), si están sus piezas."""
+    piezas = _conectar_google_de(app, "gmail")
+    if piezas is None:
+        return None
+    from src.infrastructure.external.google.gmail import create_gmail_google
+
+    return create_gmail_google(*piezas)
 
 
 def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:
