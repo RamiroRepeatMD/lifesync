@@ -12,6 +12,7 @@ operaciones listar, crear y completar. Posponer y eliminar son PB-029.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date
 from uuid import UUID
 
 from src.domain.entities.tarea import Tarea
@@ -45,5 +46,25 @@ class Tareas(ABC):
 
         Raises:
             EntityNotFoundError: Si la tarea ya no existe.
+            Las mismas de `pendientes`.
+        """
+
+    @abstractmethod
+    async def posponer(self, usuario_id: UUID, tarea_id: str, vencimiento: date) -> None:
+        """Cambia la fecha límite de la tarea (PB-029). Sirve también para adelantarla.
+
+        Raises:
+            EntityNotFoundError: Si la tarea ya no existe.
+            Las mismas de `pendientes`.
+        """
+
+    @abstractmethod
+    async def eliminar(self, usuario_id: UUID, tarea_id: str) -> None:
+        """Borra la tarea de la lista (PB-029).
+
+        Una tarea que ya no existe no es un error: el estado final pedido —que
+        no esté— ya se cumple.
+
+        Raises:
             Las mismas de `pendientes`.
         """

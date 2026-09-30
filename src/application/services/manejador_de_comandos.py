@@ -51,8 +51,9 @@ ESTADO_SIN_CUENTAS = (
 ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
     "Puedo leer tu calendario y crear, modificar o eliminar eventos; también "
-    "ver tus tareas pendientes, anotar nuevas y marcarlas como hechas —siempre "
-    "te pido confirmación antes de tocar algo."
+    "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
+    "cambiarles la fecha o eliminarlas —siempre te pido confirmación antes de "
+    "tocar algo."
 )
 
 CONECTAR_NO_DISPONIBLE = (

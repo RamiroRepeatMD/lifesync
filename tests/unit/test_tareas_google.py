@@ -188,3 +188,50 @@ async def test_api_deshabilitada_no_manda_a_reconectar() -> None:
 
     with pytest.raises(ServiceUnavailableError):
         await tareas.pendientes(USUARIO)
+
+
+# --- Posponer y eliminar (PB-029) ---------------------------------------------
+
+
+async def test_posponer_patchea_solo_el_due() -> None:
+    """Con PATCH, lo que no se manda queda intacto: título y notas no viajan."""
+    pedidos: list[httpx.Request] = []
+    tareas = await _con_token(pedidos, lambda _: httpx.Response(200, json={}))
+
+    await tareas.posponer(USUARIO, "id-x", date(2026, 10, 6))
+
+    assert pedidos[0].method == "PATCH"
+    assert str(pedidos[0].url).endswith("/lists/@default/tasks/id-x")
+    assert json.loads(pedidos[0].content) == {"due": "2026-10-06T00:00:00.000Z"}
+
+
+async def test_posponer_algo_inexistente_es_error_con_nombre() -> None:
+    tareas = await _con_token([], lambda _: httpx.Response(404, json={}))
+
+    with pytest.raises(EntityNotFoundError):
+        await tareas.posponer(USUARIO, "fantasma", date(2026, 10, 6))
+
+
+async def test_eliminar_manda_delete_a_la_tarea() -> None:
+    pedidos: list[httpx.Request] = []
+    tareas = await _con_token(pedidos, lambda _: httpx.Response(204))
+
+    await tareas.eliminar(USUARIO, "id-x")
+
+    assert pedidos[0].method == "DELETE"
+    assert str(pedidos[0].url).endswith("/lists/@default/tasks/id-x")
+
+
+@pytest.mark.parametrize("status", [404, 410])
+async def test_eliminar_lo_ya_borrado_no_falla(status: int) -> None:
+    """Ya borrada es el mismo estado final que borrarla."""
+    tareas = await _con_token([], lambda _: httpx.Response(status, json={}))
+
+    await tareas.eliminar(USUARIO, "fantasma")  # no lanza
+
+
+async def test_tolerar_el_404_no_traga_los_demas_rechazos() -> None:
+    tareas = await _con_token([], lambda _: httpx.Response(403, json={}))
+
+    with pytest.raises(PermisoInsuficienteError):
+        await tareas.eliminar(USUARIO, "id-x")

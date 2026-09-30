@@ -218,8 +218,9 @@ calendario** de quien escribe si conectó su cuenta de Google (RF-03): consultas
 tengo hoy?"), creación, **modificación** ("cambiale la hora al dentista") y eliminación —
 toda escritura pasa por una **confirmación obligatoria** que el modelo no puede saltear
 (RF-08: es una pausa del grafo, no una instrucción del prompt). Desde el Sprint 3 también
-gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…")
-y marcarlas como hechas — el criterio es simple: con hora es un evento, sin hora es una tarea.
+gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…"),
+marcarlas como hechas, posponerlas y eliminarlas — el criterio es simple: con hora es un evento,
+sin hora es una tarea.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
 `/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google).

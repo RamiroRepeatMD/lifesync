@@ -72,8 +72,7 @@ class TareasGoogle(Tareas):
         if tarea.notas:
             cuerpo["notes"] = tarea.notas
         if tarea.vencimiento is not None:
-            # Medianoche UTC del día: la única parte que la API conserva.
-            cuerpo["due"] = f"{tarea.vencimiento.isoformat()}T00:00:00.000Z"
+            cuerpo["due"] = _due(tarea.vencimiento)
 
         datos = await self._pedir("POST", f"{BASE}/lists/{LISTA}/tasks", token, json=cuerpo)
         creada = _a_tarea(datos)
@@ -93,6 +92,30 @@ class TareasGoogle(Tareas):
         )
         logger.info("tasks.completada", usuario_id=str(usuario_id))
 
+    async def posponer(self, usuario_id: UUID, tarea_id: str, vencimiento: date) -> None:
+        token = await self._credencial(usuario_id)
+        await self._pedir(
+            "PATCH",
+            f"{BASE}/lists/{LISTA}/tasks/{httpx.URL(tarea_id)}",
+            token,
+            # Sólo `due`: con PATCH, lo que no se manda queda como estaba.
+            json={"due": _due(vencimiento)},
+            error_404=EntityNotFoundError("Esa tarea ya no existe en la lista."),
+        )
+        logger.info("tasks.pospuesta", usuario_id=str(usuario_id))
+
+    async def eliminar(self, usuario_id: UUID, tarea_id: str) -> None:
+        token = await self._credencial(usuario_id)
+        await self._pedir(
+            "DELETE",
+            f"{BASE}/lists/{LISTA}/tasks/{httpx.URL(tarea_id)}",
+            token,
+            # Ya borrada es el mismo estado final que borrarla: se tolera,
+            # igual que al eliminar un evento del calendario.
+            tolerar=frozenset({httpx.codes.NOT_FOUND, httpx.codes.GONE}),
+        )
+        logger.info("tasks.eliminada", usuario_id=str(usuario_id))
+
     # --- Plomería ---------------------------------------------------------
 
     async def _credencial(self, usuario_id: UUID) -> str:
@@ -109,6 +132,7 @@ class TareasGoogle(Tareas):
         params: dict[str, str] | None = None,
         json: dict[str, Any] | None = None,
         error_404: Exception | None = None,
+        tolerar: frozenset[int] = frozenset(),
     ) -> dict[str, Any]:
         try:
             respuesta = await self._cliente.request(
@@ -122,10 +146,17 @@ class TareasGoogle(Tareas):
             logger.error("tasks.error_transporte", tipo=type(exc).__name__)
             raise ServiceUnavailableError("No se pudo contactar a Google Tasks.") from None
 
+        if respuesta.status_code in tolerar:
+            return {}
         if respuesta.status_code == httpx.codes.NOT_FOUND and error_404 is not None:
             raise error_404
         traducir_rechazo(respuesta, "tasks")
         return json_o_vacio(respuesta)
+
+
+def _due(fecha: date) -> str:
+    """Medianoche UTC del día: la única parte de `due` que la API conserva."""
+    return f"{fecha.isoformat()}T00:00:00.000Z"
 
 
 def _a_tarea(item: dict[str, Any]) -> Tarea:

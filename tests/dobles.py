@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -322,7 +322,7 @@ class CalendarioFalso(Calendario):
 
 
 class TareasFalsas(Tareas):
-    """Doble del puerto `Tareas` (PB-028), con registro de escrituras."""
+    """Doble del puerto `Tareas` (PB-028 · PB-029), con registro de escrituras."""
 
     def __init__(
         self,
@@ -334,6 +334,8 @@ class TareasFalsas(Tareas):
         self.consultados: list[UUID] = []
         self.creadas: list[tuple[UUID, Tarea]] = []
         self.completadas: list[tuple[UUID, str]] = []
+        self.pospuestas: list[tuple[UUID, str, date]] = []
+        self.eliminadas: list[tuple[UUID, str]] = []
 
     async def pendientes(self, usuario_id: UUID) -> tuple[Tarea, ...]:
         if self.fallar_con is not None:
@@ -351,6 +353,16 @@ class TareasFalsas(Tareas):
         if self.fallar_con is not None:
             raise self.fallar_con
         self.completadas.append((usuario_id, tarea_id))
+
+    async def posponer(self, usuario_id: UUID, tarea_id: str, vencimiento: date) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.pospuestas.append((usuario_id, tarea_id, vencimiento))
+
+    async def eliminar(self, usuario_id: UUID, tarea_id: str) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.eliminadas.append((usuario_id, tarea_id))
 
 
 class AutorizadorFalso(AutorizadorGoogle):
