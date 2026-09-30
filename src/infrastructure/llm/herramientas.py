@@ -402,16 +402,29 @@ def _en_hora_local(evento: Evento) -> datetime:
     return evento.inicio.astimezone(ZONA_HORARIA)
 
 
+def _horario(inicio: datetime, fin: datetime | None) -> str:
+    """ "HH:MM a HH:MM", aclarando el día del fin si cruza la medianoche.
+
+    Los dos momentos tienen que venir ya en hora local: la medianoche que
+    importa es la de la persona, no la de UTC.
+    """
+    texto = f"{inicio:%H:%M}"
+    if fin is None:
+        return texto
+    texto += f" a {fin:%H:%M}"
+    if fin.date() != inicio.date():
+        texto += f" del {fecha_en_palabras(fin)}"
+    return texto
+
+
 def _linea(evento: Evento, local: datetime) -> str:
     """Una línea por evento, con la hora sólo si la tiene."""
     partes = [evento.titulo_visible]
     if evento.todo_el_dia:
         partes.append("(todo el día)")
     else:
-        horario = f"{local:%H:%M}"
-        if evento.fin is not None:
-            horario += f" a {evento.fin.astimezone(ZONA_HORARIA):%H:%M}"
-        partes.insert(0, f"{horario} —")
+        fin = evento.fin.astimezone(ZONA_HORARIA) if evento.fin is not None else None
+        partes.insert(0, f"{_horario(local, fin)} —")
     if evento.calendario:
         partes.append(f"[{evento.calendario}]")
     return " ".join(partes)
@@ -456,8 +469,16 @@ async def _crear_evento(
     if not MINUTOS_MINIMOS <= duracion_minutos <= MINUTOS_MAXIMOS:
         return f"La duración tiene que estar entre {MINUTOS_MINIMOS} y {MINUTOS_MAXIMOS} minutos."
 
+    if inicio < datetime.now(ZONA_HORARIA):
+        # Casi siempre es un año mal inferido ("el 5 de enero" en el año que
+        # ya pasó): se frena antes de proponer, nombrando el año.
+        return (
+            f"El {fecha_en_palabras(inicio)} de {inicio.year} a las {inicio:%H:%M} ya "
+            "pasó. ¿Para cuándo es?"
+        )
+
     fin = inicio + timedelta(minutes=duracion_minutos)
-    detalle = f'"{titulo}" el {fecha_en_palabras(inicio)} de {inicio:%H:%M} a {fin:%H:%M}'
+    detalle = f'"{titulo}" el {fecha_en_palabras(inicio)} de {_horario(inicio, fin)}'
     resumen = f"Crear {detalle}"
 
     decision = interrupt({"resumen": resumen})
@@ -523,7 +544,8 @@ async def _eliminar_evento(
         return f"Hay varios eventos que coinciden ese día:\n{lista}\n¿Cuál de estos?"
 
     unico = candidatos[0]
-    detalle = f"{_linea(unico, _en_hora_local(unico))} del {fecha_en_palabras(unico.inicio)}"
+    local = _en_hora_local(unico)
+    detalle = f"{_linea(unico, local)} del {fecha_en_palabras(local)}"
     resumen = f"Eliminar {detalle}"
 
     decision = interrupt({"resumen": resumen})
@@ -730,8 +752,15 @@ def _aplicar_cambios(
             dia = date.fromisoformat(fecha)
         except ValueError:
             return None
+        nuevo_inicio = datetime(dia.year, dia.month, dia.day, tzinfo=UTC)
+        # El fin es exclusivo (un evento del 5 termina el 6): mover conserva
+        # cuántos días dura. Sin fin conocido, dura uno.
+        dias = (original.fin - original.inicio).days if original.fin is not None else 1
         return replace(
-            original, titulo=titulo, inicio=datetime(dia.year, dia.month, dia.day, tzinfo=UTC)
+            original,
+            titulo=titulo,
+            inicio=nuevo_inicio,
+            fin=nuevo_inicio + timedelta(days=max(1, dias)),
         )
 
     inicio = _momento_local(fecha, hora)
@@ -850,6 +879,11 @@ async def _crear_tarea(
             vencimiento = date.fromisoformat(fecha_limite.strip())
         except ValueError:
             return "No entendí la fecha límite. Va en formato AAAA-MM-DD, sin hora."
+        if vencimiento < datetime.now(ZONA_HORARIA).date():
+            return (
+                f"El {_dia_en_palabras(vencimiento)} de {vencimiento.year} ya pasó. "
+                "¿Para cuándo es?"
+            )
 
     nueva = Tarea(titulo=titulo, vencimiento=vencimiento, notas=notas.strip() or None)
     detalle = _linea_de_tarea(nueva)[2:]

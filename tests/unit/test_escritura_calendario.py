@@ -19,19 +19,23 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from src.domain.entities.evento import Evento
+from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import construir_grafo
 from src.infrastructure.llm.herramientas import construir_herramientas
 from tests.dobles import CalendarioFalso, ModeloFalso
 
 USUARIO = uuid4()
+# Las creaciones van a futuro relativo: desde PB-027 crear en el pasado se
+# frena, y una fecha fija se vuelve pasado sola con el tiempo.
+FUTURO = (datetime.now(ZONA_HORARIA) + timedelta(days=7)).date().isoformat()
 
 PEDIDO_CREAR = AIMessage(
     "",
     tool_calls=[
         {
             "name": "crear_evento_en_calendario",
-            "args": {"titulo": "Dentista", "fecha": "2026-09-05", "hora_inicio": "10:00"},
+            "args": {"titulo": "Dentista", "fecha": FUTURO, "hora_inicio": "10:00"},
             "id": "t1",
         }
     ],
@@ -176,7 +180,7 @@ async def test_una_duracion_absurda_se_rechaza() -> None:
                 "name": "crear_evento_en_calendario",
                 "args": {
                     "titulo": "X",
-                    "fecha": "2026-09-05",
+                    "fecha": FUTURO,
                     "hora_inicio": "10:00",
                     "duracion_minutos": 5000,
                 },
@@ -270,7 +274,7 @@ async def test_el_titulo_del_evento_no_se_loguea() -> None:
                 "name": "crear_evento_en_calendario",
                 "args": {
                     "titulo": "Terapia con la Dra. Pérez",
-                    "fecha": "2026-09-05",
+                    "fecha": FUTURO,
                     "hora_inicio": "10:00",
                 },
                 "id": "t1",

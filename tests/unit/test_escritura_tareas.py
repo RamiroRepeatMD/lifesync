@@ -25,6 +25,8 @@ from src.infrastructure.llm.herramientas import construir_herramientas, fecha_en
 from tests.dobles import ModeloFalso, TareasFalsas
 
 USUARIO = uuid4()
+# Futuro relativo: desde PB-027 anotar para una fecha pasada se frena.
+LIMITE = datetime.now(ZONA_HORARIA).date() + timedelta(days=3)
 
 
 def _grafo_con(tareas: TareasFalsas, *guion: AIMessage) -> Any:
@@ -89,7 +91,7 @@ async def test_sin_tareas_lo_dice_sin_inventar() -> None:
 async def test_crear_sin_confirmacion_no_escribe() -> None:
     tareas = TareasFalsas()
     grafo = _grafo_con(
-        tareas, _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite="2026-09-19")
+        tareas, _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite=LIMITE.isoformat())
     )
 
     estado = await _preguntar(grafo, "anotá comprar regalo")
@@ -102,7 +104,7 @@ async def test_crear_aprobado_escribe_una_sola_vez() -> None:
     tareas = TareasFalsas()
     grafo = _grafo_con(
         tareas,
-        _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite="2026-09-19"),
+        _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite=LIMITE.isoformat()),
         AIMessage("anotada"),
     )
 
@@ -112,7 +114,7 @@ async def test_crear_aprobado_escribe_una_sola_vez() -> None:
     assert len(tareas.creadas) == 1
     _, creada = tareas.creadas[0]
     assert creada.titulo == "Comprar regalo"
-    assert creada.vencimiento == date(2026, 9, 19)
+    assert creada.vencimiento == LIMITE
 
 
 async def test_crear_rechazado_no_escribe_nada() -> None:

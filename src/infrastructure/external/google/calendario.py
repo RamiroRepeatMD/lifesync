@@ -185,9 +185,14 @@ class CalendarioGoogle(Calendario):
         cuerpo: dict[str, Any] = {"summary": evento.titulo}
         if evento.todo_el_dia:
             # Los de día completo van con `date`: mandar dateTime los convierte.
-            cuerpo["start"] = {"date": evento.inicio.date().isoformat()}
-            fin = evento.fin if evento.fin is not None else evento.inicio
-            cuerpo["end"] = {"date": fin.date().isoformat()}
+            inicio_dia = evento.inicio.date()
+            fin_dia = evento.fin.date() if evento.fin is not None else inicio_dia
+            # El fin de un día completo es exclusivo: `end = start` es, para
+            # Google, un rango vacío. Sin fin válido, el evento dura un día.
+            if fin_dia <= inicio_dia:
+                fin_dia = inicio_dia + timedelta(days=1)
+            cuerpo["start"] = {"date": inicio_dia.isoformat()}
+            cuerpo["end"] = {"date": fin_dia.isoformat()}
         else:
             cuerpo["start"] = {"dateTime": evento.inicio.isoformat()}
             cuerpo["end"] = {
@@ -387,8 +392,10 @@ def _a_evento(item: dict[str, Any], calendario: str) -> Evento | None:
     return Evento(
         titulo=item.get("summary") or "",
         inicio=inicio,
-        # En los de día completo Google marca el fin al día siguiente a las 00:00.
-        fin=None if todo_el_dia else fin,
+        # En los de día completo el fin es EXCLUSIVO (un evento del 5 termina el
+        # 6) y se conserva: sin él, modificarlo mandaba un rango vacío y uno de
+        # varios días se truncaba (PB-027). Quien lo muestra ya lo ignora.
+        fin=fin,
         todo_el_dia=todo_el_dia,
         calendario=calendario or None,
         id=identificador if isinstance(identificador, str) else None,

@@ -411,6 +411,9 @@ uv run mypy src              # tipado estricto del código
 uv run mypy tests            # ... y de los tests (CI corre ambos)
 ```
 
+`tests/integration/` prueba caminos completos sin red: por ejemplo, de la herramienta del agente
+al adaptador de Google Calendar, asertando el cuerpo exacto que recibiría Google.
+
 Hay además una suite de **evaluación del comportamiento del modelo** (RF-10) que llama a
 Gemini de verdad y gasta cuota — por eso es opt-in y CI la saltea:
 
