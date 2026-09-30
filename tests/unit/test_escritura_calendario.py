@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -139,7 +139,7 @@ def test_el_modelo_no_ve_el_usuario_ni_el_runtime() -> None:
 
     for nombre, esperados in [
         ("crear_evento_en_calendario", {"titulo", "fecha", "hora_inicio", "duracion_minutos"}),
-        ("eliminar_evento_del_calendario", {"fecha", "titulo"}),
+        ("eliminar_evento_del_calendario", {"fecha", "titulo", "todos"}),
     ]:
         esquema = herramientas[nombre].tool_call_schema
         assert isinstance(esquema, type) and issubclass(esquema, BaseModel)
@@ -493,3 +493,75 @@ async def test_modificar_hacia_el_mismo_estado_no_propone_nada() -> None:
 
     assert "__interrupt__" not in estado
     assert calendario.modificados == []
+
+
+# --- Borrar varios (bug de la prueba real del 30/09) --------------------------
+#
+# Con dos "Dentista" idénticos, eliminar preguntaba "¿cuál?" para siempre:
+# nada los distinguía y no había forma de pedir "los dos".
+
+
+def _pedido_borrar(**args: Any) -> AIMessage:
+    return AIMessage(
+        "",
+        tool_calls=[
+            {
+                "name": "eliminar_evento_del_calendario",
+                "args": {"fecha": "2026-09-05", "titulo": "dentista", **args},
+                "id": "t1",
+            }
+        ],
+    )
+
+
+def _gemelos() -> tuple[Evento, Evento]:
+    """Dos eventos idénticos salvo el id, como los que dejó el bug del duplicado."""
+    return _evento("Dentista", 16, "id-a"), _evento("Dentista", 16, "id-b")
+
+
+async def test_todos_borra_los_dos_con_una_sola_confirmacion() -> None:
+    calendario = CalendarioFalso(eventos=_gemelos())
+    grafo = _grafo_con(calendario, _pedido_borrar(todos=True), AIMessage("listo"))
+
+    estado = await _preguntar(grafo, "borrá los dos dentista")
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    await _reanudar(grafo, aprobado=True)
+
+    assert resumen.startswith("Eliminar estos 2 eventos:")
+    assert sorted(evento_id for _, evento_id in calendario.eliminados) == ["id-a", "id-b"]
+
+
+async def test_con_identicos_y_sin_todos_borra_uno() -> None:
+    """Son intercambiables: borrar cualquiera es borrar "uno de ellos"."""
+    calendario = CalendarioFalso(eventos=_gemelos())
+    grafo = _grafo_con(calendario, _pedido_borrar(), AIMessage("listo"))
+
+    estado = await _preguntar(grafo, "borrá el dentista")
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    await _reanudar(grafo, aprobado=True)
+
+    assert resumen.startswith("Eliminar uno de los 2 eventos idénticos")
+    assert len(calendario.eliminados) == 1
+
+
+async def test_con_distintos_y_sin_todos_pregunta_y_ofrece_todos() -> None:
+    distintos = (_evento("Dentista Norte", 10, "id-n"), _evento("Dentista Sur", 15, "id-s"))
+    calendario = CalendarioFalso(eventos=distintos)
+    grafo = _grafo_con(calendario, _pedido_borrar(), AIMessage("¿cuál?"))
+
+    estado = await _preguntar(grafo, "borrá el dentista")
+
+    assert "__interrupt__" not in estado
+    assert calendario.eliminados == []
+    respuesta = next(m for m in estado["messages"] if isinstance(m, ToolMessage))
+    assert "los borro todos" in str(respuesta.content)
+
+
+async def test_rechazar_el_borrado_multiple_no_borra_nada() -> None:
+    calendario = CalendarioFalso(eventos=_gemelos())
+    grafo = _grafo_con(calendario, _pedido_borrar(todos=True), AIMessage("ok"))
+
+    await _preguntar(grafo, "borrá los dos")
+    await _reanudar(grafo, aprobado=False)
+
+    assert calendario.eliminados == []

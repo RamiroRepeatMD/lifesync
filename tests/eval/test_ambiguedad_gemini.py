@@ -19,7 +19,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -299,3 +299,98 @@ async def test_un_correo_no_logra_que_el_agente_lo_reenvie(
     assert correos.busquedas  # vio el correo: sin esto, lo de abajo no probaría nada
     assert SENAL_DE_CONFIRMACION not in respuesta
     assert correos.enviados == []
+
+
+# --- Varios turnos en el mismo hilo (bugs de la prueba real del 30/09) --------------
+
+
+async def _turno_en(agente: AgenteGemini, hilo: UUID, texto: str) -> str:
+    """Como `_turno`, pero en un hilo fijo: para escenarios de varios turnos."""
+    ultimo: Exception | None = None
+    for intento in range(INTENTOS_ANTE_TRANSITORIOS):
+        try:
+            return await agente.responder(
+                ConsultaDelUsuario(conversacion_id=hilo, usuario_id=hilo, texto=texto)
+            )
+        except CuotaDeAgenteAgotadaError as exc:
+            ultimo = exc
+            if intento < INTENTOS_ANTE_TRANSITORIOS - 1:
+                await asyncio.sleep(ESPERA_POR_CUOTA_SEGUNDOS)
+        except AgenteNoDisponibleError as exc:
+            ultimo = exc
+    pytest.skip(f"Gemini no respondió tras {INTENTOS_ANTE_TRANSITORIOS} intentos: {ultimo}")
+
+
+def _correo(id_: str, remitente: str, texto: str, hace: timedelta) -> Correo:
+    return Correo(
+        id=id_,
+        remitente=remitente,
+        asunto=texto[:30],
+        fecha=datetime.now(UTC) - hace,
+        no_leido=True,
+        fragmento=texto,
+        cuerpo=texto,
+    )
+
+
+@pytest_asyncio.fixture
+async def agente_completo() -> AsyncIterator[
+    tuple[AgenteGemini, CalendarioFalso, TareasFalsas, CorreosFalsos]
+]:
+    calendario, tareas = CalendarioFalso(), TareasFalsas()
+    correos = CorreosFalsos(
+        (
+            _correo(
+                "m-viejo",
+                "Club <info@club.com>",
+                "Recordatorio del apto médico",
+                timedelta(hours=4),
+            ),
+        )
+    )
+    settings = Settings(
+        _env_file=None,
+        environment=Environment.TESTING,
+        google_api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    yield crear_agente_gemini(settings, calendario, tareas, correos), calendario, tareas, correos
+
+
+async def test_un_pedido_compuesto_deja_un_evento_y_una_tarea(
+    agente_completo: tuple[AgenteGemini, CalendarioFalso, TareasFalsas, CorreosFalsos],
+) -> None:
+    """El duplicado del 30/09: pedir las dos cosas juntas ya no repite ninguna."""
+    modelo, calendario, tareas, _ = agente_completo
+    hilo = uuid4()
+
+    respuesta = await _turno_en(
+        modelo, hilo, "agendame dentista el lunes a las 16 y anotá comprar el regalo de mamá"
+    )
+    for _ in range(3):  # un "sí" por cada confirmación que pida, sin suponer cuántas
+        if SENAL_DE_CONFIRMACION not in respuesta:
+            break
+        respuesta = await _turno_en(modelo, hilo, "sí")
+
+    assert len(calendario.creados) == 1
+    assert len(tareas.creadas) == 1
+
+
+async def test_el_ultimo_correo_es_el_ultimo_de_verdad(
+    agente_completo: tuple[AgenteGemini, CalendarioFalso, TareasFalsas, CorreosFalsos],
+) -> None:
+    """El listado viejo del 30/09: entre dos turnos llega un correo nuevo."""
+    modelo, _, _, correos = agente_completo
+    hilo = uuid4()
+
+    await _turno_en(modelo, hilo, "¿qué correos tengo?")
+    nuevo = _correo(
+        "m-nuevo", "Ramiro <ramiro@ejemplo.com>", "Llego a las 9, avisale a Ana", timedelta()
+    )
+    correos.bandeja = (nuevo, *correos.bandeja)  # llega mientras tanto
+
+    respuesta = await _turno_en(modelo, hilo, "leeme el último correo")
+
+    assert len(correos.busquedas) >= 2  # volvió a buscar en vez de reusar el listado viejo
+    abrio_el_nuevo = bool(correos.leidos) and correos.leidos[-1][1] == "m-nuevo"
+    assert abrio_el_nuevo or "Ana" in respuesta  # habla del correo nuevo...
+    assert "apto" not in respuesta.lower()  # ...y no del viejo

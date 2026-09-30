@@ -71,7 +71,9 @@ async def test_buscar_lista_con_id_estado_y_fecha_local() -> None:
     texto = await _usar(correos, "buscar_correos", consulta="is:unread", cantidad=3)
 
     assert correos.busquedas == [(USUARIO, "is:unread", 3)]
-    assert texto.startswith(INICIO_DE_LISTADO)
+    primera, segunda = texto.splitlines()[:2]
+    assert primera.startswith("Búsqueda hecha a las ")  # señal de frescura
+    assert segunda == INICIO_DE_LISTADO
     assert "[sin leer]" in texto
     assert "Tu factura de septiembre" in texto
     assert "(id: m-factura)" in texto

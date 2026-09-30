@@ -17,6 +17,14 @@ no cambia. Ése es el motivo de armar el grafo a mano en vez de usar
 ejercitar el grafo entero —incluido el ciclo de herramientas— con un modelo
 falso, sin red y sin API key. Es el mismo reparto que en WhatsApp, donde
 `create_whatsapp_client` arma el cliente y `ClienteWhatsApp` lo recibe.
+
+**Una escritura por paso.** El nodo de herramientas ejecuta las lecturas y
+sólo la PRIMERA escritura que pidió el modelo; a las demás les responde que
+se piden de nuevo después. Sin esto, dos escrituras en un mismo mensaje (lo
+que Gemini hace con los pedidos compuestos) corrían en el mismo paso, y
+LangGraph re-ejecuta el paso entero al reanudar cada pausa: en producción se
+creó un evento dos veces, y en la reproducción un solo "sí" mandó dos correos,
+uno que la persona nunca vio.
 """
 
 from __future__ import annotations
@@ -27,13 +35,15 @@ from typing import Any
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import SystemMessage, trim_messages
+from langchain_core.messages import SystemMessage, ToolCall, ToolMessage, trim_messages
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from src.infrastructure.llm.contexto import ContextoDeAgente
+from src.infrastructure.llm.herramientas import HERRAMIENTAS_DE_ESCRITURA
 from src.infrastructure.llm.prompt import instrucciones
 
 logger = structlog.get_logger(__name__)
@@ -51,11 +61,19 @@ LIMITE_DE_PASOS = 8
 NODO_AGENTE = "agente"
 NODO_HERRAMIENTAS = "herramientas"
 
+# Lo que recibe el modelo por cada escritura que pidió de más en un mismo
+# mensaje: no falló, se confirma de a una.
+ESCRITURA_DIFERIDA = (
+    "No se ejecutó todavía: el sistema confirma las acciones de a una. "
+    "Pedila de nuevo apenas termine la anterior."
+)
+
 
 def construir_grafo(
     modelo: BaseChatModel,
     herramientas: Sequence[BaseTool],
     checkpointer: BaseCheckpointSaver[Any],
+    escrituras: frozenset[str] = HERRAMIENTAS_DE_ESCRITURA,
 ) -> Any:
     """Arma y compila el grafo del agente.
 
@@ -66,6 +84,8 @@ def construir_grafo(
         checkpointer: Dónde vive el historial de cada conversación (RF-09). El
             llamador elige la implementación; el grafo no se entera de si
             sobrevive a un reinicio.
+        escrituras: Nombres de las herramientas que escriben: de ésas corre
+            una sola por paso.
 
     Returns:
         El grafo compilado, listo para `ainvoke`. El tipo concreto de LangGraph
@@ -106,12 +126,33 @@ def construir_grafo(
         )
         return {"messages": [respuesta]}
 
+    ejecutor = ToolNode(herramientas)
+
+    async def nodo_herramientas(state: MessagesState, config: RunnableConfig) -> MessagesState:
+        """Ejecuta lo pedido, con una sola escritura por paso.
+
+        El mensaje del modelo NO se recorta: Gemini guarda firmas por llamada
+        y un mensaje alterado podría hacer que rechace el historial. Se
+        ejecuta una copia filtrada, y cada escritura de más recibe su propia
+        respuesta de "diferida": así toda llamada queda respondida.
+        """
+        pedido = state["messages"][-1]
+        llamadas: list[ToolCall] = list(getattr(pedido, "tool_calls", None) or [])
+        a_ejecutar, diferidas = _una_escritura_por_paso(llamadas, escrituras)
+        if diferidas:
+            logger.info("agente.escrituras_diferidas", cantidad=len(diferidas))
+            pedido = pedido.model_copy(update={"tool_calls": a_ejecutar})
+
+        salida = await ejecutor.ainvoke({"messages": [*state["messages"][:-1], pedido]}, config)
+        respuestas = [*salida["messages"], *(_diferida(llamada) for llamada in diferidas)]
+        return {"messages": respuestas}
+
     # `context_schema` es lo que habilita que las herramientas reciban de
     # quién es la conversación por un canal que el modelo no ve. Ver
     # `contexto.py`: es el control de seguridad de PB-015.
     grafo = StateGraph(MessagesState, context_schema=ContextoDeAgente)
     grafo.add_node(NODO_AGENTE, nodo_agente)
-    grafo.add_node(NODO_HERRAMIENTAS, ToolNode(herramientas))
+    grafo.add_node(NODO_HERRAMIENTAS, nodo_herramientas)
 
     grafo.add_edge(START, NODO_AGENTE)
     # `tools_condition` devuelve "tools" o END; el mapa traduce a nuestro nodo,
@@ -128,3 +169,31 @@ def construir_grafo(
     compilado = grafo.compile(checkpointer=checkpointer)
     logger.info("agente.grafo.compilado", herramientas=[h.name for h in herramientas])
     return compilado
+
+
+def _una_escritura_por_paso(
+    llamadas: list[ToolCall], escrituras: frozenset[str]
+) -> tuple[list[ToolCall], list[ToolCall]]:
+    """Separa lo que se ejecuta ahora de las escrituras que esperan su turno.
+
+    Corren todas las lecturas y la PRIMERA escritura; las demás escrituras se
+    difieren. Así hay como mucho una pausa por paso, y re-ejecutar el paso al
+    reanudarla no repite ninguna escritura.
+    """
+    a_ejecutar: list[ToolCall] = []
+    diferidas: list[ToolCall] = []
+    hubo_escritura = False
+    for llamada in llamadas:
+        if llamada["name"] in escrituras:
+            if hubo_escritura:
+                diferidas.append(llamada)
+                continue
+            hubo_escritura = True
+        a_ejecutar.append(llamada)
+    return a_ejecutar, diferidas
+
+
+def _diferida(llamada: ToolCall) -> ToolMessage:
+    return ToolMessage(
+        content=ESCRITURA_DIFERIDA, tool_call_id=llamada["id"] or "", name=llamada["name"]
+    )
