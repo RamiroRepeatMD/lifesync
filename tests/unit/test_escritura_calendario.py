@@ -470,3 +470,22 @@ async def test_los_titulos_no_se_loguean_al_modificar() -> None:
     registrado = json.dumps(eventos, default=str)
     assert "psicóloga" not in registrado
     assert "Dentista" not in registrado
+
+
+async def test_modificar_hacia_el_mismo_estado_no_propone_nada() -> None:
+    """Visto contra Gemini real: pidió "cambiar" la hora por la que ya tenía.
+
+    Proponer "10:00 → 10:00" y pedir un sí por eso es ruido: se frena antes.
+    """
+    original = _dentista()  # 10:00 en Buenos Aires, dura 30 minutos
+    calendario = CalendarioFalso(eventos=(original,))
+    grafo = _grafo_con(
+        calendario,
+        _pedido_modificar(nueva_hora_inicio="10:00", nueva_duracion_minutos=30),
+        AIMessage("¿A qué hora lo querés pasar?"),
+    )
+
+    estado = await _preguntar(grafo, "cambiale la hora al dentista")
+
+    assert "__interrupt__" not in estado
+    assert calendario.modificados == []

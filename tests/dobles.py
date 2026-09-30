@@ -237,6 +237,11 @@ class ModeloFalso(BaseChatModel):
     guion: list[AIMessage] = Field(default_factory=list)
     recibidos: list[list[BaseMessage]] = Field(default_factory=list)
     herramientas_asociadas: list[Any] = Field(default_factory=list)
+    # Índices (desde 0) de las llamadas que fallan en vez de responder: es lo
+    # que permite reproducir "el modelo se cae DESPUÉS de una escritura"
+    # (PB-026). La llamada que falla consume su lugar del guion.
+    fallar_en_llamadas: frozenset[int] = Field(default_factory=frozenset)
+    error: str = "504 DEADLINE_EXCEEDED (simulado)"
 
     @property
     def _llm_type(self) -> str:
@@ -260,6 +265,8 @@ class ModeloFalso(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self.recibidos.append(list(messages))
+        if len(self.recibidos) - 1 in self.fallar_en_llamadas:
+            raise RuntimeError(self.error)
         indice = min(len(self.recibidos) - 1, len(self.guion) - 1)
         respuesta = self.guion[indice] if self.guion else AIMessage("")
         return ChatResult(generations=[ChatGeneration(message=respuesta)])

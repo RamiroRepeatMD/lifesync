@@ -9,6 +9,7 @@ fallas** para que no se filtren hacia adentro.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -35,7 +36,7 @@ from src.infrastructure.llm.confirmacion import (
     clasificar,
 )
 from src.infrastructure.llm.contexto import ContextoDeAgente
-from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, construir_grafo
+from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, NODO_AGENTE, construir_grafo
 from src.infrastructure.llm.herramientas import construir_herramientas
 
 logger = structlog.get_logger(__name__)
@@ -114,15 +115,23 @@ class AgenteGemini(AgenteConversacional):
         }
         contexto = ContextoDeAgente(usuario_id=consulta.usuario_id)
 
-        estado = await self._resolver_pendiente(consulta, configuracion, contexto)
-        if estado is None:
-            # No había confirmación pendiente, o había y se canceló para dar
-            # paso a este mensaje: turno normal.
-            estado = await self._invocar(
-                {"messages": [HumanMessage(consulta.texto)]}, configuracion, contexto
-            )
+        try:
+            estado = await self._resolver_pendiente(consulta, configuracion, contexto)
+            if estado is None:
+                # No había confirmación pendiente, o había y se canceló para dar
+                # paso a este mensaje: turno normal.
+                estado = await self._invocar(
+                    {"messages": [HumanMessage(consulta.texto)]}, configuracion, contexto
+                )
+        except AgenteNoDisponibleError:
+            # Incluye la cuota agotada, que es subclase. Si una escritura YA se
+            # ejecutó en esta invocación, avisar un error invitaría a repetirla
+            # —y a duplicarla—: se cuenta lo que se hizo (PB-026).
+            if not contexto.acciones_realizadas:
+                raise
+            estado = await self._cerrar_turno_sin_modelo(consulta, configuracion, contexto)
 
-        texto = self._respuesta_de(estado)
+        texto = self._respuesta_de(estado, contexto.acciones_realizadas)
         duracion_ms = round((time.perf_counter() - comenzo) * 1000)
 
         mensajes: list[BaseMessage] = estado.get("messages", [])
@@ -219,6 +228,35 @@ class AgenteGemini(AgenteConversacional):
         # confirmación de nuevo que ejecutar por un dato que no se pudo leer.
         return 0.0
 
+    async def _cerrar_turno_sin_modelo(
+        self,
+        consulta: ConsultaDelUsuario,
+        configuracion: dict[str, Any],
+        contexto: ContextoDeAgente,
+    ) -> dict[str, Any]:
+        """Responde sin el modelo cuando falló DESPUÉS de una escritura (PB-026).
+
+        Cuenta lo que se hizo y deja el turno cerrado en el historial, como si
+        el agente lo hubiera dicho. Sin ese cierre el hilo quedaría con el paso
+        del modelo pendiente, y el turno siguiente no sabría qué se le contestó
+        a la persona. El cierre es best effort: si falla, la persona igual
+        recibe la respuesta correcta.
+        """
+        texto = _tras_accion_sin_redaccion(contexto.acciones_realizadas)
+        logger.warning(
+            "agente.redaccion_fallida_tras_accion",
+            conversacion_id=str(consulta.conversacion_id),
+            # La cantidad, nunca los textos: llevan títulos (RF-18).
+            acciones=len(contexto.acciones_realizadas),
+        )
+        try:
+            await self._grafo.aupdate_state(
+                configuracion, {"messages": [AIMessage(texto)]}, as_node=NODO_AGENTE
+            )
+        except Exception as exc:
+            logger.warning("agente.cierre_de_turno_fallido", tipo=type(exc).__name__)
+        return {"messages": [], "_texto_directo": texto}
+
     # --- Invocación y extracción ------------------------------------------
 
     async def _invocar(
@@ -254,7 +292,7 @@ class AgenteGemini(AgenteConversacional):
             raise AgenteNoDisponibleError("El modelo no pudo responder.") from None
         return estado
 
-    def _respuesta_de(self, estado: dict[str, Any]) -> str:
+    def _respuesta_de(self, estado: dict[str, Any], acciones: Sequence[str] = ()) -> str:
         """Extrae el texto que hay que mandarle a la persona.
 
         Si el grafo quedó pausado esperando confirmación, la respuesta sale
@@ -270,7 +308,13 @@ class AgenteGemini(AgenteConversacional):
             payload = getattr(interrupciones[0], "value", None)
             resumen = payload.get("resumen") if isinstance(payload, dict) else None
             if isinstance(resumen, str):
-                return f"{resumen}.\n\n¿Confirmás? Respondé sí o no."
+                pregunta = f"{resumen}.\n\n¿Confirmás? Respondé sí o no."
+                if acciones:
+                    # Pedido compuesto: lo primero ya se hizo y el grafo se
+                    # volvió a pausar por lo segundo. Sin esto, la persona
+                    # sólo vería la pregunta nueva (PB-026).
+                    return f"{_lista_de_acciones(acciones)}\n\n{pregunta}"
+                return pregunta
             # Un interrupt sin resumen es un bug nuestro, pero la persona no
             # puede quedarse sin respuesta por eso.
             return "Necesito que me confirmes la acción. ¿Sí o no?"
@@ -278,6 +322,27 @@ class AgenteGemini(AgenteConversacional):
         mensajes: list[BaseMessage] = estado.get("messages", [])
         texto = _recortar(_texto_de(mensajes[-1]) if mensajes else "")
         return texto or SIN_CONTENIDO
+
+
+def _lista_de_acciones(acciones: Sequence[str]) -> str:
+    """Las acciones ya hechas, como las lee la persona."""
+    if len(acciones) == 1:
+        return f"Listo — {acciones[0]}."
+    return "Listo:\n" + "\n".join(f"- {accion}" for accion in acciones)
+
+
+def _tras_accion_sin_redaccion(acciones: Sequence[str]) -> str:
+    """El reemplazo de la respuesta cuando el modelo falló tras una escritura."""
+    una = len(acciones) == 1
+    return (
+        f"{_lista_de_acciones(acciones)}\n\n"
+        "Tuve un problema técnico al armar la respuesta, pero "
+        + (
+            "la acción ya se realizó: no hace falta repetirla."
+            if una
+            else "las acciones ya se realizaron: no hace falta repetirlas."
+        )
+    )
 
 
 def _es_falta_de_cuota(exc: Exception) -> bool:

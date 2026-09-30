@@ -63,6 +63,18 @@ MAX_DIAS_DE_RANGO = 31
 Runtime = ToolRuntime[ContextoDeAgente, MessagesState]
 
 
+def _hecho(runtime: Runtime, texto: str) -> str:
+    """Anota una escritura ya ejecutada en la bitácora de la invocación (PB-026).
+
+    Se llama **después** de que la escritura ocurrió y con texto armado de
+    datos ya validados. Si el modelo falla al redactar la respuesta, el
+    adaptador lee la bitácora para contarle a la persona lo que sí se hizo, en
+    vez de un error que la invitaría a repetirlo (y duplicarlo).
+    """
+    runtime.context.acciones_realizadas.append(texto)
+    return texto
+
+
 def fecha_en_palabras(momento: datetime) -> str:
     """Formatea una fecha en español.
 
@@ -445,7 +457,8 @@ async def _crear_evento(
         return f"La duración tiene que estar entre {MINUTOS_MINIMOS} y {MINUTOS_MAXIMOS} minutos."
 
     fin = inicio + timedelta(minutes=duracion_minutos)
-    resumen = f'Crear "{titulo}" el {fecha_en_palabras(inicio)} de {inicio:%H:%M} a {fin:%H:%M}'
+    detalle = f'"{titulo}" el {fecha_en_palabras(inicio)} de {inicio:%H:%M} a {fin:%H:%M}'
+    resumen = f"Crear {detalle}"
 
     decision = interrupt({"resumen": resumen})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
@@ -467,7 +480,7 @@ async def _crear_evento(
         # Que se creó sí; el título NUNCA (RF-18).
         duracion_minutos=duracion_minutos,
     )
-    return f"Evento creado: {resumen[len('Crear ') :]}"
+    return _hecho(runtime, f"Evento creado: {detalle}")
 
 
 async def _eliminar_evento(
@@ -510,9 +523,8 @@ async def _eliminar_evento(
         return f"Hay varios eventos que coinciden ese día:\n{lista}\n¿Cuál de estos?"
 
     unico = candidatos[0]
-    resumen = (
-        f"Eliminar {_linea(unico, _en_hora_local(unico))} del {fecha_en_palabras(unico.inicio)}"
-    )
+    detalle = f"{_linea(unico, _en_hora_local(unico))} del {fecha_en_palabras(unico.inicio)}"
+    resumen = f"Eliminar {detalle}"
 
     decision = interrupt({"resumen": resumen})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
@@ -533,7 +545,7 @@ async def _eliminar_evento(
         herramienta="eliminar_evento_del_calendario",
         usuario_id=str(usuario_id),
     )
-    return "Evento eliminado."
+    return _hecho(runtime, f"Evento eliminado: {detalle}")
 
 
 def _momento_local(fecha: str, hora: str) -> datetime | None:
@@ -622,12 +634,21 @@ async def _modificar_evento(
             "No entendí los datos nuevos. La fecha va en AAAA-MM-DD, la hora en "
             f"HH:MM y la duración entre {MINUTOS_MINIMOS} y {MINUTOS_MAXIMOS} minutos."
         )
+    if _mismo_estado(original, deseado):
+        # El modelo a veces "cambia" la hora por la misma que ya tiene (visto
+        # contra Gemini real el 30/09): proponer "10:00 → 10:00" y pedir un sí
+        # por eso es ruido. Como en posponer una tarea a su misma fecha.
+        return (
+            "Eso ya está así: no hay nada que cambiar. ¿Qué querés modificarle? "
+            "Puedo moverlo de día u hora, renombrarlo o cambiar cuánto dura."
+        )
 
-    resumen = (
-        f"Cambiar {_linea(original, _en_hora_local(original))}"
+    detalle = (
+        f"{_linea(original, _en_hora_local(original))}"
         f" → {_linea(deseado, _en_hora_local(deseado))}"
         f" ({fecha_en_palabras(_en_hora_local(deseado))})"
     )
+    resumen = f"Cambiar {detalle}"
 
     decision = interrupt({"resumen": resumen})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
@@ -653,7 +674,17 @@ async def _modificar_evento(
         or nueva_duracion_minutos > 0,
         cambio_titulo=bool(nuevo_titulo.strip()),
     )
-    return "Evento modificado."
+    return _hecho(runtime, f"Evento modificado: {detalle}")
+
+
+def _mismo_estado(original: Evento, deseado: Evento) -> bool:
+    """Si aplicar los cambios deja el evento exactamente como estaba."""
+    return (original.titulo, original.inicio, original.fin, original.todo_el_dia) == (
+        deseado.titulo,
+        deseado.inicio,
+        deseado.fin,
+        deseado.todo_el_dia,
+    )
 
 
 def _aplicar_cambios(
@@ -821,9 +852,9 @@ async def _crear_tarea(
             return "No entendí la fecha límite. Va en formato AAAA-MM-DD, sin hora."
 
     nueva = Tarea(titulo=titulo, vencimiento=vencimiento, notas=notas.strip() or None)
-    resumen = f"Anotar la tarea: {_linea_de_tarea(nueva)[2:]}"
+    detalle = _linea_de_tarea(nueva)[2:]
 
-    decision = interrupt({"resumen": resumen})
+    decision = interrupt({"resumen": f"Anotar la tarea: {detalle}"})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
         return "La persona lo canceló. No se anotó nada."
 
@@ -838,7 +869,7 @@ async def _crear_tarea(
         usuario_id=str(usuario_id),
         con_vencimiento=vencimiento is not None,
     )
-    return "Tarea anotada."
+    return _hecho(runtime, f"Tarea anotada: {detalle}")
 
 
 async def _completar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
@@ -866,7 +897,7 @@ async def _completar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str
         herramienta="completar_tarea",
         usuario_id=str(usuario_id),
     )
-    return "Tarea marcada como hecha."
+    return _hecho(runtime, f"Tarea marcada como hecha: {elegida.titulo}")
 
 
 async def _posponer_tarea(tareas: Tareas, runtime: Runtime, titulo: str, nueva_fecha: str) -> str:
@@ -893,9 +924,9 @@ async def _posponer_tarea(tareas: Tareas, runtime: Runtime, titulo: str, nueva_f
         return f"Esa tarea ya vence el {_dia_en_palabras(fecha)}: no hay nada que cambiar."
 
     antes = _dia_en_palabras(elegida.vencimiento) if elegida.vencimiento else "sin fecha"
-    resumen = f'Posponer "{elegida.titulo}": {antes} → {_dia_en_palabras(fecha)}'
+    detalle = f'"{elegida.titulo}": {antes} → {_dia_en_palabras(fecha)}'
 
-    decision = interrupt({"resumen": resumen})
+    decision = interrupt({"resumen": f"Posponer {detalle}"})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
         return "La persona lo canceló. La fecha no cambió."
 
@@ -911,7 +942,7 @@ async def _posponer_tarea(tareas: Tareas, runtime: Runtime, titulo: str, nueva_f
         herramienta="posponer_tarea",
         usuario_id=str(usuario_id),
     )
-    return "Fecha de la tarea cambiada."
+    return _hecho(runtime, f"Tarea pospuesta: {detalle}")
 
 
 async def _eliminar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
@@ -923,7 +954,8 @@ async def _eliminar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
         return encontrada
     elegida, tarea_id = encontrada
 
-    decision = interrupt({"resumen": f"Eliminar la tarea: {_linea_de_tarea(elegida)[2:]}"})
+    detalle = _linea_de_tarea(elegida)[2:]
+    decision = interrupt({"resumen": f"Eliminar la tarea: {detalle}"})
     if not (isinstance(decision, dict) and decision.get("aprobado") is True):
         return "La persona lo canceló. La tarea sigue en la lista."
 
@@ -937,4 +969,4 @@ async def _eliminar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
         herramienta="eliminar_tarea",
         usuario_id=str(usuario_id),
     )
-    return "Tarea eliminada."
+    return _hecho(runtime, f"Tarea eliminada: {detalle}")
