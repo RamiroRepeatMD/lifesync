@@ -52,7 +52,7 @@ ESTADO_CON_GOOGLE = (
     "Tenés tu cuenta de Google conectada. ✅\n\n"
     "Puedo leer tu calendario y crear, modificar o eliminar eventos; también "
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
-    "cambiarles la fecha o eliminarlas; y buscar y leer tus correos de Gmail "
+    "cambiarles la fecha o eliminarlas; y buscar, leer y mandar correos de Gmail "
     "—siempre te pido confirmación antes de tocar algo."
 )
 

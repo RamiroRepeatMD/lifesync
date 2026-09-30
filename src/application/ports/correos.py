@@ -2,7 +2,7 @@
 
 Capacidad externa, como `Calendario` y `Tareas`: los correos viven en el
 proveedor y esta interfaz describe sólo lo que el agente necesita de ellos.
-Sólo lectura en este PB; el envío llega con PB-032.
+Leer y buscar (PB-033) y enviar correos nuevos (PB-032).
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from src.domain.entities.correo import Correo
+from src.domain.entities.correo import Correo, CorreoSaliente
 
 
 class Correos(ABC):
@@ -39,4 +39,16 @@ class Correos(ABC):
         Raises:
             EntityNotFoundError: Si el correo no existe o ya no está.
             Las mismas de `buscar`.
+        """
+
+    @abstractmethod
+    async def enviar(self, usuario_id: UUID, saliente: CorreoSaliente) -> str:
+        """Envía un correo nuevo desde la cuenta de la persona y devuelve su id.
+
+        Es irreversible: quien llama tiene que haber obtenido la confirmación
+        explícita de la persona (RF-08) sobre exactamente este contenido.
+
+        Raises:
+            Las mismas de `buscar`. Un `ServiceUnavailableError` deja el
+            resultado incierto: el correo pudo haber salido.
         """

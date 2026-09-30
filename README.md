@@ -223,7 +223,8 @@ algo que ya quedó hecho. Desde el Sprint 3 también
 gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…"),
 marcarlas como hechas, posponerlas y eliminarlas — el criterio es simple: con hora es un evento,
 sin hora es una tarea. En el Sprint 4 sumó **Gmail**: buscar
-correos y abrirlos para contar qué dicen. Como un correo lo escribe cualquiera, su contenido le
+correos, abrirlos para contar qué dicen y mandar correos nuevos, siempre con una confirmación que
+muestra exactamente qué sale. Como un correo lo escribe cualquiera, su contenido le
 llega al modelo enmarcado como dato de un tercero, nunca como instrucción.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
@@ -263,8 +264,9 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le manda
 un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
-Se piden cuatro permisos: lectura de calendario (`calendar.readonly`), gestión de
-eventos (`calendar.events`), tareas (`tasks`) y lectura de correo (`gmail.readonly`).
+Se piden cinco permisos: lectura de calendario (`calendar.readonly`), gestión de
+eventos (`calendar.events`), tareas (`tasks`), lectura de correo (`gmail.readonly`) y envío
+(`gmail.send`, que sólo permite mandar: ni modificar ni borrar).
 Para Gmail, además de pedir el permiso, hay que **habilitar la Gmail API** en el proyecto de
 Google Cloud: son dos llaves distintas. Para desvincular: `/desconectar` —
 pide confirmación y **revoca el permiso en Google de verdad**, no sólo borra la

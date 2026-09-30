@@ -269,3 +269,46 @@ async def test_sin_el_scope_de_correo_es_permiso_insuficiente() -> None:
 
     with pytest.raises(PermisoInsuficienteError):
         await gmail.buscar(USUARIO, "", 5)
+
+
+# --- Enviar (PB-032) --------------------------------------------------------------
+
+
+async def test_enviar_arma_un_correo_valido_con_asunto_en_utf8() -> None:
+    import json
+    from email import message_from_bytes
+    from email.policy import default
+
+    from src.domain.entities.correo import CorreoSaliente
+
+    pedidos: list[httpx.Request] = []
+    gmail = await _gmail(pedidos, lambda _: httpx.Response(200, json={"id": "enviado-1"}))
+
+    identificador = await gmail.enviar(
+        USUARIO,
+        CorreoSaliente(
+            ("ana@ejemplo.com", "beto@ejemplo.com"), "Reunión mañana", "Llego tarde, perdón."
+        ),
+    )
+
+    (pedido,) = pedidos
+    assert pedido.method == "POST"
+    assert pedido.url.path.endswith("/messages/send")
+    crudo = json.loads(pedido.content)["raw"]
+    correo = message_from_bytes(
+        base64.urlsafe_b64decode(crudo + "=" * (-len(crudo) % 4)), policy=default
+    )
+    assert correo["To"] == "ana@ejemplo.com, beto@ejemplo.com"
+    assert correo["Subject"] == "Reunión mañana"  # decodificado: viajó en RFC 2047
+    assert correo.get_content().strip() == "Llego tarde, perdón."
+    assert "From" not in correo  # lo pone Gmail: la cuenta autenticada
+    assert identificador == "enviado-1"
+
+
+async def test_enviar_sin_el_scope_es_permiso_insuficiente() -> None:
+    from src.domain.entities.correo import CorreoSaliente
+
+    gmail = await _gmail([], lambda _: httpx.Response(403, json={}))
+
+    with pytest.raises(PermisoInsuficienteError):
+        await gmail.enviar(USUARIO, CorreoSaliente(("a@b.com",), "x", "y"))

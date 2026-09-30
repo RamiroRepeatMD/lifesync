@@ -24,6 +24,7 @@ import base64
 import re
 from datetime import UTC, datetime
 from email.header import decode_header, make_header
+from email.message import EmailMessage
 from email.utils import parseaddr
 from html import unescape
 from html.parser import HTMLParser
@@ -35,7 +36,7 @@ import structlog
 
 from src.application.ports.correos import Correos
 from src.application.use_cases.conectar_google import ConectarGoogle
-from src.domain.entities.correo import Correo
+from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.exceptions import (
     CuentaNoConectadaError,
     EntityNotFoundError,
@@ -100,6 +101,24 @@ class GmailGoogle(Correos):
         logger.info("gmail.leido", usuario_id=str(usuario_id), adjuntos=len(correo.adjuntos))
         return correo
 
+    async def enviar(self, usuario_id: UUID, saliente: CorreoSaliente) -> str:
+        token = await self._credencial(usuario_id)
+        mensaje = EmailMessage()
+        # Sin `From`: Gmail pone la cuenta autenticada, que es la única válida.
+        mensaje["To"] = ", ".join(saliente.destinatarios)
+        mensaje["Subject"] = saliente.asunto
+        mensaje.set_content(saliente.cuerpo)
+        crudo = base64.urlsafe_b64encode(mensaje.as_bytes()).decode("ascii")
+
+        datos = await self._publicar(f"{BASE}/messages/send", token, {"raw": crudo})
+        # La cantidad de destinatarios, nunca las direcciones (RF-18).
+        logger.info(
+            "gmail.enviado",
+            usuario_id=str(usuario_id),
+            destinatarios=len(saliente.destinatarios),
+        )
+        return str(datos.get("id") or "")
+
     # --- Plomería ---------------------------------------------------------
 
     async def _credencial(self, usuario_id: UUID) -> str:
@@ -125,6 +144,18 @@ class GmailGoogle(Correos):
 
         if respuesta.status_code == httpx.codes.NOT_FOUND and error_404 is not None:
             raise error_404
+        traducir_rechazo(respuesta, "gmail")
+        return json_o_vacio(respuesta)
+
+    async def _publicar(self, url: str, token: str, cuerpo: dict[str, Any]) -> dict[str, Any]:
+        """POST autenticado. Un error de red deja el envío en duda: se avisa como tal."""
+        try:
+            respuesta = await self._cliente.post(
+                url, json=cuerpo, headers={"Authorization": f"Bearer {token}"}
+            )
+        except httpx.HTTPError as exc:
+            logger.error("gmail.error_transporte", tipo=type(exc).__name__)
+            raise ServiceUnavailableError("No se pudo contactar a Gmail.") from None
         traducir_rechazo(respuesta, "gmail")
         return json_o_vacio(respuesta)
 

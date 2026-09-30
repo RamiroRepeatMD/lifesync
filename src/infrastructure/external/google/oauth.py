@@ -45,6 +45,8 @@ SCOPES = (
     # PB-033: leer y buscar correos. Scope RESTRINGIDO de Google: en modo
     # Testing anda para los usuarios de prueba. El de envío entra con PB-032.
     "https://www.googleapis.com/auth/gmail.readonly",
+    # PB-032: enviar correos nuevos. Sólo enviar: ni modificar ni borrar.
+    "https://www.googleapis.com/auth/gmail.send",
 )
 
 TIMEOUT_SEGUNDOS = 10.0

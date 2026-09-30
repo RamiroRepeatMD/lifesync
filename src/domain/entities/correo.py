@@ -42,3 +42,23 @@ class Correo:
         """Valida las invariantes de la entidad al construirla."""
         if self.fecha.tzinfo is None:
             raise InvalidValueError("La fecha del correo debe tener zona horaria.")
+
+
+@dataclass(frozen=True, slots=True)
+class CorreoSaliente:
+    """Un correo para enviar, ya validado por quien lo arma (PB-032).
+
+    Todos los campos fuera del `repr`: las direcciones son datos de terceros y
+    el texto es de la persona (RF-18).
+    """
+
+    destinatarios: tuple[str, ...] = field(repr=False)
+    asunto: str = field(repr=False)
+    cuerpo: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """Valida las invariantes de la entidad al construirla."""
+        if not self.destinatarios:
+            raise InvalidValueError("Un correo necesita al menos un destinatario.")
+        if "\n" in self.asunto or "\r" in self.asunto:
+            raise InvalidValueError("El asunto no puede tener saltos de línea.")

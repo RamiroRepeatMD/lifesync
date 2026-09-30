@@ -29,7 +29,7 @@ from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
-from src.domain.entities.correo import Correo
+from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.tarea import Tarea
@@ -384,6 +384,7 @@ class CorreosFalsos(Correos):
         self.fallar_con = fallar_con
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidos: list[tuple[UUID, str]] = []
+        self.enviados: list[tuple[UUID, CorreoSaliente]] = []
 
     async def buscar(self, usuario_id: UUID, consulta: str, cantidad: int) -> tuple[Correo, ...]:
         if self.fallar_con is not None:
@@ -399,6 +400,12 @@ class CorreosFalsos(Correos):
             if correo.id == correo_id:
                 return correo
         raise EntityNotFoundError("Ese correo no existe.")
+
+    async def enviar(self, usuario_id: UUID, saliente: CorreoSaliente) -> str:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.enviados.append((usuario_id, saliente))
+        return f"enviado-{len(self.enviados)}"
 
 
 class AutorizadorFalso(AutorizadorGoogle):

@@ -309,7 +309,10 @@ class AgenteGemini(AgenteConversacional):
             payload = getattr(interrupciones[0], "value", None)
             resumen = payload.get("resumen") if isinstance(payload, dict) else None
             if isinstance(resumen, str):
-                pregunta = f"{resumen}.\n\n¿Confirmás? Respondé sí o no."
+                # El "." sólo en resúmenes de una línea: en uno de varias
+                # (un correo, PB-032) se pegaría al final del texto confirmado.
+                cierre = "" if "\n" in resumen or resumen.endswith((".", "!", "?")) else "."
+                pregunta = f"{resumen}{cierre}\n\n¿Confirmás? Respondé sí o no."
                 if acciones:
                     # Pedido compuesto: lo primero ya se hizo y el grafo se
                     # volvió a pausar por lo segundo. Sin esto, la persona
