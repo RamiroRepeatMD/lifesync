@@ -30,15 +30,22 @@ from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.entities.evento import Evento
+from src.domain.entities.recordatorio import (
+    MAX_CARACTERES_DE_RECORDATORIO,
+    EstadoDeRecordatorio,
+    Recordatorio,
+)
 from src.domain.entities.tarea import Tarea
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
     EntityNotFoundError,
+    InfrastructureError,
     InvalidValueError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
+from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.domain.value_objects.recurrencia import Frecuencia, Recurrencia
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.contexto import ContextoDeAgente
@@ -118,6 +125,8 @@ HERRAMIENTAS_DE_ESCRITURA = frozenset(
         "posponer_tarea",
         "eliminar_tarea",
         "enviar_correo",
+        "crear_recordatorio",
+        "cancelar_recordatorio",
     }
 )
 HERRAMIENTAS_DE_LECTURA = frozenset(
@@ -127,6 +136,7 @@ HERRAMIENTAS_DE_LECTURA = frozenset(
         "tareas_pendientes",
         "buscar_correos",
         "leer_correo",
+        "recordatorios_pendientes",
     }
 )
 
@@ -135,6 +145,7 @@ def construir_herramientas(
     calendario: Calendario | None,
     tareas: Tareas | None = None,
     correos: Correos | None = None,
+    recordatorios: RecordatorioRepository | None = None,
 ) -> tuple[BaseTool, ...]:
     """Arma la lista de herramientas del agente.
 
@@ -146,7 +157,10 @@ def construir_herramientas(
     simplemente no se ofrece, en vez de ofrecerse y fallar siempre.
     """
     if calendario is None:
-        return (fecha_y_hora_actual, *_herramientas_opcionales(tareas, correos))
+        return (
+            fecha_y_hora_actual,
+            *_herramientas_opcionales(tareas, correos, recordatorios),
+        )
 
     @tool
     async def eventos_del_calendario(desde: str, hasta: str, runtime: Runtime) -> str:
@@ -285,16 +299,22 @@ def construir_herramientas(
         modificar_evento_del_calendario,
         eliminar_evento_del_calendario,
     ]
-    return (*herramientas, *_herramientas_opcionales(tareas, correos))
+    return (*herramientas, *_herramientas_opcionales(tareas, correos, recordatorios))
 
 
-def _herramientas_opcionales(tareas: Tareas | None, correos: Correos | None) -> list[BaseTool]:
+def _herramientas_opcionales(
+    tareas: Tareas | None,
+    correos: Correos | None,
+    recordatorios: RecordatorioRepository | None,
+) -> list[BaseTool]:
     """Las capacidades que se habilitan por separado: cada una, si está su puerto."""
     extra: list[BaseTool] = []
     if tareas is not None:
         extra += _herramientas_de_tareas(tareas)
     if correos is not None:
         extra += _herramientas_de_correo(correos)
+    if recordatorios is not None:
+        extra += _herramientas_de_recordatorios(recordatorios)
     return extra
 
 
@@ -323,9 +343,10 @@ def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
 
         Usala cuando la persona quiera acordarse de hacer algo SIN una hora
         concreta ("tengo que...", "anotá que...", "acordate que..."). Si dijo
-        una hora puntual, NO es una tarea: ofrecé crear un evento en el
-        calendario. Nunca digas que la tarea quedó anotada hasta que la
-        herramienta te lo confirme.
+        una hora puntual, NO es una tarea: si pide que le avises a esa hora
+        es un recordatorio, y si es algo que ocupa su agenda (un turno, una
+        reunión) es un evento del calendario. Nunca digas que la tarea quedó
+        anotada hasta que la herramienta te lo confirme.
 
         Args:
             titulo: Qué hay que hacer, corto y claro.
@@ -1509,3 +1530,207 @@ async def _enviar_correo(
         destinatarios=len(destinatarios),
     )
     return _hecho(runtime, f"Correo enviado a {', '.join(destinatarios)}: «{asunto_limpio}»")
+
+
+# --- Recordatorios (PB-030) --------------------------------------------------
+
+# WhatsApp sólo deja que el bot escriba primero dentro de las 24 h desde el
+# último mensaje de la persona; después exige plantillas aprobadas por Meta. El
+# "sí" de la confirmación es un mensaje suyo, así que un aviso dentro de este
+# margen sale con la ventana abierta. Los 10 minutos de resto cubren la demora
+# del despachador (que corre cada 30 s) y los segundos entre el "sí" y esto.
+ANTICIPACION_MAXIMA = timedelta(hours=23, minutes=50)
+
+_FUERA_DE_LA_VENTANA = (
+    "Por ahora sólo puedo avisarte dentro de las próximas 24 horas: WhatsApp no "
+    "me deja escribirte primero si pasó un día sin mensajes tuyos. Para más "
+    "adelante, te lo puedo anotar como tarea con fecha o agendar en el calendario."
+)
+
+
+def _herramientas_de_recordatorios(recordatorios: RecordatorioRepository) -> list[BaseTool]:
+    """Las herramientas de recordatorios (PB-030), cerradas sobre el repositorio.
+
+    No dependen de Google: los recordatorios viven en nuestra base, así que se
+    ofrecen aunque la persona no haya conectado su cuenta.
+    """
+
+    @tool
+    async def crear_recordatorio(texto: str, fecha: str, hora: str, *, runtime: Runtime) -> str:
+        """Programa un recordatorio: a esa hora, le escribís a la persona por WhatsApp.
+
+        Usala cuando la persona pida que le AVISES o le RECUERDES algo en un
+        momento concreto ("recordame a las 18 que...", "avisame en 20
+        minutos..."). Si no dijo cuándo, preguntale. Para "en N minutos" o "en
+        N horas", sumalos a la hora actual de tus instrucciones. Sólo se puede
+        dentro de las próximas 24 horas. Nunca digas que quedó programado
+        hasta que la herramienta te lo confirme.
+
+        Args:
+            texto: Qué hay que recordarle, corto y claro ("sacar la pizza").
+            fecha: Día del aviso, en formato AAAA-MM-DD.
+            hora: Hora del aviso, en formato HH:MM de 24 horas.
+        """
+        return await _crear_recordatorio(recordatorios, runtime, texto, fecha, hora)
+
+    @tool
+    async def recordatorios_pendientes(runtime: Runtime) -> str:
+        """Lista los recordatorios que la persona tiene programados y todavía no salieron."""
+        return await _listar_recordatorios(recordatorios, runtime)
+
+    @tool
+    async def cancelar_recordatorio(texto: str, *, runtime: Runtime) -> str:
+        """Cancela un recordatorio programado que todavía no salió, previa confirmación.
+
+        Buscá por lo que dice el recordatorio (o una parte). Nunca digas que
+        se canceló hasta que la herramienta te lo confirme.
+
+        Args:
+            texto: El texto (o parte del texto) del recordatorio a cancelar.
+        """
+        return await _cancelar_recordatorio(recordatorios, runtime, texto)
+
+    return [recordatorios_pendientes, crear_recordatorio, cancelar_recordatorio]
+
+
+def _a_la_hora(momento: datetime, ahora: datetime) -> str:
+    """'hoy a las 21:55' o 'mañana (jueves 1 de octubre) a las 09:00', en hora local."""
+    local = momento.astimezone(ZONA_HORARIA)
+    hoy = ahora.astimezone(ZONA_HORARIA).date()
+    if local.date() == hoy:
+        return f"hoy a las {local:%H:%M}"
+    if local.date() == hoy + timedelta(days=1):
+        return f"mañana ({fecha_en_palabras(local)}) a las {local:%H:%M}"
+    return f"el {fecha_en_palabras(local)} a las {local:%H:%M}"
+
+
+def _linea_de_recordatorio(recordatorio: Recordatorio, ahora: datetime) -> str:
+    return f"- «{recordatorio.texto}» {_a_la_hora(recordatorio.momento, ahora)}"
+
+
+async def _crear_recordatorio(
+    recordatorios: RecordatorioRepository, runtime: Runtime, texto: str, fecha: str, hora: str
+) -> str:
+    """Programa un aviso: validar → confirmar → guardar. La forma de RF-08.
+
+    La hora llega absoluta y no como "en N minutos": al reanudar, LangGraph
+    re-ejecuta la herramienta desde el principio, y un "ahora + N" calculado
+    acá daría otra hora que la que la persona confirmó.
+    """
+    usuario_id = runtime.context.usuario_id
+
+    texto = texto.strip()
+    if not texto:
+        return "¿Qué querés que te recuerde?"
+    if len(texto) > MAX_CARACTERES_DE_RECORDATORIO:
+        return (
+            f"Es muy largo para un recordatorio: resumilo en menos de "
+            f"{MAX_CARACTERES_DE_RECORDATORIO} caracteres."
+        )
+
+    momento = _momento_local(fecha, hora)
+    if momento is None:
+        return "No entendí cuándo. La fecha va en AAAA-MM-DD y la hora en HH:MM."
+
+    # Esto se vuelve a evaluar al reanudar, con el "ahora" del sí: un aviso que
+    # se venció mientras la persona confirmaba ya no se programa.
+    ahora = datetime.now(ZONA_HORARIA)
+    if momento <= ahora:
+        return (
+            f"Las {momento:%H:%M} del {fecha_en_palabras(momento)} ya pasaron. "
+            "¿Para cuándo lo querés?"
+        )
+    if momento - ahora > ANTICIPACION_MAXIMA:
+        return _FUERA_DE_LA_VENTANA
+
+    detalle = f"«{texto}» {_a_la_hora(momento, ahora)}"
+    decision = interrupt({"resumen": f"Recordarte {detalle}"})
+    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+        return "La persona lo canceló. No se programó nada."
+
+    try:
+        await recordatorios.crear(Recordatorio(usuario_id=usuario_id, texto=texto, momento=momento))
+    except (InfrastructureError, InvalidValueError):
+        return "No pude programar el recordatorio ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="crear_recordatorio",
+        usuario_id=str(usuario_id),
+    )
+    return _hecho(runtime, f"Recordatorio programado: {detalle}")
+
+
+async def _listar_recordatorios(recordatorios: RecordatorioRepository, runtime: Runtime) -> str:
+    """Lee los pendientes y los redacta para WhatsApp."""
+    usuario_id = runtime.context.usuario_id
+    try:
+        pendientes = await recordatorios.pendientes_de(usuario_id)
+    except InfrastructureError:
+        return "No pude consultar tus recordatorios ahora mismo. Probá de nuevo en un minuto."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="recordatorios_pendientes",
+        usuario_id=str(usuario_id),
+        cantidad=len(pendientes),
+    )
+    if not pendientes:
+        return "No hay recordatorios programados."
+    ahora = datetime.now(ZONA_HORARIA)
+    return "Recordatorios programados:\n" + "\n".join(
+        _linea_de_recordatorio(r, ahora) for r in pendientes
+    )
+
+
+async def _cancelar_recordatorio(
+    recordatorios: RecordatorioRepository, runtime: Runtime, texto: str
+) -> str:
+    """Cancela uno: buscar → desambiguar → confirmar → compare-and-set.
+
+    Igual que con las tareas, nunca se cancela por adivinanza: 0 coincidencias
+    → "no encontré"; 2 o más → lista y pregunta; sólo con una hay pausa.
+    """
+    usuario_id = runtime.context.usuario_id
+    if not texto.strip():
+        return "¿Cuál recordatorio? Decime de qué era."
+
+    try:
+        pendientes = await recordatorios.pendientes_de(usuario_id)
+    except InfrastructureError:
+        return "No pude consultar tus recordatorios ahora mismo. Probá de nuevo en un minuto."
+
+    ahora = datetime.now(ZONA_HORARIA)
+    candidatos = [
+        (r, r.id)
+        for r in pendientes
+        if r.id is not None and _para_buscar(texto) in _para_buscar(r.texto)
+    ]
+    if not candidatos:
+        return "No encontré ningún recordatorio pendiente que diga algo como eso."
+    if len(candidatos) > 1:
+        lista = "\n".join(_linea_de_recordatorio(r, ahora) for r, _ in candidatos)
+        return f"Hay varios recordatorios que coinciden:\n{lista}\n¿Cuál de estos?"
+    elegido, recordatorio_id = candidatos[0]
+
+    detalle = f"«{elegido.texto}» de {_a_la_hora(elegido.momento, ahora)}"
+    decision = interrupt({"resumen": f"Cancelar el recordatorio {detalle}"})
+    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+        return "La persona lo canceló. El recordatorio sigue programado."
+
+    try:
+        cancelado = await recordatorios.cambiar_estado(
+            recordatorio_id, EstadoDeRecordatorio.PENDIENTE, EstadoDeRecordatorio.CANCELADO
+        )
+    except InfrastructureError:
+        return "No pude cancelar el recordatorio ahora mismo. Probá de nuevo en un minuto."
+    if not cancelado:
+        # Lo ganó el despachador (ya salió) o se canceló por otro lado.
+        return "Ese recordatorio ya no está pendiente: o ya te lo mandé, o se canceló antes."
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="cancelar_recordatorio",
+        usuario_id=str(usuario_id),
+    )
+    return _hecho(runtime, f"Recordatorio cancelado: {detalle}")

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -32,7 +33,7 @@ from src.domain.exceptions import AgenteNoDisponibleError, CuotaDeAgenteAgotadaE
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import AgenteGemini, crear_agente_gemini
-from tests.dobles import CalendarioFalso, CorreosFalsos, TareasFalsas
+from tests.dobles import CalendarioFalso, CorreosFalsos, RecordatoriosEnMemoria, TareasFalsas
 
 pytestmark = [
     pytest.mark.gemini,
@@ -413,3 +414,60 @@ async def test_una_serie_se_propone_con_su_regla(
     assert SENAL_DE_CONFIRMACION in respuesta
     assert "todos los lunes y miércoles" in respuesta
     assert calendario.creados == []  # nada sin el sí
+
+
+@pytest_asyncio.fixture
+async def agente_con_recordatorios() -> AsyncIterator[
+    tuple[AgenteGemini, CalendarioFalso, RecordatoriosEnMemoria]
+]:
+    """Calendario, tareas y recordatorios juntos: el modelo tiene que elegir bien (PB-030)."""
+    calendario, recordatorios = CalendarioFalso(), RecordatoriosEnMemoria()
+    settings = Settings(
+        _env_file=None,
+        environment=Environment.TESTING,
+        google_api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    agente = crear_agente_gemini(settings, calendario, TareasFalsas(), recordatorios=recordatorios)
+    yield agente, calendario, recordatorios
+
+
+def _hora_propuesta(respuesta: str) -> datetime:
+    """La hora de la confirmación ("… a las 22:15"), como instante local futuro."""
+    encontrada = re.search(r"a las (\d{2}):(\d{2})", respuesta)
+    assert encontrada, f"la confirmación no trae una hora: {respuesta!r}"
+    ahora = datetime.now(ZONA_HORARIA)
+    hora = ahora.replace(
+        hour=int(encontrada[1]), minute=int(encontrada[2]), second=0, microsecond=0
+    )
+    return hora if hora > ahora - timedelta(minutes=5) else hora + timedelta(days=1)
+
+
+async def test_en_veinte_minutos_propone_la_hora_correcta(
+    agente_con_recordatorios: tuple[AgenteGemini, CalendarioFalso, RecordatoriosEnMemoria],
+) -> None:
+    """PB-030: el modelo suma los minutos bien. Se verifica la HORA, no sólo que pregunte."""
+    modelo, calendario, recordatorios = agente_con_recordatorios
+    esperada = datetime.now(ZONA_HORARIA) + timedelta(minutes=20)
+
+    respuesta = await _turno(modelo, "recordame en 20 minutos que saque la pizza")
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "Recordarte" in respuesta  # es un recordatorio, no un evento ni una tarea
+    assert abs(_hora_propuesta(respuesta) - esperada) <= timedelta(minutes=2)
+    assert calendario.creados == []
+    assert recordatorios.guardados == {}  # nada sin el sí
+
+
+async def test_avisame_a_una_hora_es_recordatorio_y_no_evento(
+    agente_con_recordatorios: tuple[AgenteGemini, CalendarioFalso, RecordatoriosEnMemoria],
+) -> None:
+    """El criterio a tres bandas: "avisame a las…" es un aviso, no algo de la agenda."""
+    modelo, calendario, _ = agente_con_recordatorios
+    objetivo = (datetime.now(ZONA_HORARIA) + timedelta(hours=3)).replace(minute=0)
+
+    respuesta = await _turno(modelo, f"avisame a las {objetivo:%H:%M} que llame al banco")
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "Recordarte" in respuesta
+    assert f"a las {objetivo:%H:%M}" in respuesta
+    assert calendario.creados == []

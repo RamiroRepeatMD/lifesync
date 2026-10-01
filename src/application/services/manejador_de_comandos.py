@@ -31,7 +31,9 @@ logger = structlog.get_logger(__name__)
 AYUDA = (
     "Soy LifeSync, tu asistente personal.\n\n"
     "Escribime en lenguaje natural y hago lo que pueda: preguntame la hora, "
-    "pedime que te ayude a organizarte o contame qué necesitás.\n\n"
+    "pedime que te ayude a organizarte o contame qué necesitás. También te "
+    'puedo escribir a una hora para recordarte algo ("recordame en 20 minutos '
+    'que saque la pizza"), dentro de las próximas 24 horas.\n\n'
     "Comandos:\n"
     "• /ayuda — esta lista\n"
     "• /conectar — vincular tu cuenta de Google\n"
@@ -53,7 +55,8 @@ ESTADO_CON_GOOGLE = (
     "Puedo leer tu calendario y crear (incluso eventos que se repiten), "
     "modificar o eliminar eventos; también "
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
-    "cambiarles la fecha o eliminarlas; y buscar, leer y mandar correos de Gmail "
+    "cambiarles la fecha o eliminarlas; buscar, leer y mandar correos de Gmail; "
+    "y escribirte a una hora para recordarte algo "
     "—siempre te pido confirmación antes de tocar algo."
 )
 

@@ -94,6 +94,16 @@ class MensajeNoEnviadoError(InfrastructureError):
     mensaje_usuario = "No pude responderte en este momento."
 
 
+class MensajeRechazadoError(MensajeNoEnviadoError):
+    """El canal rechazó el envío por un motivo que no se arregla reintentando.
+
+    El caso que la motivó (PB-030): pasaron más de 24 h desde el último
+    mensaje de la persona y WhatsApp sólo acepta plantillas aprobadas (131047).
+    El despachador de recordatorios la distingue de un corte de red: un corte
+    se reintenta; esto no, porque el resultado sería el mismo.
+    """
+
+
 class ServiceUnavailableError(InfrastructureError):
     """Un servicio del que dependemos no está configurado o no responde."""
 

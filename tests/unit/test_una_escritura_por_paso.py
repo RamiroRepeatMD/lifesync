@@ -25,7 +25,13 @@ from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import AgenteGemini
 from src.infrastructure.llm.grafo import construir_grafo
 from src.infrastructure.llm.herramientas import construir_herramientas
-from tests.dobles import CalendarioFalso, CorreosFalsos, ModeloFalso, TareasFalsas
+from tests.dobles import (
+    CalendarioFalso,
+    CorreosFalsos,
+    ModeloFalso,
+    RecordatoriosEnMemoria,
+    TareasFalsas,
+)
 
 USUARIO = uuid4()
 LUNES = (datetime.now(ZONA_HORARIA) + timedelta(days=5)).date().isoformat()
@@ -148,7 +154,10 @@ def test_toda_herramienta_esta_clasificada_una_sola_vez() -> None:
     )
 
     todas = {
-        h.name for h in construir_herramientas(CalendarioFalso(), TareasFalsas(), CorreosFalsos())
+        h.name
+        for h in construir_herramientas(
+            CalendarioFalso(), TareasFalsas(), CorreosFalsos(), RecordatoriosEnMemoria()
+        )
     }
 
     assert HERRAMIENTAS_DE_ESCRITURA.isdisjoint(HERRAMIENTAS_DE_LECTURA)

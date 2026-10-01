@@ -14,7 +14,11 @@ import httpx
 import structlog
 
 from src.application.ports.whatsapp import MensajeroWhatsApp
-from src.domain.exceptions import MensajeNoEnviadoError, ServiceUnavailableError
+from src.domain.exceptions import (
+    MensajeNoEnviadoError,
+    MensajeRechazadoError,
+    ServiceUnavailableError,
+)
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.infrastructure.config.settings import Settings
 
@@ -133,6 +137,10 @@ class ClienteWhatsApp(MensajeroWhatsApp):
                 detalle_meta=_detalle_de(error),
                 permanente=codigo in CODIGOS_PERMANENTES,
             )
+            # El despachador de recordatorios (PB-030) necesita distinguirlos:
+            # un rechazo permanente no se reintenta, un corte sí.
+            if codigo in CODIGOS_PERMANENTES:
+                raise MensajeRechazadoError(f"WhatsApp rechazó el envío (código {codigo}).")
             raise MensajeNoEnviadoError(f"WhatsApp rechazó el envío (código {codigo}).")
 
         self._avisar_si_meta_normalizo(respuesta, destino)

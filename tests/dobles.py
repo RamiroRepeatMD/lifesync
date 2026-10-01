@@ -32,10 +32,12 @@ from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
+from src.domain.entities.recordatorio import EstadoDeRecordatorio, Recordatorio
 from src.domain.entities.tarea import Tarea
 from src.domain.entities.usuario import Usuario
 from src.domain.exceptions import EntityNotFoundError, InvalidValueError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
+from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
@@ -96,6 +98,10 @@ class ConsultaFalsa:
 
     def eq(self, columna: str, valor: Any) -> ConsultaFalsa:
         self._llamada.filtros[columna] = valor
+        return self
+
+    def lte(self, columna: str, valor: Any) -> ConsultaFalsa:
+        self._llamada.filtros[f"{columna}<="] = valor
         return self
 
     def limit(self, cantidad: int) -> ConsultaFalsa:
@@ -485,3 +491,69 @@ class RepositorioOAuthTokenEnMemoria(OAuthTokenRepository):
 
     async def eliminar(self, usuario_id: UUID, proveedor: ProveedorOAuth) -> None:
         self._tokens.pop((usuario_id, proveedor), None)
+
+
+class RecordatoriosEnMemoria(RecordatorioRepository):
+    """Doble del repositorio de recordatorios (PB-030), con compare-and-set de verdad.
+
+    Attributes:
+        guardados: Todos los recordatorios, por id, en su estado actual.
+        reclamos_perdidos: Ids cuyo reclamo (pendiente → enviando) "gana otro
+            despachador", como pasa con dos contenedores durante un deploy.
+        fallar_con: Excepción a lanzar en cualquier operación (base caída).
+    """
+
+    def __init__(self, *iniciales: Recordatorio, fallar_con: Exception | None = None) -> None:
+        self.guardados: dict[UUID, Recordatorio] = {}
+        for recordatorio in iniciales:
+            self._guardar(recordatorio if recordatorio.id else replace(recordatorio, id=uuid4()))
+        self.reclamos_perdidos: set[UUID] = set()
+        self.fallar_con = fallar_con
+
+    async def crear(self, recordatorio: Recordatorio) -> Recordatorio:
+        self._verificar_falla()
+        return self._guardar(replace(recordatorio, id=uuid4()))
+
+    async def pendientes_de(self, usuario_id: UUID) -> list[Recordatorio]:
+        self._verificar_falla()
+        return sorted(
+            (r for r in self._pendientes() if r.usuario_id == usuario_id),
+            key=lambda r: r.momento,
+        )
+
+    async def vencidos(self, hasta: datetime, limite: int) -> list[Recordatorio]:
+        self._verificar_falla()
+        vencidos = [r for r in self._pendientes() if r.momento <= hasta]
+        return sorted(vencidos, key=lambda r: r.momento)[:limite]
+
+    async def cambiar_estado(
+        self,
+        recordatorio_id: UUID,
+        desde: EstadoDeRecordatorio,
+        hacia: EstadoDeRecordatorio,
+    ) -> bool:
+        self._verificar_falla()
+        if recordatorio_id in self.reclamos_perdidos and desde is EstadoDeRecordatorio.PENDIENTE:
+            return False
+        actual = self.guardados.get(recordatorio_id)
+        if actual is None or actual.estado is not desde:
+            return False
+        self.guardados[recordatorio_id] = replace(actual, estado=hacia)
+        return True
+
+    def estado_de(self, recordatorio_id: UUID | None) -> EstadoDeRecordatorio:
+        """El estado actual de un recordatorio, para las aserciones."""
+        assert recordatorio_id is not None
+        return self.guardados[recordatorio_id].estado
+
+    def _guardar(self, recordatorio: Recordatorio) -> Recordatorio:
+        assert recordatorio.id is not None
+        self.guardados[recordatorio.id] = recordatorio
+        return recordatorio
+
+    def _pendientes(self) -> list[Recordatorio]:
+        return [r for r in self.guardados.values() if r.estado is EstadoDeRecordatorio.PENDIENTE]
+
+    def _verificar_falla(self) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con

@@ -30,6 +30,7 @@ from src.domain.exceptions import (
     CuotaDeAgenteAgotadaError,
     ServiceUnavailableError,
 )
+from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.infrastructure.config.settings import Settings
 from src.infrastructure.llm.confirmacion import (
     VIGENCIA_DE_CONFIRMACION_SEGUNDOS,
@@ -425,6 +426,7 @@ def crear_agente_gemini(
     tareas: Tareas | None = None,
     correos: Correos | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    recordatorios: RecordatorioRepository | None = None,
 ) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
@@ -438,6 +440,8 @@ def crear_agente_gemini(
         checkpointer: Dónde viven las conversaciones y las confirmaciones
             pendientes (PB-013). Con `None` se usa memoria RAM, que no
             sobrevive a un redeploy: es el modo degradado, no el normal.
+        recordatorios: Dónde se guardan los recordatorios (PB-030). Con
+            `None` —sin Supabase— el agente no ofrece programarlos.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -459,7 +463,7 @@ def crear_agente_gemini(
         **_ajustes_de_razonamiento(settings.gemini_model),
     )
 
-    herramientas = construir_herramientas(calendario, tareas, correos)
+    herramientas = construir_herramientas(calendario, tareas, correos, recordatorios)
     grafo = construir_grafo(
         modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
     )
@@ -469,6 +473,7 @@ def crear_agente_gemini(
         con_calendario=calendario is not None,
         con_tareas=tareas is not None,
         con_correo=correos is not None,
+        con_recordatorios=recordatorios is not None,
         memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)

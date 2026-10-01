@@ -8,6 +8,8 @@ puedan levantar instancias aisladas con configuración propia.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -19,13 +21,17 @@ from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.application.use_cases.conectar_google import ConectarGoogle
+from src.application.use_cases.enviar_recordatorios_vencidos import EnviarRecordatoriosVencidos
+from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.infrastructure.config.logging import configure_logging
 from src.infrastructure.config.settings import Environment, Settings, get_settings
+from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.external.google.oauth import (
     close_google_oauth_client,
     create_google_oauth_client,
 )
 from src.infrastructure.external.whatsapp.cliente import (
+    ClienteWhatsApp,
     close_whatsapp_client,
     create_whatsapp_client,
 )
@@ -38,9 +44,14 @@ from src.infrastructure.persistence.supabase_client import (
 from src.infrastructure.persistence.supabase_oauth_token_repository import (
     SupabaseOAuthTokenRepository,
 )
+from src.infrastructure.persistence.supabase_recordatorio_repository import (
+    SupabaseRecordatorioRepository,
+)
+from src.infrastructure.persistence.supabase_usuario_repository import SupabaseUsuarioRepository
 from src.interfaces.api.errors import register_exception_handlers
 from src.interfaces.api.middleware.request_context import RequestContextMiddleware
 from src.interfaces.api.routers import health, oauth_google
+from src.interfaces.jobs.recordatorios import despachar_recordatorios
 from src.interfaces.webhooks import whatsapp as webhook_whatsapp
 
 logger = structlog.get_logger(__name__)
@@ -78,11 +89,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _iniciar_google_oauth(app, settings)
     await _iniciar_memoria_del_agente(app, settings)
     _iniciar_agente(app, settings)
+    _iniciar_despachador(app, settings)
     try:
         yield
     finally:
         # Cada recurso en su propio try: que uno falle al cerrar no debe
-        # impedir cerrar el otro.
+        # impedir cerrar el otro. El despachador va primero: usa la base y
+        # WhatsApp, así que se apaga antes de cerrar sus clientes.
+        try:
+            await _detener_despachador(app)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="despachador", tipo=type(exc).__name__)
         try:
             await close_supabase_client(app.state.supabase)
         except Exception as exc:  # el shutdown no puede romperse
@@ -194,7 +211,58 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
         _tareas_de(app),
         _correos_de(app),
         checkpointer=app.state.checkpointer,
+        recordatorios=_recordatorios_de(app),
     )
+
+
+def _recordatorios_de(app: FastAPI) -> RecordatorioRepository | None:
+    """El repositorio de recordatorios (PB-030), si están Supabase y el cifrador.
+
+    No depende de Google: los recordatorios viven en nuestra base, así que
+    existen aunque la persona no haya conectado su cuenta.
+    """
+    supabase = app.state.supabase
+    cipher = app.state.token_cipher
+    if supabase is None or cipher is None:
+        return None
+    return SupabaseRecordatorioRepository(supabase, cipher)
+
+
+def _iniciar_despachador(app: FastAPI, settings: Settings) -> None:
+    """Arranca el bucle que manda los recordatorios vencidos (PB-030).
+
+    Necesita la base (de dónde salen) y WhatsApp (por dónde salen). Sin
+    alguna de las dos no arranca: los recordatorios quedan guardados y salen
+    cuando el servicio vuelva a estar completo.
+    """
+    recordatorios = _recordatorios_de(app)
+    if recordatorios is None or app.state.whatsapp is None:
+        logger.warning(
+            "recordatorios.no_configurado",
+            motivo="falta Supabase, TOKEN_ENCRYPTION_KEY o WhatsApp",
+            consecuencia="los recordatorios no se envían",
+        )
+        return
+
+    caso = EnviarRecordatoriosVencidos(
+        recordatorios,
+        SupabaseUsuarioRepository(app.state.supabase),
+        ClienteWhatsApp(app.state.whatsapp, settings),
+        zona=ZONA_HORARIA,
+    )
+    app.state.despachador = asyncio.create_task(
+        despachar_recordatorios(caso), name="despachador-de-recordatorios"
+    )
+
+
+async def _detener_despachador(app: FastAPI) -> None:
+    """Cancela el bucle y espera a que termine. Tolera que no haya arrancado."""
+    despachador: asyncio.Task[None] | None = app.state.despachador
+    if despachador is None:
+        return
+    despachador.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await despachador
 
 
 def _conectar_google_de(
@@ -309,6 +377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.google_oauth = None
     app.state.checkpointer = None
     app.state.checkpointer_pool = None
+    app.state.despachador = None
     # Vive todo el proceso: es lo que evita responder dos veces cuando Meta
     # reintrega el mismo mensaje.
     app.state.deduplicador_whatsapp = DeduplicadorDeMensajes()

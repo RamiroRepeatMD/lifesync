@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 753 tests + 13 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 800 tests + 15 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -123,9 +123,10 @@ Documentación interactiva de la API (deshabilitada en producción): <http://loc
 ### 1. Crear el proyecto y aplicar el esquema
 
 Creá un proyecto en [supabase.com](https://supabase.com), abrí **SQL Editor** y ejecutá en orden
-los archivos de [`db/migrations/`](db/migrations/) (001 y 002; la 003 no hace falta aplicarla a
-mano — la aplica la app en cada arranque y el archivo existe como documentación). Crean
-`usuarios` y `oauth_tokens` con RLS activado y sin políticas permisivas (deny-by-default).
+los archivos de [`db/migrations/`](db/migrations/) (001, 002 y 004; la 003 no hace falta
+aplicarla a mano — la aplica la app en cada arranque y el archivo existe como documentación).
+Crean `usuarios`, `oauth_tokens` y `recordatorios` con RLS activado y sin políticas permisivas
+(deny-by-default).
 Los scripts son idempotentes: se pueden volver a correr.
 
 ### 2. Generar la clave de cifrado
@@ -170,6 +171,7 @@ Como evidencia de RF-18, abrí la tabla `oauth_tokens` en el Table Editor: la co
 |-------|-----------|
 | `usuarios` | Personas que usan LifeSync. Identidad natural: `telefono_whatsapp` (único). |
 | `oauth_tokens` | Credenciales OAuth2, **cifradas**. Único por `(usuario_id, proveedor)`; se borran en cascada con el usuario. |
+| `recordatorios` | Avisos programados por WhatsApp (PB-030): texto **cifrado**, momento y estado (`pendiente` → `enviando` → `enviado` / `fallido`, o `cancelado`). |
 
 El dominio nunca ve texto cifrado: `OAuthTokenRepository` recibe y devuelve tokens en claro, y el
 cifrado ocurre dentro del adaptador de `infrastructure/persistence/`.
@@ -227,6 +229,15 @@ sin hora es una tarea. En el Sprint 4 sumó **Gmail**: buscar
 correos, abrirlos para contar qué dicen y mandar correos nuevos, siempre con una confirmación que
 muestra exactamente qué sale. Como un correo lo escribe cualquiera, su contenido le
 llega al modelo enmarcado como dato de un tercero, nunca como instrucción.
+
+Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
+"Recordame en 20 minutos que saque la pizza" → confirmación → a esa hora llega
+"⏰ Recordatorio: sacar la pizza". Se pueden listar y cancelar, y no necesitan la cuenta de
+Google. Llegan hasta 24 horas adelante: fuera de esa ventana WhatsApp sólo deja escribir
+primero con plantillas aprobadas por Meta, así que para algo más lejano el agente ofrece una
+tarea o un evento. Los manda un despachador que corre dentro del proceso cada 30 segundos;
+lo pendiente vive en la base, así que un redeploy no pierde ninguno, y un *compare-and-set*
+evita mandarlo dos veces si dos contenedores conviven durante un deploy.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
 `/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google).
@@ -316,7 +327,8 @@ días y después Hobby son USD 5/mes (la app consume ~USD 2 de ese crédito).
 ### 1. Aplicar las migraciones
 
 Antes del primer deploy, correr en el SQL Editor de Supabase los archivos de
-[`db/migrations/`](db/migrations/) en orden. Ver [Base de datos](#base-de-datos).
+[`db/migrations/`](db/migrations/) en orden. Ver [Base de datos](#base-de-datos). Una migración
+nueva (como la 004 de los recordatorios) se aplica **antes** de pushear el código que la usa.
 
 ### 2. Crear el servicio
 
@@ -428,8 +440,9 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 13 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta), tarea vs.
+Son 15 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta), tarea vs.
 evento, completar vs. eliminar, pedidos compuestos de varios turnos, series recurrentes,
+recordatorios ("en 20 minutos" propone la hora correcta; "avisame a las…" no es un evento),
 "el último correo" con la bandeja cambiando, y los intentos de inyección por correo (un
 correo que ordena borrar eventos o reenviarse no logra que el agente lo proponga). Si
 Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
@@ -535,7 +548,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-026 | Confirmación + respuesta contextual post-acción | ✅ |
 | PB-027 | Pruebas de integración Calendar + casos límite de fechas | ✅ |
 | PB-029 | Tareas: crear, listar, completar, posponer y eliminar | ✅ |
-| PB-030 | Recordatorios proactivos básicos | ⏳ en curso |
+| PB-030 | Recordatorios proactivos básicos | ✅ (hasta 24 h; plantillas de Meta al Sprint 5) |
 | PB-032 | Gmail: enviar correos | ✅ (adjuntos replanificados al Sprint 5) |
 | PB-033 | Gmail: listar, buscar y leer correos | ✅ |
 

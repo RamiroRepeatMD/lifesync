@@ -15,7 +15,11 @@ import httpx
 import pytest
 import structlog
 
-from src.domain.exceptions import MensajeNoEnviadoError, ServiceUnavailableError
+from src.domain.exceptions import (
+    MensajeNoEnviadoError,
+    MensajeRechazadoError,
+    ServiceUnavailableError,
+)
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.external.whatsapp.cliente import (
@@ -187,6 +191,32 @@ async def test_un_rechazo_de_meta_es_mensaje_no_enviado(
 
     with pytest.raises(MensajeNoEnviadoError):
         await cliente.enviar_texto(DESTINO, "hola")
+
+
+@pytest.mark.parametrize("codigo_meta", [131047, 190], ids=["ventana_24h", "token_vencido"])
+async def test_un_rechazo_permanente_es_mensaje_rechazado(codigo_meta: int) -> None:
+    """PB-030: el despachador no reintenta lo que va a fallar igual."""
+    cuerpo = {"error": {"code": codigo_meta, "message": "falló"}}
+    cliente, _ = _cliente_con(lambda _: httpx.Response(400, json=cuerpo))
+
+    with pytest.raises(MensajeRechazadoError):
+        await cliente.enviar_texto(DESTINO, "hola")
+
+
+@pytest.mark.parametrize(
+    ("codigo_http", "codigo_meta"),
+    [(429, 130429), (500, None)],
+    ids=["rate_limit", "error_de_meta"],
+)
+async def test_un_fallo_transitorio_no_es_rechazo_permanente(
+    codigo_http: int, codigo_meta: int | None
+) -> None:
+    cuerpo = {"error": {"code": codigo_meta, "message": "falló"}} if codigo_meta else {}
+    cliente, _ = _cliente_con(lambda _: httpx.Response(codigo_http, json=cuerpo))
+
+    with pytest.raises(MensajeNoEnviadoError) as error:
+        await cliente.enviar_texto(DESTINO, "hola")
+    assert not isinstance(error.value, MensajeRechazadoError)
 
 
 async def test_una_respuesta_sin_json_no_rompe() -> None:

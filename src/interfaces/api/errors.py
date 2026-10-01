@@ -29,6 +29,7 @@ from src.domain.exceptions import (
     InfrastructureError,
     InvalidValueError,
     LifeSyncError,
+    MensajeRechazadoError,
     PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
@@ -62,6 +63,9 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     PermisoInsuficienteError: status.HTTP_503_SERVICE_UNAVAILABLE,
     AutorizacionFallidaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     RepositoryError: status.HTTP_500_INTERNAL_SERVER_ERROR,
+    # El canal rechazó un envío nuestro (PB-030): falla nuestra, no del
+    # cliente. Mismo código que su madre; explícito por la regla de la casa.
+    MensajeRechazadoError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     EncryptionError: status.HTTP_500_INTERNAL_SERVER_ERROR,
     InfrastructureError: status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
