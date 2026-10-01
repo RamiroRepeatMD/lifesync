@@ -81,6 +81,9 @@ SIN_CONTENIDO = (
 
 TEXTO_VACIO = "No te llegué a leer. ¿Me lo escribís de nuevo?"
 
+# Cómo termina la pregunta de un lote (varias acciones juntas, RF-08).
+CIERRE_DEL_LOTE = "Confirmá con «sí» para hacerlo todo, o «no» para cancelar."
+
 CONFIRMACION_VENCIDA = (
     "Esa confirmación quedó vieja, así que la cancelé. Si todavía lo querés, pedímelo de nuevo."
 )
@@ -172,8 +175,9 @@ class AgenteGemini(AgenteConversacional):
         pendiente = await self._interrupcion_pendiente(configuracion)
         if pendiente is None:
             return None
+        antiguedad, propuesta = pendiente
 
-        vencida = pendiente >= VIGENCIA_DE_CONFIRMACION_SEGUNDOS
+        vencida = antiguedad >= VIGENCIA_DE_CONFIRMACION_SEGUNDOS
         decision = clasificar(consulta.texto)
 
         if vencida:
@@ -191,7 +195,9 @@ class AgenteGemini(AgenteConversacional):
             logger.info(
                 "agente.confirmacion_aprobada", conversacion_id=str(consulta.conversacion_id)
             )
-            return await self._invocar(Command(resume={"aprobado": True}), configuracion, contexto)
+            return await self._invocar(
+                Command(resume=_aprobacion_de(propuesta)), configuracion, contexto
+            )
 
         # Rechazo explícito u otra cosa: en los dos casos se cancela. La
         # diferencia es sólo qué pasa después.
@@ -205,8 +211,10 @@ class AgenteGemini(AgenteConversacional):
             return estado
         return None  # cancelada en silencio; el mensaje se procesa como turno nuevo
 
-    async def _interrupcion_pendiente(self, configuracion: dict[str, Any]) -> float | None:
-        """Devuelve la antigüedad en segundos del interrupt pendiente, o None.
+    async def _interrupcion_pendiente(
+        self, configuracion: dict[str, Any]
+    ) -> tuple[float, Any] | None:
+        """La antigüedad en segundos del interrupt pendiente y su propuesta, o None.
 
         Tolera cualquier fallo consultando el estado: ante la duda se asume
         que no hay nada pendiente, que es el camino que no ejecuta acciones.
@@ -216,19 +224,21 @@ class AgenteGemini(AgenteConversacional):
         except Exception:  # un hilo nuevo o un checkpointer vacío no es un error
             return None
 
-        if not getattr(estado, "interrupts", ()):
+        interrupciones = getattr(estado, "interrupts", ())
+        if not interrupciones:
             return None
+        propuesta = getattr(interrupciones[0], "value", None)
 
         creado = getattr(estado, "created_at", None)
         if isinstance(creado, str):
             try:
                 momento = datetime.fromisoformat(creado)
-                return max(0.0, (datetime.now(UTC) - momento).total_seconds())
+                return max(0.0, (datetime.now(UTC) - momento).total_seconds()), propuesta
             except ValueError:
                 pass
         # Sin timestamp legible se trata como recién creada: mejor pedir la
         # confirmación de nuevo que ejecutar por un dato que no se pudo leer.
-        return 0.0
+        return 0.0, propuesta
 
     async def _cerrar_turno_sin_modelo(
         self,
@@ -308,12 +318,15 @@ class AgenteGemini(AgenteConversacional):
         interrupciones = estado.get("__interrupt__")
         if interrupciones:
             payload = getattr(interrupciones[0], "value", None)
-            resumen = payload.get("resumen") if isinstance(payload, dict) else None
+            propuesta = payload if isinstance(payload, dict) else {}
+            resumen = propuesta.get("resumen")
             if isinstance(resumen, str):
                 # El "." sólo en resúmenes de una línea: en uno de varias
                 # (un correo, PB-032) se pegaría al final del texto confirmado.
                 cierre = "" if "\n" in resumen or resumen.endswith((".", "!", "?")) else "."
-                pregunta = f"{resumen}{cierre}\n\n¿Confirmás? Respondé sí o no."
+                pregunta = f"{resumen}{cierre}\n\n" + (
+                    CIERRE_DEL_LOTE if propuesta.get("lote") else "¿Confirmás? Respondé sí o no."
+                )
                 if acciones:
                     # Pedido compuesto: lo primero ya se hizo y el grafo se
                     # volvió a pausar por lo segundo. Sin esto, la persona
@@ -327,6 +340,19 @@ class AgenteGemini(AgenteConversacional):
         mensajes: list[BaseMessage] = estado.get("messages", [])
         texto = _recortar(_texto_de(mensajes[-1]) if mensajes else "")
         return texto or SIN_CONTENIDO
+
+
+def _aprobacion_de(propuesta: Any) -> dict[str, Any]:
+    """Lo que se le devuelve al grafo cuando la persona dice que sí.
+
+    En un lote viajan los ids de lo que la persona VIO: el grafo ejecuta esos
+    y ninguno más, aunque al reanudar otra acción del mismo pedido ahora
+    valide. Lo que se confirma es exactamente lo que se ejecuta.
+    """
+    aprobacion: dict[str, Any] = {"aprobado": True}
+    if isinstance(propuesta, dict) and isinstance(propuesta.get("ids"), list):
+        aprobacion["ids"] = propuesta["ids"]
+    return aprobacion
 
 
 def _lista_de_acciones(acciones: Sequence[str]) -> str:

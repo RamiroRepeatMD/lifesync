@@ -86,7 +86,7 @@ async def _calendario(google: GoogleFalso) -> CalendarioGoogle:
 
 
 async def _pedir_y_aprobar(google: GoogleFalso, nombre: str, **args: Any) -> dict[str, Any]:
-    """Una tool de escritura, de punta a punta: pedido → interrupt → sí."""
+    """Una tool de escritura, de punta a punta: pedido → (pausa → sí, si RF-08 la pide)."""
     pedido = AIMessage("", tool_calls=[{"name": nombre, "args": args, "id": "c1"}])
     modelo = ModeloFalso(guion=[pedido, AIMessage("listo")])
     grafo = construir_grafo(

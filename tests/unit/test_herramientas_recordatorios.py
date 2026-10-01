@@ -1,4 +1,7 @@
-"""Tests de las herramientas de recordatorios (PB-030): el ciclo RF-08 y la ventana.
+"""Tests de las herramientas de recordatorios (PB-030): RF-08 y la ventana de 24 h.
+
+Programar es directo (reversible: se puede cancelar); cancelar sigue
+esperando el sí, porque un recordatorio cancelado no vuelve solo.
 
 Mismo esqueleto que tareas y calendario: se atraviesa el grafo real con un
 modelo falso, y las aserciones van sobre el doble del repositorio. Las horas
@@ -76,27 +79,27 @@ def _lo_que_dijo_la_tool(estado: dict[str, Any]) -> str:
 # --- Crear -------------------------------------------------------------------
 
 
-async def test_crear_pausa_con_el_resumen_exacto() -> None:
+async def test_crear_es_directo_y_cuenta_la_hora() -> None:
+    """RF-08, segunda versión: programar es reversible (se cancela), así que no pausa."""
     recordatorios = RecordatoriosEnMemoria()
     momento = _en(20)
     grafo = _grafo_con(recordatorios, _crear(momento), AIMessage("listo"))
 
     estado = await _preguntar(grafo, "recordame en 20 minutos que saque la pizza")
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
-    assert resumen.startswith("Recordarte «sacar la pizza» ")
-    assert f"a las {momento:%H:%M}" in resumen
-    assert recordatorios.guardados == {}  # nada sin el sí
+    assert "__interrupt__" not in estado
+    texto = _lo_que_dijo_la_tool(estado)
+    assert texto.startswith("Recordatorio programado: «sacar la pizza» ")
+    assert f"a las {momento:%H:%M}" in texto
+    assert len(recordatorios.guardados) == 1
 
 
-async def test_crear_aprobado_guarda_exactamente_el_momento_confirmado() -> None:
-    """RF-08: lo que se confirma es lo que se guarda, aunque al reanudar se re-ejecute."""
+async def test_crear_guarda_exactamente_el_momento_pedido() -> None:
     recordatorios = RecordatoriosEnMemoria()
     momento = _en(20)
     grafo = _grafo_con(recordatorios, _crear(momento), AIMessage("listo"))
 
     await _preguntar(grafo, "recordame en 20 minutos que saque la pizza")
-    await _reanudar(grafo, aprobado=True)
 
     [guardado] = recordatorios.guardados.values()
     assert guardado.texto == "sacar la pizza"
@@ -104,16 +107,6 @@ async def test_crear_aprobado_guarda_exactamente_el_momento_confirmado() -> None
     assert guardado.momento.tzinfo is not None
     assert guardado.usuario_id == USUARIO
     assert guardado.estado is EstadoDeRecordatorio.PENDIENTE
-
-
-async def test_crear_rechazado_no_guarda_nada() -> None:
-    recordatorios = RecordatoriosEnMemoria()
-    grafo = _grafo_con(recordatorios, _crear(_en(20)), AIMessage("ok"))
-
-    await _preguntar(grafo, "recordame en 20 minutos que saque la pizza")
-    await _reanudar(grafo, aprobado=False)
-
-    assert recordatorios.guardados == {}
 
 
 async def test_para_manana_lo_dice_con_el_dia_en_palabras() -> None:
@@ -124,7 +117,7 @@ async def test_para_manana_lo_dice_con_el_dia_en_palabras() -> None:
 
     estado = await _preguntar(grafo, "recordame mañana que llame al banco")
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
+    resumen = _lo_que_dijo_la_tool(estado)
     hoy = datetime.now(ZONA_HORARIA).date()
     if momento.date() == hoy:  # cerca de la medianoche, "mañana" cae hoy mismo
         assert f"hoy a las {momento:%H:%M}" in resumen
@@ -191,14 +184,13 @@ async def test_sin_texto_pregunta_que_recordar() -> None:
 
 
 async def test_si_la_base_falla_al_guardar_lo_dice_sin_mentir() -> None:
-    recordatorios = RecordatoriosEnMemoria()
+    recordatorios = RecordatoriosEnMemoria(fallar_con=RepositoryError("base caída"))
     grafo = _grafo_con(recordatorios, _crear(_en(20)), AIMessage("ok"))
-    await _preguntar(grafo, "recordame en 20 minutos que saque la pizza")
 
-    recordatorios.fallar_con = RepositoryError("base caída")
-    estado = await _reanudar(grafo, aprobado=True)
+    estado = await _preguntar(grafo, "recordame en 20 minutos que saque la pizza")
 
     assert "No pude programar" in _lo_que_dijo_la_tool(estado)
+    assert recordatorios.guardados == {}
 
 
 # --- Listar ------------------------------------------------------------------

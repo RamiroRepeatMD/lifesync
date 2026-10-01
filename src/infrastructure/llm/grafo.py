@@ -18,32 +18,55 @@ ejercitar el grafo entero —incluido el ciclo de herramientas— con un modelo
 falso, sin red y sin API key. Es el mismo reparto que en WhatsApp, donde
 `create_whatsapp_client` arma el cliente y `ClienteWhatsApp` lo recibe.
 
-**Una escritura por paso.** El nodo de herramientas ejecuta las lecturas y
-sólo la PRIMERA escritura que pidió el modelo; a las demás les responde que
-se piden de nuevo después. Sin esto, dos escrituras en un mismo mensaje (lo
-que Gemini hace con los pedidos compuestos) corrían en el mismo paso, y
-LangGraph re-ejecuta el paso entero al reanudar cada pausa: en producción se
-creó un evento dos veces, y en la reproducción un solo "sí" mandó dos correos,
-uno que la persona nunca vio.
+**La política de RF-08 se aplica acá** (`domain/services/
+politica_de_confirmacion.py`): el nodo de herramientas decide, antes de
+ejecutar, en qué fase corren las escrituras del paso.
+
+- Una escritura reversible suelta corre DIRECTO; una irreversible (borrar,
+  enviar) pausa para el sí.
+- **Varias escrituras juntas se confirman en UNA sola pausa**, con la lista
+  completa: primero cada herramienta arma su resumen sin escribir nada (vista
+  previa), después el nodo pausa una vez, y con el sí ejecuta cada una una
+  sola vez. Ninguna herramienta pausa por su cuenta dentro de un lote, y eso
+  es lo que impide el bug del 30/09: LangGraph re-ejecuta el paso entero al
+  reanudar cada pausa, y con dos pausas en un paso un evento se creó dos veces
+  (y en la reproducción, un solo "sí" mandó dos correos).
+- Con texto de un tercero a la vista del modelo (un correo leído), toda
+  escritura confirma: es la barrera contra la inyección por correo.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import SystemMessage, ToolCall, ToolMessage, trim_messages
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    trim_messages,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.runtime import get_runtime
+from langgraph.types import interrupt
 
-from src.infrastructure.llm.contexto import ContextoDeAgente
-from src.infrastructure.llm.herramientas import HERRAMIENTAS_DE_ESCRITURA
+from src.domain.services.politica_de_confirmacion import (
+    UMBRAL_DE_LOTE,
+    TipoDeEscritura,
+    requiere_confirmacion,
+)
+from src.infrastructure.llm.contexto import ContextoDeAgente, Fase, ModoDeConfirmacion
+from src.infrastructure.llm.herramientas import LECTURAS_DE_TERCEROS, TIPO_POR_HERRAMIENTA
 from src.infrastructure.llm.prompt import instrucciones
 
 logger = structlog.get_logger(__name__)
@@ -61,19 +84,19 @@ LIMITE_DE_PASOS = 8
 NODO_AGENTE = "agente"
 NODO_HERRAMIENTAS = "herramientas"
 
-# Lo que recibe el modelo por cada escritura que pidió de más en un mismo
-# mensaje: no falló, se confirma de a una.
-ESCRITURA_DIFERIDA = (
-    "No se ejecutó todavía: el sistema confirma las acciones de a una. "
-    "Pedila de nuevo apenas termine la anterior."
-)
+# Lo que recibe el modelo por cada escritura de un lote que la persona rechazó.
+LOTE_CANCELADO = "La persona canceló el pedido completo. No se hizo nada."
+
+# Para una escritura que no estaba en la lista que la persona vio y aprobó:
+# no se ejecuta, aunque ahora sí valide. Lo que se confirma es lo que se hace.
+NO_ESTABA_EN_LA_LISTA = "No se hizo: no estaba en la lista que la persona confirmó."
 
 
 def construir_grafo(
     modelo: BaseChatModel,
     herramientas: Sequence[BaseTool],
     checkpointer: BaseCheckpointSaver[Any],
-    escrituras: frozenset[str] = HERRAMIENTAS_DE_ESCRITURA,
+    tipos: Mapping[str, TipoDeEscritura] = TIPO_POR_HERRAMIENTA,
 ) -> Any:
     """Arma y compila el grafo del agente.
 
@@ -84,8 +107,8 @@ def construir_grafo(
         checkpointer: Dónde vive el historial de cada conversación (RF-09). El
             llamador elige la implementación; el grafo no se entera de si
             sobrevive a un reinicio.
-        escrituras: Nombres de las herramientas que escriben: de ésas corre
-            una sola por paso.
+        tipos: Qué le hace a los datos cada herramienta que escribe; lo que
+            no esté acá es una lectura. Es lo que mira la política de RF-08.
 
     Returns:
         El grafo compilado, listo para `ainvoke`. El tipo concreto de LangGraph
@@ -105,19 +128,7 @@ def construir_grafo(
         `add_messages` se encarga de sumar la respuesta al historial en vez de
         pisarlo.
         """
-        historial = trim_messages(
-            state["messages"],
-            max_tokens=MAX_MENSAJES_DE_HISTORIAL,
-            # Contamos mensajes, no tokens: para acotar memoria y costo alcanza,
-            # y evita cargar un tokenizador sólo para recortar una lista.
-            token_counter=len,
-            strategy="last",
-            # No es cosmético: garantiza que el recorte no deje un ToolMessage
-            # huérfano de su AIMessage. Gemini responde 400 ante ese par roto.
-            start_on="human",
-            include_system=False,
-            allow_partial=False,
-        )
+        historial = _historial_visible(state["messages"])
         # Las instrucciones se rearman en cada paso para que lleven la fecha
         # de hoy: sin eso el modelo tendría que gastar un viaje extra
         # preguntándola con una herramienta. No se persisten en el historial.
@@ -128,24 +139,120 @@ def construir_grafo(
 
     ejecutor = ToolNode(herramientas)
 
-    async def nodo_herramientas(state: MessagesState, config: RunnableConfig) -> MessagesState:
-        """Ejecuta lo pedido, con una sola escritura por paso.
+    async def correr(
+        pedido: AIMessage,
+        previos: list[AnyMessage],
+        llamadas: list[ToolCall],
+        modo: ModoDeConfirmacion,
+        fase: Fase,
+        config: RunnableConfig,
+    ) -> list[AnyMessage]:
+        """Ejecuta un subconjunto de las llamadas del modelo, en una fase dada.
 
-        El mensaje del modelo NO se recorta: Gemini guarda firmas por llamada
-        y un mensaje alterado podría hacer que rechace el historial. Se
-        ejecuta una copia filtrada, y cada escritura de más recibe su propia
-        respuesta de "diferida": así toda llamada queda respondida.
+        Se ejecuta una copia filtrada del mensaje: el original NO se recorta,
+        porque Gemini guarda firmas por llamada y un mensaje alterado podría
+        hacer que rechace el historial.
+        """
+        if not llamadas:
+            return []
+        modo.fase = fase
+        try:
+            copia = pedido.model_copy(update={"tool_calls": llamadas})
+            salida = await ejecutor.ainvoke({"messages": [*previos, copia]}, config)
+        finally:
+            modo.fase = Fase.NORMAL
+        respuestas: list[AnyMessage] = salida["messages"]
+        return respuestas
+
+    async def nodo_herramientas(state: MessagesState, config: RunnableConfig) -> MessagesState:
+        """Ejecuta lo pedido aplicando la política de confirmación de RF-08.
+
+        El contexto llega por `get_runtime` y no como parámetro: LangGraph no
+        acepta un nodo que reciba `config` y `runtime` a la vez, y el `config`
+        hace falta para que las herramientas hereden la invocación.
         """
         pedido = state["messages"][-1]
-        llamadas: list[ToolCall] = list(getattr(pedido, "tool_calls", None) or [])
-        a_ejecutar, diferidas = _una_escritura_por_paso(llamadas, escrituras)
-        if diferidas:
-            logger.info("agente.escrituras_diferidas", cantidad=len(diferidas))
-            pedido = pedido.model_copy(update={"tool_calls": a_ejecutar})
+        if not isinstance(pedido, AIMessage):
+            return {"messages": []}  # imposible por la arista condicional
+        previos = list(state["messages"][:-1])
+        llamadas: list[ToolCall] = list(pedido.tool_calls or [])
+        escrituras = [llamada for llamada in llamadas if llamada["name"] in tipos]
+        lecturas = [llamada for llamada in llamadas if llamada["name"] not in tipos]
+        modo = get_runtime(ContextoDeAgente).context.confirmacion
 
-        salida = await ejecutor.ainvoke({"messages": [*state["messages"][:-1], pedido]}, config)
-        respuestas = [*salida["messages"], *(_diferida(llamada) for llamada in diferidas)]
-        return {"messages": respuestas}
+        if len(escrituras) >= UMBRAL_DE_LOTE:
+            return await en_lote(pedido, previos, escrituras, lecturas, modo, config)
+
+        confirma = requiere_confirmacion(
+            [tipos[llamada["name"]] for llamada in escrituras],
+            hay_texto_de_terceros=_hay_texto_de_terceros(state["messages"]),
+        )
+        # Una escritura como mucho: si pausa, es la única pausa del paso, y
+        # re-ejecutar el paso al reanudar no repite nada.
+        fase = Fase.CONFIRMAR if confirma else Fase.DIRECTO
+        return {"messages": await correr(pedido, previos, llamadas, modo, fase, config)}
+
+    async def en_lote(
+        pedido: AIMessage,
+        previos: list[AnyMessage],
+        escrituras: list[ToolCall],
+        lecturas: list[ToolCall],
+        modo: ModoDeConfirmacion,
+        config: RunnableConfig,
+    ) -> MessagesState:
+        """Varias escrituras juntas: una lista, una pausa, cada una una vez.
+
+        Todo lo anterior al `interrupt` se re-ejecuta al reanudar, así que es
+        puro: la vista previa sólo valida y arma resúmenes (las herramientas
+        no escriben en esa fase). Después del `interrupt` no hay ninguna otra
+        pausa posible, y por eso cada escritura aprobada corre una sola vez.
+        """
+        # 1. Vista previa: cada escritura arma su resumen, sin escribir nada.
+        modo.vistas_previas.clear()
+        vista = await correr(pedido, previos, escrituras, modo, Fase.VISTA_PREVIA, config)
+        resumenes = dict(modo.vistas_previas)
+        modo.vistas_previas.clear()
+        # Las que no llegaron a pedir permiso (no validaron: "ya pasó", un
+        # formato) ya tienen su respuesta definitiva.
+        definitivas = [m for m in vista if _id_de(m) not in resumenes]
+        ejecutables = [llamada for llamada in escrituras if (llamada["id"] or "") in resumenes]
+        if not ejecutables:
+            leidas = await correr(pedido, previos, lecturas, modo, Fase.NORMAL, config)
+            return {"messages": [*definitivas, *leidas]}
+
+        # 2. Una sola pausa, con la lista completa.
+        todas_crean = all(
+            tipos[llamada["name"]] is TipoDeEscritura.CREAR for llamada in ejecutables
+        )
+        decision = interrupt(
+            {
+                "resumen": _lista_del_lote(
+                    [resumenes[llamada["id"] or ""] for llamada in ejecutables], todas_crean
+                ),
+                "lote": True,
+                "ids": [llamada["id"] for llamada in ejecutables],
+            }
+        )
+
+        # 3. Con el sí: lo que la persona VIO, ni una más. Sin el sí: nada.
+        if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+            leidas = await correr(pedido, previos, lecturas, modo, Fase.NORMAL, config)
+            canceladas = [_respuesta(llamada, LOTE_CANCELADO) for llamada in ejecutables]
+            logger.info("agente.lote_cancelado", acciones=len(ejecutables))
+            return {"messages": [*definitivas, *leidas, *canceladas]}
+
+        vistas = set(decision.get("ids") or ())
+        aprobadas = [llamada for llamada in ejecutables if llamada["id"] in vistas]
+        sin_mostrar = [llamada for llamada in ejecutables if llamada["id"] not in vistas]
+        hechas = await correr(pedido, previos, [*lecturas, *aprobadas], modo, Fase.APROBADO, config)
+        logger.info("agente.lote_aprobado", acciones=len(aprobadas))
+        return {
+            "messages": [
+                *definitivas,
+                *hechas,
+                *(_respuesta(llamada, NO_ESTABA_EN_LA_LISTA) for llamada in sin_mostrar),
+            ]
+        }
 
     # `context_schema` es lo que habilita que las herramientas reciban de
     # quién es la conversación por un canal que el modelo no ve. Ver
@@ -171,29 +278,44 @@ def construir_grafo(
     return compilado
 
 
-def _una_escritura_por_paso(
-    llamadas: list[ToolCall], escrituras: frozenset[str]
-) -> tuple[list[ToolCall], list[ToolCall]]:
-    """Separa lo que se ejecuta ahora de las escrituras que esperan su turno.
-
-    Corren todas las lecturas y la PRIMERA escritura; las demás escrituras se
-    difieren. Así hay como mucho una pausa por paso, y re-ejecutar el paso al
-    reanudarla no repite ninguna escritura.
-    """
-    a_ejecutar: list[ToolCall] = []
-    diferidas: list[ToolCall] = []
-    hubo_escritura = False
-    for llamada in llamadas:
-        if llamada["name"] in escrituras:
-            if hubo_escritura:
-                diferidas.append(llamada)
-                continue
-            hubo_escritura = True
-        a_ejecutar.append(llamada)
-    return a_ejecutar, diferidas
-
-
-def _diferida(llamada: ToolCall) -> ToolMessage:
-    return ToolMessage(
-        content=ESCRITURA_DIFERIDA, tool_call_id=llamada["id"] or "", name=llamada["name"]
+def _historial_visible(mensajes: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """La ventana del historial que ve el modelo: los últimos mensajes, enteros."""
+    return trim_messages(
+        mensajes,
+        max_tokens=MAX_MENSAJES_DE_HISTORIAL,
+        # Contamos mensajes, no tokens: para acotar memoria y costo alcanza,
+        # y evita cargar un tokenizador sólo para recortar una lista.
+        token_counter=len,
+        strategy="last",
+        # No es cosmético: garantiza que el recorte no deje un ToolMessage
+        # huérfano de su AIMessage. Gemini responde 400 ante ese par roto.
+        start_on="human",
+        include_system=False,
+        allow_partial=False,
     )
+
+
+def _hay_texto_de_terceros(mensajes: Sequence[BaseMessage]) -> bool:
+    """¿El modelo tiene a la vista algo que escribió un tercero (un correo)?
+
+    Se mira la MISMA ventana que recibe el modelo: si un correo leído en un
+    turno anterior sigue ahí, todavía puede estar influyendo lo que pide.
+    """
+    return any(
+        isinstance(mensaje, ToolMessage) and mensaje.name in LECTURAS_DE_TERCEROS
+        for mensaje in _historial_visible(mensajes)
+    )
+
+
+def _lista_del_lote(resumenes: list[str], todas_crean: bool) -> str:
+    """La lista que la persona confirma de una vez."""
+    encabezado = "Perfecto, agendo esto:" if todas_crean else "Perfecto, hago esto:"
+    return encabezado + "\n" + "\n".join(f"• {resumen}" for resumen in resumenes)
+
+
+def _id_de(mensaje: BaseMessage) -> str:
+    return mensaje.tool_call_id if isinstance(mensaje, ToolMessage) else ""
+
+
+def _respuesta(llamada: ToolCall, texto: str) -> ToolMessage:
+    return ToolMessage(content=texto, tool_call_id=llamada["id"] or "", name=llamada["name"])

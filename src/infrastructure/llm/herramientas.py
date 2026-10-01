@@ -46,9 +46,10 @@ from src.domain.exceptions import (
     ServiceUnavailableError,
 )
 from src.domain.repositories.recordatorio_repository import RecordatorioRepository
+from src.domain.services.politica_de_confirmacion import TipoDeEscritura
 from src.domain.value_objects.recurrencia import Frecuencia, Recurrencia
 from src.infrastructure.config.zona import ZONA_HORARIA
-from src.infrastructure.llm.contexto import ContextoDeAgente
+from src.infrastructure.llm.contexto import ContextoDeAgente, Fase
 
 logger = structlog.get_logger(__name__)
 
@@ -87,6 +88,36 @@ def _hecho(runtime: Runtime, texto: str) -> str:
     return texto
 
 
+def _confirmar(runtime: Runtime, resumen: str) -> bool:
+    """El único punto donde una escritura pide permiso (RF-08). True = escribir.
+
+    No decide la política: la decidió el nodo de herramientas (`grafo.py`), que
+    fijó la fase antes de ejecutar. Acá sólo se la obedece:
+
+    - VISTA_PREVIA: el nodo arma la lista de un lote. Se anota el resumen y NO
+      se escribe; lo que la herramienta devuelva después se descarta.
+    - DIRECTO o APROBADO: una acción reversible suelta, o un lote que la
+      persona ya aprobó entero.
+    - CONFIRMAR: una acción que necesita el sí; el grafo se pausa acá y, al
+      reanudar, `interrupt` devuelve la decisión.
+    - Cualquier otra (NORMAL): una escritura que corre fuera del control del
+      nodo no escribe. Falla cerrado.
+
+    Todo lo anterior a esta llamada se re-ejecuta al reanudar, así que sigue
+    sin poder tener efectos: validar y armar el resumen, nada más.
+    """
+    modo = runtime.context.confirmacion
+    if modo.fase is Fase.VISTA_PREVIA:
+        modo.vistas_previas[runtime.tool_call_id or ""] = resumen
+        return False
+    if modo.fase in (Fase.DIRECTO, Fase.APROBADO):
+        return True
+    if modo.fase is Fase.CONFIRMAR:
+        decision = interrupt({"resumen": resumen})
+        return isinstance(decision, dict) and decision.get("aprobado") is True
+    return False
+
+
 def fecha_en_palabras(momento: datetime) -> str:
     """Formatea una fecha en español.
 
@@ -109,26 +140,26 @@ def fecha_y_hora_actual() -> str:
     return f"{fecha_en_palabras(ahora)} de {ahora.year}, {ahora:%H:%M} (hora de Argentina)"
 
 
-# Qué herramientas escriben y cuáles sólo leen. El grafo ejecuta UNA escritura
-# por paso (ver `grafo.py`): si el modelo pide varias juntas, corren en el
-# mismo paso, y LangGraph re-ejecuta el paso entero al reanudar cada pausa —
-# en producción eso creó un evento dos veces y, en la reproducción, mandó dos
-# correos con un solo "sí". Toda tool nueva va en uno de los dos conjuntos: un
-# test rompe CI si queda sin clasificar.
-HERRAMIENTAS_DE_ESCRITURA = frozenset(
-    {
-        "crear_evento_en_calendario",
-        "modificar_evento_del_calendario",
-        "eliminar_evento_del_calendario",
-        "crear_tarea",
-        "completar_tarea",
-        "posponer_tarea",
-        "eliminar_tarea",
-        "enviar_correo",
-        "crear_recordatorio",
-        "cancelar_recordatorio",
-    }
-)
+# Qué herramientas escriben —y qué le hacen a los datos— y cuáles sólo leen.
+# El tipo es lo que mira la política de RF-08 (`domain/services/
+# politica_de_confirmacion.py`): borrar y enviar confirman, lo reversible sale
+# directo, y varias escrituras juntas se confirman en una sola lista (ver
+# `grafo.py`). Toda tool nueva va acá o en las lecturas: un test rompe CI si
+# queda sin clasificar.
+TIPO_POR_HERRAMIENTA: dict[str, TipoDeEscritura] = {
+    "crear_evento_en_calendario": TipoDeEscritura.CREAR,
+    "modificar_evento_del_calendario": TipoDeEscritura.MODIFICAR,
+    "eliminar_evento_del_calendario": TipoDeEscritura.ELIMINAR,
+    "crear_tarea": TipoDeEscritura.CREAR,
+    "completar_tarea": TipoDeEscritura.COMPLETAR,
+    "posponer_tarea": TipoDeEscritura.POSPONER,
+    "eliminar_tarea": TipoDeEscritura.ELIMINAR,
+    "enviar_correo": TipoDeEscritura.ENVIAR,
+    "crear_recordatorio": TipoDeEscritura.CREAR,
+    # Cancelar un recordatorio es borrarlo: no se puede volver a programar solo.
+    "cancelar_recordatorio": TipoDeEscritura.ELIMINAR,
+}
+HERRAMIENTAS_DE_ESCRITURA = frozenset(TIPO_POR_HERRAMIENTA)
 HERRAMIENTAS_DE_LECTURA = frozenset(
     {
         "fecha_y_hora_actual",
@@ -139,6 +170,11 @@ HERRAMIENTAS_DE_LECTURA = frozenset(
         "recordatorios_pendientes",
     }
 )
+
+# Las lecturas que meten al contexto texto escrito por TERCEROS. Mientras el
+# modelo tenga a la vista algo de esto, toda escritura vuelve a confirmar: un
+# correo podría estar dando la orden (modo estricto de RF-08).
+LECTURAS_DE_TERCEROS = frozenset({"buscar_correos", "leer_correo"})
 
 
 def construir_herramientas(
@@ -189,11 +225,11 @@ def construir_herramientas(
         *,
         runtime: Runtime,
     ) -> str:
-        """Crea un evento en el calendario de la persona, previa confirmación.
+        """Crea un evento en el calendario de la persona.
 
-        La confirmación la maneja el sistema: vos sólo llamá a la herramienta
-        con los datos. Nunca digas que el evento ya se creó hasta que la
-        herramienta te lo confirme.
+        Vos sólo llamá a la herramienta con los datos: si hace falta una
+        confirmación, la pide el sistema. Nunca digas que el evento ya se creó
+        hasta que la herramienta te lo confirme.
 
         Si la persona NO dijo a qué hora, PREGUNTALE antes de llamar esta
         herramienta: la hora no se inventa. La fecha relativa sí la resolvés
@@ -265,7 +301,7 @@ def construir_herramientas(
         *,
         runtime: Runtime,
     ) -> str:
-        """Modifica un evento existente del calendario, previa confirmación.
+        """Modifica un evento existente del calendario.
 
         Buscá el evento por su día y su nombre actual, y pasá SOLAMENTE lo que
         la persona quiere cambiar: lo que no menciones se conserva. Nunca digas
@@ -339,7 +375,7 @@ def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
     async def crear_tarea(
         titulo: str, fecha_limite: str = "", notas: str = "", *, runtime: Runtime
     ) -> str:
-        """Anota una tarea pendiente, previa confirmación del sistema.
+        """Anota una tarea pendiente.
 
         Usala cuando la persona quiera acordarse de hacer algo SIN una hora
         concreta ("tengo que...", "anotá que...", "acordate que..."). Si dijo
@@ -359,7 +395,7 @@ def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
 
     @tool
     async def completar_tarea(titulo: str, *, runtime: Runtime) -> str:
-        """Marca una tarea pendiente como hecha, previa confirmación.
+        """Marca una tarea pendiente como hecha.
 
         Usala cuando la persona YA HIZO la tarea ("ya llamé", "listo lo del
         banco"). Si en cambio ya no hace falta hacerla, es eliminar_tarea.
@@ -373,7 +409,7 @@ def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
 
     @tool
     async def posponer_tarea(titulo: str, nueva_fecha: str, *, runtime: Runtime) -> str:
-        """Cambia la fecha límite de una tarea pendiente, previa confirmación.
+        """Cambia la fecha límite de una tarea pendiente.
 
         Sirve para posponerla o para adelantarla. Las tareas no llevan hora.
         Nunca digas que quedó cambiada hasta que la herramienta te lo confirme.
@@ -528,14 +564,15 @@ def _linea(evento: Evento, local: datetime) -> str:
     return " ".join(partes)
 
 
-# --- Escritura con confirmación obligatoria (PB-016, RF-08) ------------------
+# --- Escritura bajo la política de RF-08 (PB-016 · segunda versión) ---------
 #
-# La estructura de las dos funciones es la garantía de RF-08, así que vale
+# La estructura de toda escritura es la garantía de RF-08, así que vale
 # dejarla explícita:
 #
 #   1. Validar y armar el resumen        ← puro; se RE-EJECUTA al reanudar
-#   2. interrupt({"resumen": ...})        ← el grafo se PAUSA acá
-#   3. La llamada que escribe             ← corre UNA vez, sólo con aprobación
+#   2. _confirmar(runtime, resumen)       ← según la fase: directo, pausa o
+#                                           sólo vista previa para un lote
+#   3. La llamada que escribe             ← corre UNA vez, sólo si 2 lo habilita
 #
 # El punto 1 se re-ejecuta porque LangGraph reanuda la tool desde el principio
 # (verificado con una sonda antes de diseñar esto): por eso ahí no puede haber
@@ -558,7 +595,7 @@ async def _crear_evento(
     hasta: str = "",
     veces: int = 0,
 ) -> str:
-    """Crea un evento (o una serie, PB-025) en el principal, con confirmación."""
+    """Crea un evento (o una serie, PB-025) en el principal, bajo la política de RF-08."""
     usuario_id = runtime.context.usuario_id
 
     titulo = titulo.strip()
@@ -601,8 +638,7 @@ async def _crear_evento(
         )
     resumen = f"Crear {detalle}"
 
-    decision = interrupt({"resumen": resumen})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se creó nada."
 
     try:
@@ -797,8 +833,7 @@ async def _eliminar_evento(
     else:
         resumen = f"Eliminar {detalles[0]}"
 
-    decision = interrupt({"resumen": resumen})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se eliminó nada."
 
     borrados = 0
@@ -948,8 +983,7 @@ async def _modificar_evento(
         detalle += " (sólo esta repetición)"
     resumen = f"Cambiar {detalle}"
 
-    decision = interrupt({"resumen": resumen})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se modificó nada."
 
     try:
@@ -1164,8 +1198,7 @@ async def _crear_tarea(
     nueva = Tarea(titulo=titulo, vencimiento=vencimiento, notas=notas.strip() or None)
     detalle = _linea_de_tarea(nueva)[2:]
 
-    decision = interrupt({"resumen": f"Anotar la tarea: {detalle}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Anotar la tarea: {detalle}"):
         return "La persona lo canceló. No se anotó nada."
 
     try:
@@ -1191,8 +1224,7 @@ async def _completar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str
         return encontrada
     elegida, tarea_id = encontrada
 
-    decision = interrupt({"resumen": f"Marcar como hecha: {elegida.titulo}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Marcar como hecha: {elegida.titulo}"):
         return "La persona lo canceló. La tarea sigue pendiente."
 
     try:
@@ -1236,8 +1268,7 @@ async def _posponer_tarea(tareas: Tareas, runtime: Runtime, titulo: str, nueva_f
     antes = _dia_en_palabras(elegida.vencimiento) if elegida.vencimiento else "sin fecha"
     detalle = f'"{elegida.titulo}": {antes} → {_dia_en_palabras(fecha)}'
 
-    decision = interrupt({"resumen": f"Posponer {detalle}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Posponer {detalle}"):
         return "La persona lo canceló. La fecha no cambió."
 
     try:
@@ -1265,8 +1296,7 @@ async def _eliminar_tarea(tareas: Tareas, runtime: Runtime, titulo: str) -> str:
     elegida, tarea_id = encontrada
 
     detalle = _linea_de_tarea(elegida)[2:]
-    decision = interrupt({"resumen": f"Eliminar la tarea: {detalle}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Eliminar la tarea: {detalle}"):
         return "La persona lo canceló. La tarea sigue en la lista."
 
     try:
@@ -1507,8 +1537,7 @@ async def _enviar_correo(
     if len(resumen) > MAX_CARACTERES_DE_LA_CONFIRMACION:
         return "El correo es demasiado largo para mostrártelo entero antes de enviarlo: acortalo."
 
-    decision = interrupt({"resumen": resumen})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se envió nada."
 
     try:
@@ -1644,8 +1673,7 @@ async def _crear_recordatorio(
         return _FUERA_DE_LA_VENTANA
 
     detalle = f"«{texto}» {_a_la_hora(momento, ahora)}"
-    decision = interrupt({"resumen": f"Recordarte {detalle}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Recordarte {detalle}"):
         return "La persona lo canceló. No se programó nada."
 
     try:
@@ -1714,8 +1742,7 @@ async def _cancelar_recordatorio(
     elegido, recordatorio_id = candidatos[0]
 
     detalle = f"«{elegido.texto}» de {_a_la_hora(elegido.momento, ahora)}"
-    decision = interrupt({"resumen": f"Cancelar el recordatorio {detalle}"})
-    if not (isinstance(decision, dict) and decision.get("aprobado") is True):
+    if not _confirmar(runtime, f"Cancelar el recordatorio {detalle}"):
         return "La persona lo canceló. El recordatorio sigue programado."
 
     try:

@@ -266,10 +266,10 @@ async def test_crear_hoy_a_una_hora_que_ya_paso_tampoco() -> None:
     assert calendario.creados == []
 
 
-async def test_crear_mas_tarde_si_propone() -> None:
+async def test_crear_mas_tarde_si_se_crea() -> None:
     en_un_rato = datetime.now(ZONA_HORARIA) + timedelta(hours=2)
 
-    estado, _, _, _ = await _correr(
+    _, calendario, _, _ = await _correr(
         "crear_evento_en_calendario",
         {
             "titulo": "Dentista",
@@ -278,21 +278,20 @@ async def test_crear_mas_tarde_si_propone() -> None:
         },
     )
 
-    assert "__interrupt__" in estado
+    assert len(calendario.creados) == 1
 
 
-async def test_el_resumen_de_crear_avisa_si_termina_al_dia_siguiente() -> None:
+async def test_crear_avisa_si_termina_al_dia_siguiente() -> None:
     manana = datetime.now(ZONA_HORARIA).date() + timedelta(days=1)
     pasado = manana + timedelta(days=1)
 
-    estado, _, _, _ = await _correr(
+    _, _, _, resultado = await _correr(
         "crear_evento_en_calendario",
         {"titulo": "Cena", "fecha": manana.isoformat(), "hora_inicio": "23:30"},
     )
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
     dia_siguiente = fecha_en_palabras(datetime(pasado.year, pasado.month, pasado.day, tzinfo=UTC))
-    assert f"a 00:30 del {dia_siguiente}" in resumen
+    assert f"a 00:30 del {dia_siguiente}" in str(resultado.content)
 
 
 async def test_anotar_una_tarea_para_ayer_no_propone() -> None:
@@ -307,14 +306,14 @@ async def test_anotar_una_tarea_para_ayer_no_propone() -> None:
     assert resultado is not None and str(ayer.year) in str(resultado.content)
 
 
-async def test_anotar_una_tarea_para_hoy_si_propone() -> None:
+async def test_anotar_una_tarea_para_hoy_si_se_anota() -> None:
     hoy = datetime.now(ZONA_HORARIA).date()
 
-    estado, _, _, _ = await _correr(
+    _, _, tareas, _ = await _correr(
         "crear_tarea", {"titulo": "Pagar la luz", "fecha_limite": hoy.isoformat()}
     )
 
-    assert "__interrupt__" in estado
+    assert len(tareas.creadas) == 1
 
 
 def test_el_prompt_trae_los_proximos_siete_dias_ya_resueltos() -> None:

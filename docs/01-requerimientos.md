@@ -31,7 +31,7 @@ El sistema debe permitir consultar, crear, modificar y eliminar páginas, bases 
 **Prioridad:** Media Alta
 
 ### RF-08 – Confirmación de acciones críticas
-El sistema debe solicitar **confirmación explícita** antes de ejecutar cualquier acción que modifique datos.  
+El sistema debe solicitar **confirmación explícita** antes de ejecutar acciones irreversibles —eliminar datos o enviar información a terceros—, antes de ejecutar varias acciones pedidas juntas (mostrando la lista completa) y ante cualquier escritura mientras el pedido pueda estar influido por contenido de terceros. Las acciones individuales reversibles —crear, modificar, completar o posponer un elemento— se ejecutan directamente e informan el resultado con sus datos concretos.  
 **Prioridad:** Alta
 
 ### RF-09 – Mantenimiento de contexto conversacional

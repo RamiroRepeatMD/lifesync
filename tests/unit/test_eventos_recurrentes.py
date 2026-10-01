@@ -61,10 +61,9 @@ def _crear(**extra: Any) -> dict[str, Any]:
 async def test_todos_los_lunes_pedido_un_miercoles_arranca_el_lunes() -> None:
     """RFC 5545: la fecha de inicio es la primera repetición aunque no cumpla la regla."""
     calendario = CalendarioFalso()
-    _, grafo = await _pedir(
+    await _pedir(
         calendario, "crear_evento_en_calendario", **_crear(repetir="semanal", dias="lunes")
     )
-    await _aprobar(grafo)
 
     _, evento = calendario.creados[0]
     assert evento.inicio.date() == LUNES_SIGUIENTE  # no ese miércoles suelto
@@ -74,12 +73,11 @@ async def test_todos_los_lunes_pedido_un_miercoles_arranca_el_lunes() -> None:
 
 async def test_los_dias_se_entienden_con_y_sin_tilde() -> None:
     calendario = CalendarioFalso()
-    _, grafo = await _pedir(
+    await _pedir(
         calendario,
         "crear_evento_en_calendario",
         **_crear(repetir="semanal", dias="Sabado y miércoles"),
     )
-    await _aprobar(grafo)
 
     _, evento = calendario.creados[0]
     assert evento.recurrencia is not None
@@ -88,8 +86,7 @@ async def test_los_dias_se_entienden_con_y_sin_tilde() -> None:
 
 async def test_semanal_sin_dias_repite_el_dia_de_la_fecha() -> None:
     calendario = CalendarioFalso()
-    _, grafo = await _pedir(calendario, "crear_evento_en_calendario", **_crear(repetir="semanal"))
-    await _aprobar(grafo)
+    await _pedir(calendario, "crear_evento_en_calendario", **_crear(repetir="semanal"))
 
     _, evento = calendario.creados[0]
     assert evento.recurrencia is not None
@@ -97,15 +94,15 @@ async def test_semanal_sin_dias_repite_el_dia_de_la_fecha() -> None:
     assert evento.inicio.date() == MIERCOLES
 
 
-async def test_el_resumen_describe_la_serie_completa() -> None:
+async def test_la_respuesta_describe_la_serie_completa() -> None:
     estado, _ = await _pedir(
         CalendarioFalso(),
         "crear_evento_en_calendario",
         **_crear(repetir="semanal", dias="lunes, miércoles", veces=4),
     )
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
-    assert 'Crear "Gimnasio" todos los lunes y miércoles de 19:00 a 20:00' in resumen
+    resumen = _resultado(estado)
+    assert 'Evento creado: "Gimnasio" todos los lunes y miércoles de 19:00 a 20:00' in resumen
     assert "desde el miércoles" in resumen  # el miércoles cumple la regla: arranca ese día
     assert resumen.endswith("(4 veces)")
 
@@ -115,14 +112,13 @@ async def test_sin_fin_lo_dice() -> None:
         CalendarioFalso(), "crear_evento_en_calendario", **_crear(repetir="diaria")
     )
 
-    assert "todos los días" in estado["__interrupt__"][0].value["resumen"]
-    assert "(sin fecha de fin)" in estado["__interrupt__"][0].value["resumen"]
+    assert "todos los días" in _resultado(estado)
+    assert "(sin fecha de fin)" in _resultado(estado)
 
 
 async def test_una_sola_vez_no_lleva_recurrencia() -> None:
     calendario = CalendarioFalso()
-    _, grafo = await _pedir(calendario, "crear_evento_en_calendario", **_crear())
-    await _aprobar(grafo)
+    await _pedir(calendario, "crear_evento_en_calendario", **_crear())
 
     _, evento = calendario.creados[0]
     assert evento.recurrencia is None
@@ -249,4 +245,4 @@ async def test_modificar_una_repeticion_lo_aclara() -> None:
         nueva_hora_inicio="20:00",
     )
 
-    assert "(sólo esta repetición)" in estado["__interrupt__"][0].value["resumen"]
+    assert "(sólo esta repetición)" in _resultado(estado)

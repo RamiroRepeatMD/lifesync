@@ -26,6 +26,7 @@ from src.domain.exceptions import (
 )
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.llm.agente_gemini import (
+    CIERRE_DEL_LOTE,
     CONFIRMACION_VENCIDA,
     LARGO_MAXIMO_WHATSAPP,
     SIN_CONTENIDO,
@@ -457,3 +458,43 @@ async def test_un_interrupt_sin_resumen_igual_pide_confirmacion() -> None:
     respuesta = await AgenteGemini(grafo).responder(_consulta("agendame X"))
 
     assert "confirmes" in respuesta or "Confirmás" in respuesta
+
+
+# --- Lote (RF-08, segunda versión) ---------------------------------------------
+
+
+async def test_al_aprobar_un_lote_viajan_los_ids_que_la_persona_vio() -> None:
+    """El grafo ejecuta esos y ninguno más: lo que se confirma es lo que se hace."""
+    grafo = GrafoFalso(
+        pendiente={"resumen": "Perfecto, agendo esto:\n• A\n• B", "lote": True, "ids": ["a", "b"]}
+    )
+
+    await AgenteGemini(grafo).responder(_consulta("sí"))
+
+    assert grafo.resumes == [{"aprobado": True, "ids": ["a", "b"]}]
+
+
+async def test_al_aprobar_una_sola_accion_no_viajan_ids() -> None:
+    grafo = GrafoFalso(pendiente={"resumen": "Eliminar la tarea: X"})
+
+    await AgenteGemini(grafo).responder(_consulta("sí"))
+
+    assert grafo.resumes == [{"aprobado": True}]
+
+
+async def test_la_pregunta_de_un_lote_cierra_con_su_frase() -> None:
+    lista = "Perfecto, agendo esto:\n• Crear X\n• Anotar la tarea: Y"
+    grafo = GrafoFalso()
+    grafo.interrumpir_proxima = True
+
+    async def con_lote(entrada: Any, config: dict[str, Any], context: Any = None) -> Any:
+        return {
+            "messages": [],
+            "__interrupt__": [InterrupcionFalsa({"resumen": lista, "lote": True, "ids": ["1"]})],
+        }
+
+    grafo.ainvoke = con_lote  # type: ignore[method-assign]
+
+    respuesta = await AgenteGemini(grafo).responder(_consulta("agendame X y anotá Y"))
+
+    assert respuesta == f"{lista}\n\n{CIERRE_DEL_LOTE}"

@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 800 tests + 15 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 814 tests + 17 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -218,9 +218,13 @@ El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
 Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **gestión completa del
 calendario** de quien escribe si conectó su cuenta de Google (RF-03): consultas ("¿qué
 tengo hoy?"), creación —también de eventos que se repiten ("todos los lunes y miércoles a
-las 19")—, **modificación** ("cambiale la hora al dentista") y eliminación —
-toda escritura pasa por una **confirmación obligatoria** que el modelo no puede saltear
-(RF-08: es una pausa del grafo, no una instrucción del prompt). Y si el modelo falla justo
+las 19")—, **modificación** ("cambiale la hora al dentista") y eliminación. La
+confirmación (RF-08) va **según la criticidad**: lo reversible y suelto —agendar, mover,
+anotar, completar— sale directo y el bot cuenta qué hizo y cuándo; lo irreversible
+—borrar, mandar un correo— pide el "sí"; y si se piden **varias cosas juntas**, el bot
+muestra la lista completa y confirma una sola vez. Con un correo de un tercero a la vista,
+todo vuelve a confirmar (un correo no puede escribir por la persona). La decisión no es del
+modelo: es una política del dominio que aplica el grafo antes de ejecutar. Y si el modelo falla justo
 después de ejecutar una acción, el bot igual cuenta lo que hizo: así nadie repite —y duplica—
 algo que ya quedó hecho. Desde el Sprint 3 también
 gestiona **tareas de Google Tasks**: listarlas, anotar nuevas ("acordate que tengo que…"),
@@ -440,11 +444,12 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 15 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta), tarea vs.
-evento, completar vs. eliminar, pedidos compuestos de varios turnos, series recurrentes,
-recordatorios ("en 20 minutos" propone la hora correcta; "avisame a las…" no es un evento),
-"el último correo" con la bandeja cambiando, y los intentos de inyección por correo (un
-correo que ordena borrar eventos o reenviarse no logra que el agente lo proponga). Si
+Son 17 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
+pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
+recurrentes, recordatorios ("en 20 minutos" guarda la hora correcta; "avisame a las…" no es
+un evento), "el último correo" con la bandeja cambiando, y los intentos de inyección por
+correo (un correo que ordena borrar, reenviarse o agendar algo no lo logra). Si
 Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
 persiste se marca como salteado: una caída del proveedor no es un fallo de
 comportamiento.

@@ -1,8 +1,10 @@
 """Tests de las herramientas de escritura del calendario (PB-016, RF-08).
 
-El grupo que manda es el primero: **sin confirmación no hay escritura**. Se
-prueba atravesando el grafo real —modelo falso, calendario falso, checkpointer
-real— porque la garantía es estructural y sólo existe dentro del grafo.
+Desde la segunda versión de RF-08, crear y modificar un evento suelto son
+acciones reversibles y salen directo; **eliminar sigue sin escribir sin el
+sí**. Se prueba atravesando el grafo real —modelo falso, calendario falso,
+checkpointer real— porque la política se aplica en el nodo de herramientas y
+sólo existe dentro del grafo. Los lotes viven en `test_confirmacion_en_lote.py`.
 """
 
 from __future__ import annotations
@@ -65,38 +67,44 @@ async def _reanudar(grafo: Any, aprobado: bool, hilo: str = "hilo-1") -> dict[st
     return resultado
 
 
+def _lo_que_dijo_la_tool(estado: dict[str, Any]) -> str:
+    respuestas = [m for m in estado["messages"] if isinstance(m, ToolMessage)]
+    assert respuestas, "la herramienta no devolvió nada"
+    return str(respuestas[-1].content)
+
+
 # --- RF-08: la garantía estructural ------------------------------------------
 
 
-async def test_sin_confirmacion_no_hay_escritura() -> None:
-    """El test más importante del PB: pedir crear NO crea. Pausa y pregunta."""
+async def test_crear_un_evento_suelto_es_directo() -> None:
+    """RF-08, segunda versión: crear es reversible, así que no pausa."""
     calendario = CalendarioFalso()
-    grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("cierro"))
+    grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("listo"))
 
     estado = await _preguntar(grafo, "agendame dentista el sábado a las 10")
 
-    assert "__interrupt__" in estado
-    assert calendario.creados == []  # ni una escritura antes del sí
+    assert "__interrupt__" not in estado
+    assert len(calendario.creados) == 1  # una vez, sin esperar el sí
 
 
-async def test_el_resumen_del_interrupt_describe_exactamente_la_accion() -> None:
-    """Lo que la persona confirma es lo que se ejecuta, sin reinterpretación."""
+async def test_el_texto_de_exito_describe_exactamente_la_accion() -> None:
+    """Sin pausa, el control de la persona es la respuesta: qué y cuándo, exacto."""
     calendario = CalendarioFalso()
     grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("cierro"))
 
     estado = await _preguntar(grafo, "agendame dentista")
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
-    assert "Dentista" in resumen
-    assert "10:00" in resumen and "11:00" in resumen  # duración default: 60 min
+    texto = _lo_que_dijo_la_tool(estado)
+    assert texto.startswith("Evento creado:")
+    assert "Dentista" in texto
+    assert "10:00" in texto and "11:00" in texto  # duración default: 60 min
 
 
-async def test_aprobar_escribe_exactamente_una_vez() -> None:
+async def test_crear_escribe_exactamente_una_vez() -> None:
     calendario = CalendarioFalso()
     grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("Listo, agendado."))
 
-    await _preguntar(grafo, "agendame dentista")
-    estado = await _reanudar(grafo, aprobado=True)
+    estado = await _preguntar(grafo, "agendame dentista")
 
     assert len(calendario.creados) == 1
     usuario_id, evento = calendario.creados[0]
@@ -105,29 +113,19 @@ async def test_aprobar_escribe_exactamente_una_vez() -> None:
     assert estado["messages"][-1].content == "Listo, agendado."
 
 
-async def test_rechazar_no_escribe_nada() -> None:
-    calendario = CalendarioFalso()
-    grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("Ok, no lo agendo."))
-
-    await _preguntar(grafo, "agendame dentista")
-    await _reanudar(grafo, aprobado=False)
-
-    assert calendario.creados == []
-
-
 async def test_un_resume_deforme_no_aprueba() -> None:
     """Sólo `{"aprobado": True}` ejecuta: cualquier otra forma cancela."""
-    calendario = CalendarioFalso()
-    grafo = _grafo_con(calendario, PEDIDO_CREAR, AIMessage("ok"))
+    calendario = CalendarioFalso(eventos=(_evento("Dentista", 10, "id-1"),))
+    grafo = _grafo_con(calendario, _pedido_eliminar(), AIMessage("ok"))
 
-    await _preguntar(grafo, "agendame dentista")
+    await _preguntar(grafo, "borrá el dentista")
     await grafo.ainvoke(
         Command(resume="si"),  # un string suelto, no el dict esperado
         config={"configurable": {"thread_id": "hilo-1"}},
         context=ContextoDeAgente(usuario_id=USUARIO),
     )
 
-    assert calendario.creados == []
+    assert calendario.eliminados == []
 
 
 # --- El esquema que ve el modelo ---------------------------------------------
@@ -337,26 +335,27 @@ def _dentista() -> Evento:
     )
 
 
-async def test_modificar_sin_confirmacion_no_patchea() -> None:
+async def test_modificar_un_evento_suelto_es_directo() -> None:
+    """Modificar es reversible: se puede volver a cambiar. No pausa."""
     calendario = CalendarioFalso(eventos=(_dentista(),))
     grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
 
     estado = await _preguntar(grafo, "cambiale la hora al dentista")
 
-    assert "__interrupt__" in estado
-    assert calendario.modificados == []
+    assert "__interrupt__" not in estado
+    assert len(calendario.modificados) == 1
 
 
-async def test_el_resumen_muestra_antes_y_despues() -> None:
+async def test_el_texto_de_exito_muestra_antes_y_despues() -> None:
     calendario = CalendarioFalso(eventos=(_dentista(),))
     grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
 
     estado = await _preguntar(grafo, "pasalo a las 16")
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
-    assert "10:00" in resumen  # el antes
-    assert "16:00" in resumen  # el después
-    assert "→" in resumen
+    texto = _lo_que_dijo_la_tool(estado)
+    assert "10:00" in texto  # el antes
+    assert "16:00" in texto  # el después
+    assert "→" in texto
 
 
 async def test_cambiar_solo_la_hora_conserva_la_duracion() -> None:
@@ -365,7 +364,6 @@ async def test_cambiar_solo_la_hora_conserva_la_duracion() -> None:
     grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
 
     await _preguntar(grafo, "pasalo a las 16")
-    await _reanudar(grafo, aprobado=True)
 
     _, deseado = calendario.modificados[0]
     assert deseado.fin is not None
@@ -379,7 +377,6 @@ async def test_cambiar_solo_el_titulo_no_toca_los_horarios() -> None:
     grafo = _grafo_con(calendario, _pedido_modificar(nuevo_titulo="Odontóloga"), AIMessage("ok"))
 
     await _preguntar(grafo, "renombralo")
-    await _reanudar(grafo, aprobado=True)
 
     _, deseado = calendario.modificados[0]
     assert deseado.titulo == "Odontóloga"
@@ -392,7 +389,6 @@ async def test_cambiar_la_duracion_explicita_gana() -> None:
     grafo = _grafo_con(calendario, _pedido_modificar(nueva_duracion_minutos=90), AIMessage("ok"))
 
     await _preguntar(grafo, "que dure una hora y media")
-    await _reanudar(grafo, aprobado=True)
 
     _, deseado = calendario.modificados[0]
     assert deseado.fin is not None
@@ -412,7 +408,6 @@ async def test_darle_hora_a_un_dia_completo_lo_convierte() -> None:
     )
 
     await _preguntar(grafo, "ponele hora al cumple")
-    await _reanudar(grafo, aprobado=True)
 
     _, deseado = calendario.modificados[0]
     assert deseado.todo_el_dia is False
@@ -444,16 +439,6 @@ async def test_modificar_con_varias_coincidencias_pide_precision() -> None:
     assert calendario.modificados == []
 
 
-async def test_rechazar_no_modifica_nada() -> None:
-    calendario = CalendarioFalso(eventos=(_dentista(),))
-    grafo = _grafo_con(calendario, _pedido_modificar(nueva_hora_inicio="16:00"), AIMessage("ok"))
-
-    await _preguntar(grafo, "pasalo a las 16")
-    await _reanudar(grafo, aprobado=False)
-
-    assert calendario.modificados == []
-
-
 def test_el_modelo_tampoco_ve_el_usuario_en_modificar() -> None:
     herramientas = {h.name: h for h in construir_herramientas(CalendarioFalso())}
     esquema = herramientas["modificar_evento_del_calendario"].tool_call_schema
@@ -480,7 +465,6 @@ async def test_los_titulos_no_se_loguean_al_modificar() -> None:
 
     with structlog.testing.capture_logs() as eventos:
         await _preguntar(grafo, "renombralo")
-        await _reanudar(grafo, aprobado=True)
 
     assert eventos
     registrado = json.dumps(eventos, default=str)

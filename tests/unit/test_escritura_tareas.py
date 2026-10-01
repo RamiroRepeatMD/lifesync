@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -52,6 +52,12 @@ async def _reanudar(grafo: Any, aprobado: bool, hilo: str = "hilo-1") -> dict[st
     return resultado
 
 
+def _lo_que_dijo_la_tool(estado: dict[str, Any]) -> str:
+    respuestas = [m for m in estado["messages"] if isinstance(m, ToolMessage)]
+    assert respuestas, "la herramienta no devolvió nada"
+    return str(respuestas[-1].content)
+
+
 def _pedido(nombre: str, **args: Any) -> AIMessage:
     return AIMessage("", tool_calls=[{"name": nombre, "args": args, "id": "t1"}])
 
@@ -88,19 +94,22 @@ async def test_sin_tareas_lo_dice_sin_inventar() -> None:
 # --- Crear: el ciclo RF-08 ---------------------------------------------------
 
 
-async def test_crear_sin_confirmacion_no_escribe() -> None:
+async def test_crear_una_tarea_suelta_es_directo() -> None:
+    """RF-08, segunda versión: anotar es reversible, así que no pausa."""
     tareas = TareasFalsas()
     grafo = _grafo_con(
-        tareas, _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite=LIMITE.isoformat())
+        tareas,
+        _pedido("crear_tarea", titulo="Comprar regalo", fecha_limite=LIMITE.isoformat()),
+        AIMessage("anotada"),
     )
 
     estado = await _preguntar(grafo, "anotá comprar regalo")
 
-    assert "__interrupt__" in estado
-    assert tareas.creadas == []
+    assert "__interrupt__" not in estado
+    assert len(tareas.creadas) == 1
 
 
-async def test_crear_aprobado_escribe_una_sola_vez() -> None:
+async def test_crear_escribe_una_sola_vez() -> None:
     tareas = TareasFalsas()
     grafo = _grafo_con(
         tareas,
@@ -109,22 +118,11 @@ async def test_crear_aprobado_escribe_una_sola_vez() -> None:
     )
 
     await _preguntar(grafo, "anotá comprar regalo")
-    await _reanudar(grafo, aprobado=True)
 
     assert len(tareas.creadas) == 1
     _, creada = tareas.creadas[0]
     assert creada.titulo == "Comprar regalo"
     assert creada.vencimiento == LIMITE
-
-
-async def test_crear_rechazado_no_escribe_nada() -> None:
-    tareas = TareasFalsas()
-    grafo = _grafo_con(tareas, _pedido("crear_tarea", titulo="X"), AIMessage("ok"))
-
-    await _preguntar(grafo, "anotá x")
-    await _reanudar(grafo, aprobado=False)
-
-    assert tareas.creadas == []
 
 
 async def test_crear_con_fecha_invalida_pide_el_formato() -> None:
@@ -166,25 +164,15 @@ async def test_completar_lo_que_no_existe_avisa() -> None:
     assert tareas.completadas == []
 
 
-async def test_completar_aprobado_patchea_la_correcta() -> None:
+async def test_completar_es_directo_y_patchea_la_correcta() -> None:
     tareas = TareasFalsas(pendientes=_pendientes())
     grafo = _grafo_con(tareas, _pedido("completar_tarea", titulo="banco"), AIMessage("hecho"))
 
     estado = await _preguntar(grafo, "ya llamé al banco")
-    assert estado["__interrupt__"][0].value["resumen"] == "Marcar como hecha: Llamar al banco"
-    await _reanudar(grafo, aprobado=True)
 
+    assert "__interrupt__" not in estado
     assert tareas.completadas == [(USUARIO, "t-banco")]
-
-
-async def test_completar_rechazado_deja_la_tarea_pendiente() -> None:
-    tareas = TareasFalsas(pendientes=_pendientes())
-    grafo = _grafo_con(tareas, _pedido("completar_tarea", titulo="banco"), AIMessage("ok"))
-
-    await _preguntar(grafo, "ya llamé")
-    await _reanudar(grafo, aprobado=False)
-
-    assert tareas.completadas == []
+    assert _lo_que_dijo_la_tool(estado) == "Tarea marcada como hecha: Llamar al banco"
 
 
 # --- Seguridad y privacidad --------------------------------------------------
@@ -216,7 +204,6 @@ async def test_los_titulos_de_tareas_no_se_loguean() -> None:
 
     with structlog.testing.capture_logs() as eventos:
         await _preguntar(grafo, "anotá el turno")
-        await _reanudar(grafo, aprobado=True)
 
     assert eventos
     registrado = json.dumps(eventos, default=str)
@@ -261,7 +248,7 @@ def _en_palabras(fecha: date) -> str:
     return fecha_en_palabras(datetime(fecha.year, fecha.month, fecha.day, tzinfo=UTC))
 
 
-async def test_posponer_sin_confirmacion_no_escribe() -> None:
+async def test_posponer_es_directo() -> None:
     tareas = TareasFalsas(pendientes=_pendientes())
     grafo = _grafo_con(
         tareas,
@@ -271,11 +258,11 @@ async def test_posponer_sin_confirmacion_no_escribe() -> None:
 
     estado = await _preguntar(grafo, "posponé lo del banco")
 
-    assert "__interrupt__" in estado
-    assert tareas.pospuestas == []
+    assert "__interrupt__" not in estado
+    assert len(tareas.pospuestas) == 1
 
 
-async def test_posponer_aprobado_cambia_la_fecha_una_sola_vez() -> None:
+async def test_posponer_cambia_la_fecha_una_sola_vez() -> None:
     nueva = _dentro_de(3)
     tareas = TareasFalsas(pendientes=_pendientes())
     grafo = _grafo_con(
@@ -285,26 +272,11 @@ async def test_posponer_aprobado_cambia_la_fecha_una_sola_vez() -> None:
     )
 
     await _preguntar(grafo, "posponé lo del banco")
-    await _reanudar(grafo, aprobado=True)
 
     assert tareas.pospuestas == [(USUARIO, "t-banco", nueva)]
 
 
-async def test_posponer_rechazado_no_cambia_nada() -> None:
-    tareas = TareasFalsas(pendientes=_pendientes())
-    grafo = _grafo_con(
-        tareas,
-        _pedido("posponer_tarea", titulo="banco", nueva_fecha=_dentro_de(3).isoformat()),
-        AIMessage("ok"),
-    )
-
-    await _preguntar(grafo, "posponé lo del banco")
-    await _reanudar(grafo, aprobado=False)
-
-    assert tareas.pospuestas == []
-
-
-async def test_el_resumen_de_posponer_muestra_antes_y_despues() -> None:
+async def test_posponer_cuenta_el_antes_y_el_despues() -> None:
     antes, despues = _dentro_de(2), _dentro_de(9)
     tareas = TareasFalsas(pendientes=(Tarea(titulo="Pagar la luz", vencimiento=antes, id="t-luz"),))
     grafo = _grafo_con(
@@ -315,11 +287,13 @@ async def test_el_resumen_de_posponer_muestra_antes_y_despues() -> None:
 
     estado = await _preguntar(grafo, "pasá lo de la luz")
 
-    resumen = estado["__interrupt__"][0].value["resumen"]
-    assert resumen == f'Posponer "Pagar la luz": {_en_palabras(antes)} → {_en_palabras(despues)}'
+    texto = _lo_que_dijo_la_tool(estado)
+    assert texto == (
+        f'Tarea pospuesta: "Pagar la luz": {_en_palabras(antes)} → {_en_palabras(despues)}'
+    )
 
 
-async def test_posponer_una_tarea_sin_fecha_lo_dice_en_el_resumen() -> None:
+async def test_posponer_una_tarea_sin_fecha_lo_dice() -> None:
     tareas = TareasFalsas(pendientes=_pendientes())  # "Llamar al banco" no tiene fecha
     grafo = _grafo_con(
         tareas,
@@ -329,7 +303,7 @@ async def test_posponer_una_tarea_sin_fecha_lo_dice_en_el_resumen() -> None:
 
     estado = await _preguntar(grafo, "ponele fecha a lo del banco")
 
-    assert "sin fecha →" in estado["__interrupt__"][0].value["resumen"]
+    assert "sin fecha →" in _lo_que_dijo_la_tool(estado)
 
 
 async def test_posponer_a_una_fecha_pasada_no_propone_ni_consulta() -> None:

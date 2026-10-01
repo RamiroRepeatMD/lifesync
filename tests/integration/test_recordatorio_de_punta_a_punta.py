@@ -1,8 +1,9 @@
 """Un recordatorio de punta a punta, sin red (PB-030).
 
-La persona lo pide al agente (grafo real, tool real, modelo falso), lo
-confirma, y cuando llega la hora el despachador lo manda con el cliente de
-WhatsApp real: sólo el HTTP hacia Meta es simulado. Se aserta el cuerpo
+La persona lo pide al agente (grafo real, tool real, modelo falso) —programar
+es directo desde la segunda versión de RF-08— y cuando llega la hora el
+despachador lo manda con el cliente de WhatsApp real: sólo el HTTP hacia Meta
+es simulado. Se aserta el cuerpo
 EXACTO que recibe Meta — incluido el 9 de los móviles argentinos, que en un
 mensaje que inicia el bot también hay que sacar.
 """
@@ -16,7 +17,6 @@ from typing import Any
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command
 
 from src.application.use_cases.enviar_recordatorios_vencidos import EnviarRecordatoriosVencidos
 from src.domain.entities.recordatorio import EstadoDeRecordatorio
@@ -38,7 +38,7 @@ async def test_pedido_por_el_agente_y_entregado_por_whatsapp_a_la_hora() -> None
     assert usuario.id is not None
     recordatorios = RecordatoriosEnMemoria()
 
-    # 1. La persona lo pide y lo confirma.
+    # 1. La persona lo pide: programar es reversible, así que no hay pausa.
     momento = (datetime.now(ZONA_HORARIA) + timedelta(minutes=20)).replace(second=0, microsecond=0)
     modelo = ModeloFalso(
         guion=[
@@ -69,7 +69,7 @@ async def test_pedido_por_el_agente_y_entregado_por_whatsapp_a_la_hora() -> None
         config=config,
         context=contexto,
     )
-    await grafo.ainvoke(Command(resume={"aprobado": True}), config=config, context=contexto)
+    assert recordatorios.guardados  # quedó programado sin esperar un sí
 
     # 2. Llega la hora: el despachador lo manda por el cliente real.
     pedidos: list[httpx.Request] = []

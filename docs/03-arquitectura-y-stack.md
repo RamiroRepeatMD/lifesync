@@ -42,7 +42,7 @@ src/
 ### Principios que siempre deben respetarse
 
 1. **Dependencias apuntan hacia adentro** (domain no conoce infrastructure).
-2. **Confirmación explícita** antes de cualquier side-effect (RF-08).
+2. **Confirmación explícita** antes de toda acción crítica: irreversible, en lote o influida por contenido de terceros (RF-08).
 3. **Tokens OAuth2 siempre cifrados** en Supabase.
 4. **Logging estructurado** desde el día 1.
 5. **Manejo de errores amigable** + recuperación de contexto (RF-19).
