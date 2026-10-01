@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.domain.exceptions import InvalidValueError
+from src.domain.value_objects.recurrencia import Recurrencia
 
 # Google permite eventos sin título. Mostrar una línea vacía sería peor que
 # decir que no tiene nombre.
@@ -35,6 +36,9 @@ class Evento:
             sin esto no se puede distinguir el cumpleaños del turno médico.
         id: Identificador que le asignó el proveedor. Hace falta para poder
             eliminarlo (PB-016); es None en un evento que todavía no existe.
+        recurrencia: Cómo se repite, al crearlo (PB-025). None = una sola vez.
+        serie_id: Si este evento es una repetición de una serie, el id de la
+            serie; borrar ese id borra todas las repeticiones.
     """
 
     titulo: str = field(repr=False)
@@ -43,6 +47,8 @@ class Evento:
     todo_el_dia: bool = False
     calendario: str | None = None
     id: str | None = None
+    recurrencia: Recurrencia | None = None
+    serie_id: str | None = None
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""

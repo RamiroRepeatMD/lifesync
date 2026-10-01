@@ -30,6 +30,8 @@ from src.domain.exceptions import (
     EntityNotFoundError,
     ServiceUnavailableError,
 )
+from src.domain.value_objects.recurrencia import Frecuencia, Recurrencia
+from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.external.google.transporte import traducir_rechazo
 
 logger = structlog.get_logger(__name__)
@@ -165,6 +167,14 @@ class CalendarioGoogle(Calendario):
                 "dateTime": (evento.fin if evento.fin is not None else evento.inicio).isoformat()
             },
         }
+
+        if evento.recurrencia is not None:
+            # Google EXIGE la zona en los recurrentes: es la zona en la que
+            # se expande la regla (sin ella, 400). La regla la armamos
+            # nosotros desde el value object, nunca con texto del modelo.
+            cuerpo["start"]["timeZone"] = ZONA_HORARIA.key
+            cuerpo["end"]["timeZone"] = ZONA_HORARIA.key
+            cuerpo["recurrence"] = [_rrule(evento.recurrencia)]
 
         datos = await self._mandar("POST", f"{BASE}/calendars/primary/events", token, json=cuerpo)
         creado = _a_evento(datos, "") or evento
@@ -389,6 +399,7 @@ def _a_evento(item: dict[str, Any], calendario: str) -> Evento | None:
     fin, _ = _momento(item.get("end"))
 
     identificador = item.get("id")
+    serie = item.get("recurringEventId")
     return Evento(
         titulo=item.get("summary") or "",
         inicio=inicio,
@@ -399,7 +410,35 @@ def _a_evento(item: dict[str, Any], calendario: str) -> Evento | None:
         todo_el_dia=todo_el_dia,
         calendario=calendario or None,
         id=identificador if isinstance(identificador, str) else None,
+        serie_id=serie if isinstance(serie, str) else None,
     )
+
+
+_FRECUENCIAS = {
+    Frecuencia.DIARIA: "DAILY",
+    Frecuencia.SEMANAL: "WEEKLY",
+    Frecuencia.MENSUAL: "MONTHLY",
+}
+_DIAS_RFC = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")  # índice 0 = lunes
+
+
+def _rrule(recurrencia: Recurrencia) -> str:
+    """La regla de iCalendar (RFC 5545) que entiende Google.
+
+    `UNTIL` va en UTC: con eventos de hora (`dateTime`) el RFC lo exige así.
+    Se toma el final del último día LOCAL, para que la repetición de ese día
+    todavía entre.
+    """
+    partes = [f"FREQ={_FRECUENCIAS[recurrencia.frecuencia]}"]
+    if recurrencia.dias:
+        partes.append("BYDAY=" + ",".join(_DIAS_RFC[d] for d in sorted(recurrencia.dias)))
+    if recurrencia.veces is not None:
+        partes.append(f"COUNT={recurrencia.veces}")
+    if recurrencia.hasta is not None:
+        dia = recurrencia.hasta
+        fin = datetime(dia.year, dia.month, dia.day, 23, 59, 59, tzinfo=ZONA_HORARIA)
+        partes.append(f"UNTIL={fin.astimezone(UTC):%Y%m%dT%H%M%SZ}")
+    return "RRULE:" + ";".join(partes)
 
 
 def _momento(borde: Any) -> tuple[datetime | None, bool]:

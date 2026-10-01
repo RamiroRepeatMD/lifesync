@@ -215,7 +215,8 @@ El webhook vive en `POST /webhooks/whatsapp` (y `GET` para el handshake).
 
 Lenguaje natural, con el agente de LangGraph + Gemini (PB-005), y **gestión completa del
 calendario** de quien escribe si conectó su cuenta de Google (RF-03): consultas ("¿qué
-tengo hoy?"), creación, **modificación** ("cambiale la hora al dentista") y eliminación —
+tengo hoy?"), creación —también de eventos que se repiten ("todos los lunes y miércoles a
+las 19")—, **modificación** ("cambiale la hora al dentista") y eliminación —
 toda escritura pasa por una **confirmación obligatoria** que el modelo no puede saltear
 (RF-08: es una pausa del grafo, no una instrucción del prompt). Y si el modelo falla justo
 después de ejecutar una acción, el bot igual cuenta lo que hizo: así nadie repite —y duplica—

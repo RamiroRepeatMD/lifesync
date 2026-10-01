@@ -35,9 +35,11 @@ from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
     EntityNotFoundError,
+    InvalidValueError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
+from src.domain.value_objects.recurrencia import Frecuencia, Recurrencia
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.contexto import ContextoDeAgente
 
@@ -166,6 +168,10 @@ def construir_herramientas(
         fecha: str,
         hora_inicio: str,
         duracion_minutos: int = 60,
+        repetir: str = "",
+        dias: str = "",
+        hasta: str = "",
+        veces: int = 0,
         *,
         runtime: Runtime,
     ) -> str:
@@ -185,14 +191,36 @@ def construir_herramientas(
             hora_inicio: Hora de comienzo, en formato HH:MM de 24 horas.
             duracion_minutos: Cuánto dura, en minutos. Si la persona no lo
                 dijo, dejá el valor por defecto.
+            repetir: Sólo si el evento se repite: "diaria", "semanal" o
+                "mensual". Vacío = una sola vez.
+            dias: Para "semanal": los días, separados por coma ("lunes,
+                miércoles"). Vacío = el mismo día de la semana de `fecha`.
+            hasta: Último día de la repetición, en AAAA-MM-DD, si la persona
+                lo dijo. No se combina con `veces`.
+            veces: Cuántas repeticiones en total, si la persona lo dijo ("por 4
+                semanas" en semanal de un día = 4). 0 = sin límite.
         """
         return await _crear_evento(
-            calendario, runtime, titulo, fecha, hora_inicio, duracion_minutos
+            calendario,
+            runtime,
+            titulo,
+            fecha,
+            hora_inicio,
+            duracion_minutos,
+            repetir=repetir,
+            dias=dias,
+            hasta=hasta,
+            veces=veces,
         )
 
     @tool
     async def eliminar_evento_del_calendario(
-        fecha: str, titulo: str, todos: bool = False, *, runtime: Runtime
+        fecha: str,
+        titulo: str,
+        todos: bool = False,
+        toda_la_serie: bool = False,
+        *,
+        runtime: Runtime,
     ) -> str:
         """Elimina un evento del calendario principal, previa confirmación.
 
@@ -204,11 +232,13 @@ def construir_herramientas(
         Args:
             fecha: Día en que está el evento, en formato AAAA-MM-DD.
             titulo: Nombre (o parte del nombre) del evento a eliminar.
-            todos: True SÓLO si la persona pidió borrar todos los que
-                coinciden ("los dos", "todos"). Con False y varios distintos,
-                el sistema pregunta cuál.
+            todos: True SÓLO si la persona pidió borrar todos los eventos
+                DISTINTOS que coinciden ese día ("los dos", "todos").
+            toda_la_serie: True SÓLO si el evento se repite y la persona quiere
+                cortar la repetición entera ("ya no voy más", "toda la
+                serie"). Con False se borra sólo el de ese día.
         """
-        return await _eliminar_evento(calendario, runtime, fecha, titulo, todos)
+        return await _eliminar_evento(calendario, runtime, fecha, titulo, todos, toda_la_serie)
 
     @tool
     async def modificar_evento_del_calendario(
@@ -300,7 +330,8 @@ def _herramientas_de_tareas(tareas: Tareas) -> list[BaseTool]:
         Args:
             titulo: Qué hay que hacer, corto y claro.
             fecha_limite: Fecha límite en AAAA-MM-DD, sólo si la persona dio
-                un día. Las tareas no llevan hora.
+                un día. Es opcional: si no la dio, anotala sin fecha, sin
+                preguntar. Las tareas no llevan hora.
             notas: Detalle extra, sólo si la persona lo dio.
         """
         return await _crear_tarea(tareas, runtime, titulo, fecha_limite, notas)
@@ -469,6 +500,8 @@ def _linea(evento: Evento, local: datetime) -> str:
     else:
         fin = evento.fin.astimezone(ZONA_HORARIA) if evento.fin is not None else None
         partes.insert(0, f"{_horario(local, fin)} —")
+    if evento.serie_id is not None:
+        partes.append("(se repite)")
     if evento.calendario:
         partes.append(f"[{evento.calendario}]")
     return " ".join(partes)
@@ -499,8 +532,12 @@ async def _crear_evento(
     fecha: str,
     hora_inicio: str,
     duracion_minutos: int,
+    repetir: str = "",
+    dias: str = "",
+    hasta: str = "",
+    veces: int = 0,
 ) -> str:
-    """Crea un evento en el calendario principal, con confirmación en el medio."""
+    """Crea un evento (o una serie, PB-025) en el principal, con confirmación."""
     usuario_id = runtime.context.usuario_id
 
     titulo = titulo.strip()
@@ -513,6 +550,18 @@ async def _crear_evento(
     if not MINUTOS_MINIMOS <= duracion_minutos <= MINUTOS_MAXIMOS:
         return f"La duración tiene que estar entre {MINUTOS_MINIMOS} y {MINUTOS_MAXIMOS} minutos."
 
+    recurrencia: Recurrencia | None = None
+    if repetir.strip():
+        armada = _armar_recurrencia(repetir, dias, hasta, veces, inicio.date())
+        if isinstance(armada, str):
+            return armada
+        recurrencia = armada
+        # RFC 5545: la fecha de inicio ES la primera repetición aunque no
+        # cumpla la regla. "Todos los lunes" pedido un miércoles crearía un
+        # miércoles suelto: se arranca en el primer día que sí cumple.
+        primera = _primera_repeticion(inicio.date(), recurrencia)
+        inicio = inicio.replace(year=primera.year, month=primera.month, day=primera.day)
+
     if inicio < datetime.now(ZONA_HORARIA):
         # Casi siempre es un año mal inferido ("el 5 de enero" en el año que
         # ya pasó): se frena antes de proponer, nombrando el año.
@@ -522,7 +571,13 @@ async def _crear_evento(
         )
 
     fin = inicio + timedelta(minutes=duracion_minutos)
-    detalle = f'"{titulo}" el {fecha_en_palabras(inicio)} de {_horario(inicio, fin)}'
+    if recurrencia is None:
+        detalle = f'"{titulo}" el {fecha_en_palabras(inicio)} de {_horario(inicio, fin)}'
+    else:
+        detalle = (
+            f'"{titulo}" {recurrencia.describir()} de {_horario(inicio, fin)}, '
+            f"desde el {fecha_en_palabras(inicio)}{_final_de_serie(recurrencia)}"
+        )
     resumen = f"Crear {detalle}"
 
     decision = interrupt({"resumen": resumen})
@@ -530,7 +585,9 @@ async def _crear_evento(
         return "La persona lo canceló. No se creó nada."
 
     try:
-        await calendario.crear_evento(usuario_id, Evento(titulo=titulo, inicio=inicio, fin=fin))
+        await calendario.crear_evento(
+            usuario_id, Evento(titulo=titulo, inicio=inicio, fin=fin, recurrencia=recurrencia)
+        )
     except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
         return exc.mensaje_usuario
     except AutorizacionFallidaError:
@@ -544,12 +601,98 @@ async def _crear_evento(
         usuario_id=str(usuario_id),
         # Que se creó sí; el título NUNCA (RF-18).
         duracion_minutos=duracion_minutos,
+        se_repite=recurrencia is not None,
     )
     return _hecho(runtime, f"Evento creado: {detalle}")
 
 
+_DIAS_POR_NOMBRE = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "sabados": 5,
+    "domingo": 6,
+    "domingos": 6,
+}
+
+
+def _armar_recurrencia(
+    repetir: str, dias: str, hasta: str, veces: int, primer_dia: date
+) -> Recurrencia | str:
+    """El value object de dominio, o el texto que explica qué no cierra."""
+    try:
+        frecuencia = Frecuencia(_para_buscar(repetir))
+    except ValueError:
+        return 'Para repetir, decime si es "diaria", "semanal" o "mensual".'
+
+    numeros: tuple[int, ...] = ()
+    if dias.strip():
+        leidos = _dias_de_la_semana(dias)
+        if isinstance(leidos, str):
+            return leidos
+        numeros = leidos
+    elif frecuencia is Frecuencia.SEMANAL:
+        numeros = (primer_dia.weekday(),)
+
+    fin: date | None = None
+    if hasta.strip():
+        try:
+            fin = date.fromisoformat(hasta.strip())
+        except ValueError:
+            return "No entendí hasta cuándo se repite: va en AAAA-MM-DD."
+        if fin < primer_dia:
+            return "La fecha en que termina la repetición es anterior a la primera."
+
+    try:
+        return Recurrencia(frecuencia, numeros, fin, veces or None)
+    except InvalidValueError as exc:
+        return exc.detalle
+
+
+def _dias_de_la_semana(texto: str) -> tuple[int, ...] | str:
+    """ "lunes, miércoles y viernes" → (0, 2, 4), con o sin tildes."""
+    numeros: list[int] = []
+    for crudo in re.split(r",|;|\sy\s", texto):
+        nombre = _para_buscar(crudo)
+        if not nombre:
+            continue
+        if nombre not in _DIAS_POR_NOMBRE:
+            return f"No entendí el día «{crudo.strip()}». Van de lunes a domingo."
+        if _DIAS_POR_NOMBRE[nombre] not in numeros:
+            numeros.append(_DIAS_POR_NOMBRE[nombre])
+    return tuple(sorted(numeros))
+
+
+def _primera_repeticion(desde: date, recurrencia: Recurrencia) -> date:
+    """El primer día desde `desde` que cumple la regla (sólo importa en la semanal)."""
+    if recurrencia.frecuencia is not Frecuencia.SEMANAL:
+        return desde
+    for adelanto in range(7):
+        candidato = desde + timedelta(days=adelanto)
+        if candidato.weekday() in recurrencia.dias:
+            return candidato
+    return desde
+
+
+def _final_de_serie(recurrencia: Recurrencia) -> str:
+    if recurrencia.veces is not None:
+        return f" ({recurrencia.veces} veces)"
+    if recurrencia.hasta is not None:
+        dia = recurrencia.hasta
+        return f", hasta el {fecha_en_palabras(datetime(dia.year, dia.month, dia.day, tzinfo=UTC))}"
+    return " (sin fecha de fin)"
+
+
 async def _eliminar_evento(
-    calendario: Calendario, runtime: Runtime, fecha: str, titulo: str, todos: bool = False
+    calendario: Calendario,
+    runtime: Runtime,
+    fecha: str,
+    titulo: str,
+    todos: bool = False,
+    toda_la_serie: bool = False,
 ) -> str:
     """Elimina uno o varios eventos del principal, desambiguando ANTES de confirmar.
 
@@ -601,13 +744,35 @@ async def _eliminar_evento(
             "¿Cuál de estos? Si querés, los borro todos."
         )
 
-    detalles = [_detalle_para_borrar(e) for e in a_borrar]
-    if len(a_borrar) > 1:
-        resumen = f"Eliminar estos {len(a_borrar)} eventos:\n" + "\n".join(
+    # Qué se borra de verdad: cada repetición por su id, o la serie entera
+    # por el id de la serie (PB-025). El detalle es lo que ve la persona.
+    objetivos: list[tuple[str, str]]
+    if toda_la_serie:
+        series = {e.serie_id: e for e in a_borrar if e.serie_id is not None}
+        if not series:
+            return (
+                "Ese evento no se repite, así que no hay una serie para borrar. "
+                "¿Lo borro sólo a él?"
+            )
+        objetivos = [
+            (serie_id, f"toda la serie de «{e.titulo_visible}» (todas sus repeticiones)")
+            for serie_id, e in series.items()
+        ]
+    else:
+        objetivos = [(e.id, _detalle_para_borrar(e)) for e in a_borrar if e.id is not None]
+
+    detalles = [detalle for _, detalle in objetivos]
+    if len(objetivos) > 1:
+        que = "series completas" if toda_la_serie else "eventos"
+        resumen = f"Eliminar estos {len(objetivos)} {que}:\n" + "\n".join(
             f"- {d}" for d in detalles
         )
+    elif toda_la_serie:
+        resumen = f"Eliminar {detalles[0]}"
     elif len(candidatos) > 1:
         resumen = f"Eliminar uno de los {len(candidatos)} eventos idénticos: {detalles[0]}"
+    elif a_borrar[0].serie_id is not None:
+        resumen = f"Eliminar sólo esta repetición: {detalles[0]} (las demás repeticiones quedan)"
     else:
         resumen = f"Eliminar {detalles[0]}"
 
@@ -616,11 +781,9 @@ async def _eliminar_evento(
         return "La persona lo canceló. No se eliminó nada."
 
     borrados = 0
-    for evento in a_borrar:
-        if evento.id is None:  # ya filtrado arriba; para mypy
-            continue
+    for identificador, _ in objetivos:
         try:
-            await calendario.eliminar_evento(usuario_id, evento.id)
+            await calendario.eliminar_evento(usuario_id, identificador)
         except (CuentaNoConectadaError, PermisoInsuficienteError) as exc:
             return _parcial(runtime, borrados, detalles) + exc.mensaje_usuario
         except AutorizacionFallidaError:
@@ -638,6 +801,7 @@ async def _eliminar_evento(
         herramienta="eliminar_evento_del_calendario",
         usuario_id=str(usuario_id),
         eventos=borrados,
+        serie=toda_la_serie,
     )
     if borrados == 1:
         return _hecho(runtime, f"Evento eliminado: {detalles[0]}")
@@ -757,6 +921,10 @@ async def _modificar_evento(
         f" → {_linea(deseado, _en_hora_local(deseado))}"
         f" ({fecha_en_palabras(_en_hora_local(deseado))})"
     )
+    if original.serie_id is not None:
+        # Modificar una serie entera queda fuera de PB-025: se cambia sólo
+        # esta repetición, y la persona tiene que saberlo antes del sí.
+        detalle += " (sólo esta repetición)"
     resumen = f"Cambiar {detalle}"
 
     decision = interrupt({"resumen": resumen})

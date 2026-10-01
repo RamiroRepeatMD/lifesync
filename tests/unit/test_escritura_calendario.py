@@ -138,8 +138,20 @@ def test_el_modelo_no_ve_el_usuario_ni_el_runtime() -> None:
     herramientas = {h.name: h for h in construir_herramientas(CalendarioFalso())}
 
     for nombre, esperados in [
-        ("crear_evento_en_calendario", {"titulo", "fecha", "hora_inicio", "duracion_minutos"}),
-        ("eliminar_evento_del_calendario", {"fecha", "titulo", "todos"}),
+        (
+            "crear_evento_en_calendario",
+            {
+                "titulo",
+                "fecha",
+                "hora_inicio",
+                "duracion_minutos",
+                "repetir",
+                "dias",
+                "hasta",
+                "veces",
+            },
+        ),
+        ("eliminar_evento_del_calendario", {"fecha", "titulo", "todos", "toda_la_serie"}),
     ]:
         esquema = herramientas[nombre].tool_call_schema
         assert isinstance(esquema, type) and issubclass(esquema, BaseModel)

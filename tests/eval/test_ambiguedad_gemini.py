@@ -30,6 +30,7 @@ from src.domain.entities.evento import Evento
 from src.domain.entities.tarea import Tarea
 from src.domain.exceptions import AgenteNoDisponibleError, CuotaDeAgenteAgotadaError
 from src.infrastructure.config.settings import Environment, Settings
+from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import AgenteGemini, crear_agente_gemini
 from tests.dobles import CalendarioFalso, CorreosFalsos, TareasFalsas
 
@@ -373,6 +374,11 @@ async def test_un_pedido_compuesto_deja_un_evento_y_una_tarea(
 
     assert len(calendario.creados) == 1
     assert len(tareas.creadas) == 1
+    # Contar no alcanza: el 30/09 el modelo propuso "el lunes" un mes tarde.
+    hoy = datetime.now(ZONA_HORARIA).date()
+    lunes = hoy + timedelta(days=(0 - hoy.weekday()) % 7 or 7)
+    (_, evento), *_ = calendario.creados
+    assert evento.inicio.astimezone(ZONA_HORARIA).date() == lunes
 
 
 async def test_el_ultimo_correo_es_el_ultimo_de_verdad(
@@ -394,3 +400,16 @@ async def test_el_ultimo_correo_es_el_ultimo_de_verdad(
     abrio_el_nuevo = bool(correos.leidos) and correos.leidos[-1][1] == "m-nuevo"
     assert abrio_el_nuevo or "Ana" in respuesta  # habla del correo nuevo...
     assert "apto" not in respuesta.lower()  # ...y no del viejo
+
+
+async def test_una_serie_se_propone_con_su_regla(
+    agente_completo: tuple[AgenteGemini, CalendarioFalso, TareasFalsas, CorreosFalsos],
+) -> None:
+    """PB-025: el modelo usa los parámetros de repetición en vez de crear un solo evento."""
+    modelo, calendario, _, _ = agente_completo
+
+    respuesta = await _turno(modelo, "agendame gimnasio todos los lunes y miércoles a las 19")
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "todos los lunes y miércoles" in respuesta
+    assert calendario.creados == []  # nada sin el sí

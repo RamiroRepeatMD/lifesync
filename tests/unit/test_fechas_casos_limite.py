@@ -133,9 +133,10 @@ def test_a_las_2330_locales_el_prompt_sigue_diciendo_hoy() -> None:
     """Las 23:30 del 30/09 en Argentina ya son el 01/10 en UTC."""
     texto = instrucciones(datetime(2026, 10, 1, 2, 30, tzinfo=UTC))
 
-    assert "miércoles 30 de septiembre de 2026" in texto
-    assert "jueves 1 de octubre" not in texto
-    assert "23:30" in texto
+    (hoy,) = [linea for linea in texto.splitlines() if linea.startswith("Hoy es")]
+    assert "miércoles 30 de septiembre de 2026" in hoy
+    assert "jueves" not in hoy  # el jueves 1 aparece en la tabla de próximos días, no como hoy
+    assert "23:30" in hoy
 
 
 def _cena_2330() -> Evento:
@@ -314,3 +315,13 @@ async def test_anotar_una_tarea_para_hoy_si_propone() -> None:
     )
 
     assert "__interrupt__" in estado
+
+
+def test_el_prompt_trae_los_proximos_siete_dias_ya_resueltos() -> None:
+    """Con pedidos compuestos, el modelo propuso "el lunes" un mes tarde: se le da la tabla."""
+    texto = instrucciones(datetime(2026, 9, 30, 20, 0, tzinfo=UTC))  # miércoles 30/09, 17:00
+
+    assert "lunes 5 de octubre (2026-10-05)" in texto
+    assert "jueves 1 de octubre (2026-10-01)" in texto
+    assert "miércoles 7 de octubre (2026-10-07)" in texto
+    assert "(2026-10-08)" not in texto  # siete días, no más

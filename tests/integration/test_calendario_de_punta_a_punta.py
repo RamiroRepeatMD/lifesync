@@ -220,3 +220,85 @@ async def test_el_resumen_de_eliminar_nombra_el_dia_local_aunque_google_mande_ut
     assert "22:30" in resumen
     assert _en_palabras(dia) in resumen
     assert _en_palabras(siguiente) not in resumen
+
+
+# --- Eventos recurrentes (PB-025) ---------------------------------------------------
+
+
+def _proximo(dia_de_semana: int) -> date:
+    """El próximo día de la semana pedido, nunca hoy (0 = lunes)."""
+    return HOY + timedelta(days=(dia_de_semana - HOY.weekday()) % 7 or 7)
+
+
+async def test_una_serie_manda_la_regla_y_la_zona_que_google_exige() -> None:
+    """Sin `timeZone` en start y end, Google rechaza un recurrente con 400."""
+    google = GoogleFalso()
+    lunes = _proximo(0)
+
+    await _pedir_y_aprobar(
+        google,
+        "crear_evento_en_calendario",
+        titulo="Gimnasio",
+        fecha=lunes.isoformat(),
+        hora_inicio="19:00",
+        repetir="semanal",
+        dias="lunes, miércoles",
+        veces=4,
+    )
+
+    cuerpo = google.cuerpo_de("POST")
+    assert cuerpo["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=4"]
+    assert cuerpo["start"] == {
+        "dateTime": f"{lunes.isoformat()}T19:00:00-03:00",
+        "timeZone": "America/Argentina/Buenos_Aires",
+    }
+    assert cuerpo["end"]["timeZone"] == "America/Argentina/Buenos_Aires"
+
+
+async def test_el_fin_de_la_serie_viaja_en_utc() -> None:
+    """RFC 5545: con `dateTime`, UNTIL va en UTC. 23:59:59 locales = 02:59:59Z del día siguiente."""
+    google = GoogleFalso()
+    manana = _dia(1)
+    ultimo = _dia(10)
+
+    await _pedir_y_aprobar(
+        google,
+        "crear_evento_en_calendario",
+        titulo="Pastilla",
+        fecha=manana.isoformat(),
+        hora_inicio="09:00",
+        repetir="diaria",
+        hasta=ultimo.isoformat(),
+    )
+
+    siguiente = ultimo + timedelta(days=1)
+    assert google.cuerpo_de("POST")["recurrence"] == [
+        f"RRULE:FREQ=DAILY;UNTIL={siguiente:%Y%m%d}T025959Z"
+    ]
+
+
+async def test_borrar_toda_la_serie_borra_el_id_de_la_serie() -> None:
+    """Google entrega cada repetición con `recurringEventId`: ése es el que se borra."""
+    lunes = _proximo(0)
+    google = GoogleFalso(
+        [
+            {
+                "id": f"gym_{lunes:%Y%m%d}T220000Z",
+                "recurringEventId": "gym",
+                "summary": "Gimnasio",
+                "start": {"dateTime": f"{lunes.isoformat()}T19:00:00-03:00"},
+                "end": {"dateTime": f"{lunes.isoformat()}T20:00:00-03:00"},
+            }
+        ]
+    )
+
+    await _pedir_y_aprobar(
+        google,
+        "eliminar_evento_del_calendario",
+        fecha=lunes.isoformat(),
+        titulo="gimnasio",
+        toda_la_serie=True,
+    )
+
+    (borrado,) = [p for p in google.pedidos if p.method == "DELETE"]
+    assert borrado.url.path.endswith("/events/gym")
