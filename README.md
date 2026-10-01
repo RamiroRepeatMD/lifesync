@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 602 tests |
+| Testing | pytest · ruff · mypy strict — 753 tests + 13 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -421,12 +421,20 @@ uv run mypy tests            # ... y de los tests (CI corre ambos)
 `tests/integration/` prueba caminos completos sin red: por ejemplo, de la herramienta del agente
 al adaptador de Google Calendar, asertando el cuerpo exacto que recibiría Google.
 
-Hay además una suite de **evaluación del comportamiento del modelo** (RF-10) que llama a
-Gemini de verdad y gasta cuota — por eso es opt-in y CI la saltea:
+Hay además una suite de **evaluación del comportamiento del modelo** que llama a Gemini de
+verdad y gasta cuota — por eso es opt-in y CI la saltea:
 
 ```bash
 uv run pytest tests/eval/ -m gemini
 ```
+
+Son 13 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta), tarea vs.
+evento, completar vs. eliminar, pedidos compuestos de varios turnos, series recurrentes,
+"el último correo" con la bandeja cambiando, y los intentos de inyección por correo (un
+correo que ordena borrar eventos o reenviarse no logra que el agente lo proponga). Si
+Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
+persiste se marca como salteado: una caída del proveedor no es un fallo de
+comportamiento.
 
 Los mismos checks corren en CI en cada push
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), más un build del `Dockerfile` para que no
@@ -506,10 +514,30 @@ verificado contra los servicios reales** (Google, Gemini, Supabase, Meta).
 | PB-016 | Crear/eliminar eventos con confirmación obligatoria | ✅ |
 | PB-017 | Modificar eventos | ✅ (adelantado de Sprint 3) |
 
-**Sprint 3** (entrega 16/09/2026) – Tareas + cierre del núcleo. PB-018/022/023/024 se
-adelantaron en el Sprint 2; PB-028 (Google Tasks: modelo + listar/crear/completar) ✅;
-PB-019/020 cubiertos por `/ayuda`, `/estado` y RF-19. Pendiente del sprint: PB-029
-(posponer/eliminar tareas) llega en el Sprint 4 según plan.
+La tabla del Sprint 2 usa la numeración interna con la que se trabajó; los informes de avance
+usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 oficial).
+
+**Sprint 3** (entrega 16/09/2026) – Calendar + tareas — **✅ completo**.
+
+| Tarea | Descripción | Estado |
+|-------|-------------|--------|
+| PB-018 | Detección y manejo de mensajes ambiguos | ✅ adelantado en el Sprint 2 |
+| PB-019 | Sistema de ayuda y feedback | ✅ |
+| PB-020 | Errores amigables y recuperación de contexto | ✅ |
+| PB-022 · 023 · 024 | Calendar: crear, consultar, modificar y cancelar | ✅ adelantados en el Sprint 2 |
+| PB-028 | Integración Google Tasks + modelo de tareas | ✅ |
+
+**Sprint 4** (entrega 30/09/2026) – Tareas completas + Gmail + calidad.
+
+| Tarea | Descripción | Estado |
+|-------|-------------|--------|
+| PB-025 | Eventos recurrentes básicos | ✅ |
+| PB-026 | Confirmación + respuesta contextual post-acción | ✅ |
+| PB-027 | Pruebas de integración Calendar + casos límite de fechas | ✅ |
+| PB-029 | Tareas: crear, listar, completar, posponer y eliminar | ✅ |
+| PB-030 | Recordatorios proactivos básicos | ⏳ en curso |
+| PB-032 | Gmail: enviar correos | ✅ (adjuntos replanificados al Sprint 5) |
+| PB-033 | Gmail: listar, buscar y leer correos | ✅ |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 
