@@ -1435,6 +1435,11 @@ def _neutralizar(texto: str) -> str:
     return texto
 
 
+def _asunto(correo: Correo) -> str:
+    """El asunto para mostrar. Nunca para el correo que sale (bug de PB-036)."""
+    return correo.asunto or "(sin asunto)"
+
+
 def _cuando(correo: Correo) -> str:
     local = correo.fecha.astimezone(ZONA_HORARIA)
     return f"{fecha_en_palabras(local)}, {local:%H:%M}"
@@ -1464,7 +1469,7 @@ async def _buscar_correos(correos: Correos, runtime: Runtime, consulta: str, can
         sin_leer = " [sin leer]" if correo.no_leido else ""
         lineas.append(
             f"{numero}.{sin_leer} De {_neutralizar(correo.remitente)} — "
-            f"«{_neutralizar(correo.asunto)}» — {_cuando(correo)} (id: {correo.id})"
+            f"«{_neutralizar(_asunto(correo))}» — {_cuando(correo)} (id: {correo.id})"
         )
         fragmento = _neutralizar(correo.fragmento)
         if fragmento:
@@ -1490,7 +1495,7 @@ async def _leer_correo(correos: Correos, runtime: Runtime, id_correo: str) -> st
     partes = [
         INICIO_DE_CORREO,
         f"De: {_neutralizar(correo.remitente)}",
-        f"Asunto: {_neutralizar(correo.asunto)}",
+        f"Asunto: {_neutralizar(_asunto(correo))}",
         f"Fecha: {_cuando(correo)}",
     ]
     if correo.adjuntos:
@@ -1512,7 +1517,17 @@ MAX_CARACTERES_DE_ASUNTO = 200
 # La pregunta de confirmación completa tiene que entrar en un mensaje de
 # WhatsApp (Meta corta en 4096); se deja margen para "¿Confirmás? ...".
 MAX_CARACTERES_DE_LA_CONFIRMACION = 3900
-_DIRECCION = re.compile(r"^[^@\s<>(),;:\"\[\]]+@[^@\s<>(),;:\"\[\]]+\.[^@\s<>(),;:\"\[\]]+$")
+# Una dirección como la acepta Gmail (RFC 5321/5322, en ASCII): la parte local
+# es un dot-atom (sin puntos al principio, al final ni dobles) y el dominio son
+# etiquetas válidas con un TLD de 2+ caracteres que empieza con letra (así
+# entra el punycode, "xn--…"). La regla anterior dejaba pasar "josé@…", que
+# Python codificaba en RFC 2047 dentro de la dirección, y "ana@ejemplo..com":
+# la persona confirmaba algo que Gmail iba a rechazar (bug de PB-036).
+_ATOMO = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_ETIQUETA = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_DIRECCION = re.compile(
+    rf"{_ATOMO}(?:\.{_ATOMO})*@(?:{_ETIQUETA}\.)+[A-Za-z][A-Za-z0-9-]{{0,61}}[A-Za-z0-9]"
+)
 
 
 def _direcciones(para: str) -> tuple[str, ...] | str:
@@ -1523,7 +1538,12 @@ def _direcciones(para: str) -> tuple[str, ...] | str:
 
     unicas: list[str] = []
     for direccion in crudas:
-        if not _DIRECCION.match(direccion):
+        if not direccion.isascii():
+            return (
+                f"«{direccion}» tiene tildes o eñes, y una dirección de correo no las "
+                "lleva. ¿Me pasás la dirección exacta?"
+            )
+        if not _DIRECCION.fullmatch(direccion):
             return (
                 f"«{direccion}» no parece una dirección de correo válida. "
                 "¿Me pasás la dirección completa?"
@@ -1652,8 +1672,14 @@ ADELANTO_DEL_REENVIO = 600
 
 
 def _con_prefijo(asunto: str, prefijo: str, ya_lo_tiene: tuple[str, ...]) -> str:
-    """ "Re: X" o "Fwd: X", en una línea y sin duplicar el prefijo."""
+    """ "Re: X" o "Fwd: X", en una línea y sin duplicar el prefijo.
+
+    Sin asunto, el prefijo solo: Gmail exige que el asunto coincida para dejar
+    la respuesta en el hilo, y un "(sin asunto)" inventado no coincide.
+    """
     limpio = " ".join(asunto.split())
+    if not limpio:
+        return prefijo
     return limpio if limpio.lower().startswith(ya_lo_tiene) else f"{prefijo} {limpio}"
 
 
@@ -1684,7 +1710,7 @@ async def _responder_correo(correos: Correos, runtime: Runtime, id_correo: str, 
         "Responder este correo:",
         f"Para: {', '.join(destinos)}",
         f"Asunto: {asunto}",
-        f"(En respuesta a «{original.asunto}» de {original.remitente}, del {_cuando(original)}.)",
+        f"(En respuesta a «{_asunto(original)}» de {original.remitente}, del {_cuando(original)}.)",
     ]
     if remitente.lower() not in (d.lower() for d in destinos):
         # El truco clásico de phishing: un Reply-To que desvía la respuesta.
@@ -1747,7 +1773,7 @@ async def _reenviar_correo(
             "---------- Mensaje reenviado ----------",
             f"De: {original.remitente}",
             f"Fecha: {_cuando(original)}",
-            f"Asunto: {original.asunto}",
+            f"Asunto: {_asunto(original)}",
         ]
     )
     cuerpo = "\n\n".join(parte for parte in (nota_limpia, encabezado, texto_original) if parte)
@@ -1760,7 +1786,7 @@ async def _reenviar_correo(
         "Reenviar este correo:",
         f"Para: {', '.join(destinatarios)}",
         f"Asunto: {asunto}",
-        f"(El correo de {original.remitente}, «{original.asunto}», del {_cuando(original)}.)",
+        f"(El correo de {original.remitente}, «{_asunto(original)}», del {_cuando(original)}.)",
     ]
     if nota_limpia:
         lineas += ["", f"Tu nota: {nota_limpia}"]

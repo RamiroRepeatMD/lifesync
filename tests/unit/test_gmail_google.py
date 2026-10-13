@@ -543,3 +543,35 @@ async def test_comprobar_acceso_con_el_permiso_vencido_lo_dice() -> None:
 
     with pytest.raises(AutorizacionFallidaError):
         await gmail.comprobar_acceso(USUARIO)
+
+
+# --- Lo que encontró la integración de punta a punta (PB-036) -----------------------
+
+
+@pytest.mark.parametrize(
+    "correo_id",
+    ["../profile", "../../settings/filters", "m1/attachments/A1", "m1?format=raw", ""],
+    ids=["perfil", "fuera_de_users_me", "adjunto", "con_query", "vacio"],
+)
+async def test_un_id_que_no_es_de_gmail_no_sale_como_pedido(correo_id: str) -> None:
+    """El id lo pasa el modelo: armado en la URL tal cual, "../profile" pedía el perfil."""
+    pedidos: list[httpx.Request] = []
+    gmail = await _gmail(pedidos, _abierto(_parte("text/plain", "Hola")))
+
+    with pytest.raises(EntityNotFoundError):
+        await gmail.leer(USUARIO, correo_id)
+
+    assert pedidos == []
+
+
+async def test_un_correo_sin_asunto_queda_con_el_asunto_vacio() -> None:
+    """El "(sin asunto)" es de la pantalla: en la entidad viajaba al responder."""
+    mensaje = _mensaje(_parte("text/plain", "Mirá la foto"))
+    mensaje["payload"]["headers"] = [
+        h for h in mensaje["payload"]["headers"] if h["name"] != "Subject"
+    ]
+    gmail = await _gmail([], lambda _: httpx.Response(200, json=mensaje))
+
+    correo = await gmail.leer(USUARIO, "m1")
+
+    assert correo.asunto == ""

@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 882 tests + 22 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 927 tests + 22 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -438,8 +438,9 @@ uv run mypy src              # tipado estricto del código
 uv run mypy tests            # ... y de los tests (CI corre ambos)
 ```
 
-`tests/integration/` prueba caminos completos sin red: por ejemplo, de la herramienta del agente
-al adaptador de Google Calendar, asertando el cuerpo exacto que recibiría Google.
+`tests/integration/` prueba caminos completos sin red: del agente a los adaptadores de Google
+Calendar, Tasks y Gmail, asertando el pedido exacto que recibiría Google (en Gmail, hasta los
+encabezados del correo que sale y el texto entero de un reenvío).
 
 Hay además una suite de **evaluación del comportamiento del modelo** que llama a Gemini de
 verdad y gasta cuota — por eso es opt-in y CI la saltea:
@@ -570,7 +571,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-031 | Pruebas e integración de Tareas con el agente | ✅ (paginación y límites de Google corregidos) |
 | PB-034 | Responder y reenviar correos | ✅ (en el hilo; sin adjuntos ni "responder a todos") |
 | PB-035 | Confirmación + errores de envío (Gmail) | ✅ (dice si el correo salió; comprueba la cuenta antes del sí) |
-| PB-036 | Pruebas de integración Gmail | ⏳ |
+| PB-036 | Pruebas de integración Gmail | ✅ (de punta a punta; 3 bugs corregidos) |
 | PB-040 | Pruebas de las tools críticas | ⏳ |
 | PB-041 | Diagramas UML actualizados | ⏳ |
 | PB-037 · 038 | Drive: buscar, subir y compartir | ⏳ (Could) |

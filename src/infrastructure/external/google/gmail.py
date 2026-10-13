@@ -64,6 +64,10 @@ ENCABEZADOS_DE_LISTADO = ("From", "Subject")
 # Las fallas en las que el pedido nunca llegó a Gmail: lo que se quiso mandar
 # seguro no salió. Cualquier otra falla del POST deja el envío en duda.
 _SIN_CONEXION = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# La forma de un id de Gmail. El de `leer` lo pasa el modelo: armado tal cual
+# en la URL, "../profile" pedía `/users/me/profile` (bug de PB-036). Un id sin
+# esta forma no puede existir, así que ni se pide.
+_ID_DE_GMAIL = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 # Tupla y no lista: las tuplas son covariantes, y httpx tipa los valores
 # más amplio que `str`.
@@ -88,14 +92,16 @@ class GmailGoogle(Correos):
         ids = [
             m["id"]
             for m in lista.get("messages") or []
-            if isinstance(m, dict) and isinstance(m.get("id"), str)
+            if isinstance(m, dict)
+            and isinstance(m.get("id"), str)
+            and _ID_DE_GMAIL.fullmatch(m["id"])
         ]
         metadatos: Parametros = (
             ("format", "metadata"),
             *(("metadataHeaders", encabezado) for encabezado in ENCABEZADOS_DE_LISTADO),
         )
         mensajes = await asyncio.gather(
-            *(self._pedir(f"{BASE}/messages/{httpx.URL(i)}", token, metadatos) for i in ids)
+            *(self._pedir(_url_del_mensaje(i), token, metadatos) for i in ids)
         )
         correos = tuple(_a_correo(mensaje) for mensaje in mensajes)
         # Cantidades, nunca remitentes ni asuntos (RF-18).
@@ -103,9 +109,10 @@ class GmailGoogle(Correos):
         return correos
 
     async def leer(self, usuario_id: UUID, correo_id: str, *, completo: bool = False) -> Correo:
+        url = _url_del_mensaje(correo_id)  # antes que nada: lo pasa el modelo
         token = await self._credencial(usuario_id)
         mensaje = await self._pedir(
-            f"{BASE}/messages/{httpx.URL(correo_id)}",
+            url,
             token,
             (("format", "full"),),
             error_404=EntityNotFoundError("Ese correo no existe o ya no está."),
@@ -209,6 +216,20 @@ class GmailGoogle(Correos):
         return json_o_vacio(respuesta)
 
 
+def _url_del_mensaje(correo_id: str) -> str:
+    """La URL de un mensaje, sólo si el id tiene la forma de Gmail.
+
+    Raises:
+        EntityNotFoundError: Si no la tiene: un correo así no existe, y armar
+            la URL con él sacaría el pedido del recurso de los mensajes.
+    """
+    if not _ID_DE_GMAIL.fullmatch(correo_id):
+        # El largo y nada más: el id lo escribió el modelo, quizás inducido.
+        logger.warning("gmail.id_invalido", largo=len(correo_id))
+        raise EntityNotFoundError("Ese correo no existe o ya no está.")
+    return f"{BASE}/messages/{correo_id}"
+
+
 # --- De JSON a entidad ---------------------------------------------------------
 
 
@@ -228,7 +249,9 @@ def _a_correo(mensaje: dict[str, Any], con_cuerpo: bool = False, completo: bool 
     return Correo(
         id=str(mensaje.get("id") or ""),
         remitente=_remitente(encabezados.get("from", "")),
-        asunto=_decodificar_encabezado(encabezados.get("subject", "")) or "(sin asunto)",
+        # Vacío si no tiene: "(sin asunto)" lo pone quien lo muestra. En la
+        # entidad viajaba al responder: "Re: (sin asunto)" (bug de PB-036).
+        asunto=_decodificar_encabezado(encabezados.get("subject", "")),
         fecha=_fecha(mensaje.get("internalDate")),
         no_leido="UNREAD" in (mensaje.get("labelIds") or []),
         fragmento=fragmento,

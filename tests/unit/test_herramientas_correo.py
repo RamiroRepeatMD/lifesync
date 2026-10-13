@@ -636,3 +636,68 @@ async def test_con_acceso_se_comprueba_y_recien_ahi_se_pide_confirmacion() -> No
 
     assert correos.accesos_comprobados == 1
     assert "__interrupt__" in estado
+
+
+# --- Direcciones y asuntos (PB-036) -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "direccion",
+    [
+        "ana+facturas@ejemplo.com",
+        "Ana.Gomez@Sub.Ejemplo.com.ar",
+        "o'brien@ejemplo.ie",
+        "persona@xn--bcher-kva.example",
+        "a_b-c@mail-1.ejemplo.co",
+    ],
+    ids=["con_mas", "subdominio_y_mayusculas", "apostrofo", "punycode", "guiones"],
+)
+async def test_las_direcciones_validas_llegan_a_la_pausa(direccion: str) -> None:
+    estado, _ = await _pedir_envio(CorreosFalsos(), **{**ENVIO, "para": direccion})
+
+    assert f"Para: {direccion}" in estado["__interrupt__"][0].value["resumen"]
+
+
+@pytest.mark.parametrize(
+    ("direccion", "motivo"),
+    [
+        ("josé@ejemplo.com", "tildes o eñes"),
+        ("ana@ejémplo.com", "tildes o eñes"),
+        ("ana@ejemplo..com", "no parece una dirección"),
+        ("ana.@ejemplo.com", "no parece una dirección"),
+        (".ana@ejemplo.com", "no parece una dirección"),
+        ("ana@ejemplo.c", "no parece una dirección"),
+        ("ana@-ejemplo.com", "no parece una dirección"),
+    ],
+    ids=[
+        "tilde_local",
+        "tilde_dominio",
+        "doble_punto",
+        "punto_final",
+        "punto_inicial",
+        "tld_de_una_letra",
+        "guion_inicial",
+    ],
+)
+async def test_las_direcciones_que_gmail_no_acepta_no_llegan_a_la_pausa(
+    direccion: str, motivo: str
+) -> None:
+    """Pasaban la validación: con tilde, Python las codificaba en RFC 2047 y Gmail las rechaza."""
+    correos = CorreosFalsos()
+
+    estado, _ = await _pedir_envio(correos, **{**ENVIO, "para": direccion})
+
+    assert "__interrupt__" not in estado
+    respuesta = [m for m in estado["messages"] if isinstance(m, ToolMessage)][-1]
+    assert motivo in str(respuesta.content)
+    assert correos.enviados == []
+
+
+async def test_un_correo_sin_asunto_se_muestra_como_tal() -> None:
+    correos = CorreosFalsos((_factura(asunto=""),))
+
+    listado = await _usar(correos, "buscar_correos")
+    lectura = await _usar(correos, "leer_correo", id_correo="m-factura")
+
+    assert "«(sin asunto)»" in listado
+    assert "Asunto: (sin asunto)" in lectura
