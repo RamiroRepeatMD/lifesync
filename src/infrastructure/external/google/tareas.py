@@ -14,6 +14,9 @@ Decisiones que conviene conocer:
 - **`showCompleted=false` al listar**: pendientes significa pendientes. La
   API además esconde las completadas viejas detrás de `showHidden`, así que
   el filtro explícito evita depender de ese matiz.
+- **Se sigue `nextPageToken`** (PB-031): la API devuelve como mucho 100 por
+  página. Sin paginar, con más de 100 pendientes las que quedaban afuera no se
+  podían ni completar ni borrar: el bot decía "no encontré" de algo que existía.
 """
 
 from __future__ import annotations
@@ -39,9 +42,12 @@ logger = structlog.get_logger(__name__)
 
 BASE = "https://tasks.googleapis.com/tasks/v1"
 LISTA = "@default"
-# La API pagina de a 20 por defecto; con esto una lista personal entra en un
-# solo viaje. Paginar de verdad queda para cuando alguien tenga más.
-MAXIMO_DE_TAREAS = 100
+# La API pagina de a 20 por defecto y acepta hasta 100: con el máximo, una
+# lista personal entra casi siempre en un solo viaje.
+TAREAS_POR_PAGINA = 100
+# Tope de páginas por consulta (1000 tareas): una lista enorme no puede dejar
+# a la persona esperando ni gastar la cuota en un solo mensaje.
+MAXIMO_DE_PAGINAS = 10
 
 
 class TareasGoogle(Tareas):
@@ -53,13 +59,24 @@ class TareasGoogle(Tareas):
 
     async def pendientes(self, usuario_id: UUID) -> tuple[Tarea, ...]:
         token = await self._credencial(usuario_id)
-        datos = await self._pedir(
-            "GET",
-            f"{BASE}/lists/{LISTA}/tasks",
-            token,
-            params={"showCompleted": "false", "maxResults": str(MAXIMO_DE_TAREAS)},
-        )
-        tareas = [_a_tarea(item) for item in datos.get("items", []) if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        pagina: str | None = None
+        for _ in range(MAXIMO_DE_PAGINAS):
+            params = {"showCompleted": "false", "maxResults": str(TAREAS_POR_PAGINA)}
+            if pagina is not None:
+                params["pageToken"] = pagina
+            datos = await self._pedir("GET", f"{BASE}/lists/{LISTA}/tasks", token, params=params)
+            items += [item for item in datos.get("items", []) if isinstance(item, dict)]
+            siguiente = datos.get("nextPageToken")
+            if not isinstance(siguiente, str) or not siguiente:
+                break
+            pagina = siguiente
+        else:
+            # Quedaron más páginas: se trabaja con lo leído, pero que conste.
+            logger.warning(
+                "tasks.listado_truncado", usuario_id=str(usuario_id), cantidad=len(items)
+            )
+        tareas = [_a_tarea(item) for item in items]
         # La API ordena por posición manual; para conversar sirve más el
         # vencimiento: primero lo que vence antes, al final lo sin fecha.
         tareas.sort(key=lambda t: (t.vencimiento is None, t.vencimiento or date.max))

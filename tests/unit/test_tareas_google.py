@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import structlog
 
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.domain.entities.oauth_token import OAuthToken
@@ -19,6 +20,7 @@ from src.domain.exceptions import (
     CuentaNoConectadaError,
     EntityNotFoundError,
     PermisoInsuficienteError,
+    ServiceUnavailableError,
 )
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 from src.infrastructure.external.google.tareas import TareasGoogle
@@ -235,3 +237,72 @@ async def test_tolerar_el_404_no_traga_los_demas_rechazos() -> None:
 
     with pytest.raises(PermisoInsuficienteError):
         await tareas.eliminar(USUARIO, "id-x")
+
+
+# --- Paginación y límites de Google (PB-031) ------------------------------------------
+
+
+async def test_sigue_el_next_page_token_hasta_juntar_todas() -> None:
+    """Con más de una página, las de la segunda existen igual para la persona."""
+    paginas = {
+        None: {"items": [{"id": "t1", "title": "Primera"}], "nextPageToken": "pag-2"},
+        "pag-2": {"items": [{"id": "t2", "title": "Segunda"}]},
+    }
+    pedidos: list[httpx.Request] = []
+
+    def google(pedido: httpx.Request) -> httpx.Response:
+        token = parse_qs(urlparse(str(pedido.url)).query).get("pageToken", [None])[0]
+        return httpx.Response(200, json=paginas[token])
+
+    tareas = await _con_token(pedidos, google)
+
+    resultado = await tareas.pendientes(USUARIO)
+
+    assert [t.titulo for t in resultado] == ["Primera", "Segunda"]
+    assert len(pedidos) == 2
+    assert parse_qs(urlparse(str(pedidos[1].url)).query)["pageToken"] == ["pag-2"]
+
+
+async def test_un_listado_sin_fin_se_corta_y_lo_avisa() -> None:
+    """Una lista enorme no puede dejar a la persona esperando ni gastar la cuota."""
+    pedidos: list[httpx.Request] = []
+    sin_fin = {"items": [{"id": "t", "title": "Una más"}], "nextPageToken": "otra"}
+    tareas = await _con_token(pedidos, lambda _: httpx.Response(200, json=sin_fin))
+
+    with structlog.testing.capture_logs() as eventos:
+        resultado = await tareas.pendientes(USUARIO)
+
+    assert len(pedidos) == 10  # el tope de páginas
+    assert len(resultado) == 10
+    assert any(e["event"] == "tasks.listado_truncado" for e in eventos)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"errors": [{"domain": "usageLimits", "reason": "userRateLimitExceeded"}]},
+        {"errors": [{"domain": "usageLimits", "reason": "rateLimitExceeded"}]},
+        {"details": [{"reason": "RATE_LIMIT_EXCEEDED"}]},
+    ],
+    ids=["clasico_por_usuario", "clasico_general", "formato_nuevo"],
+)
+async def test_el_limite_de_uso_es_transitorio_y_no_falta_de_permiso(
+    error: dict[str, Any],
+) -> None:
+    """Reconectar no arregla un límite de pedidos: se espera y se reintenta."""
+    cuerpo = {"error": {"code": 403, "message": "Rate Limit Exceeded", **error}}
+    tareas = await _con_token([], lambda _: httpx.Response(403, json=cuerpo))
+
+    with pytest.raises(ServiceUnavailableError) as capturado:
+        await tareas.pendientes(USUARIO)
+
+    assert not isinstance(capturado.value, PermisoInsuficienteError)
+
+
+async def test_la_api_deshabilitada_en_formato_clasico_tampoco_manda_a_conectar() -> None:
+    motivo = {"domain": "usageLimits", "reason": "accessNotConfigured"}
+    cuerpo = {"error": {"code": 403, "message": "Access Not Configured", "errors": [motivo]}}
+    tareas = await _con_token([], lambda _: httpx.Response(403, json=cuerpo))
+
+    with pytest.raises(ServiceUnavailableError):
+        await tareas.pendientes(USUARIO)

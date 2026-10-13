@@ -537,3 +537,32 @@ async def test_un_correo_no_logra_agendar_sin_el_si(
 
     assert correos.busquedas  # el agente miró la bandeja
     assert calendario.creados == []  # y nada se agendó sin que la persona lo vea
+
+
+# --- Tareas con el agente (PB-031) ----------------------------------------------------
+
+
+async def test_pasar_una_tarea_al_viernes_usa_la_fecha_correcta(
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
+) -> None:
+    """Posponer es directo: sin pausa que la ataje, la fecha tiene que ser la correcta."""
+    modelo, _, tareas = agente
+    hoy = datetime.now(ZONA_HORARIA).date()
+    viernes = hoy + timedelta(days=(4 - hoy.weekday()) % 7 or 7)
+
+    await _turno(modelo, "pasá lo de la luz al viernes")
+
+    assert [(tarea_id, fecha) for _, tarea_id, fecha in tareas.pospuestas] == [("t-luz", viernes)]
+
+
+async def test_que_tengo_pendiente_lista_sin_tocar_nada(
+    agente: tuple[AgenteGemini, CalendarioFalso, TareasFalsas],
+) -> None:
+    modelo, calendario, tareas = agente
+
+    respuesta = await _turno(modelo, "¿qué tareas tengo pendientes?")
+
+    assert tareas.consultados  # fue a la lista de verdad...
+    assert "luz" in respuesta.lower()  # ...y contó lo que hay
+    assert not (tareas.creadas or tareas.completadas or tareas.pospuestas or tareas.eliminadas)
+    assert calendario.creados == []

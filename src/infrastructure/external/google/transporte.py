@@ -1,10 +1,10 @@
 """Traducción compartida de los rechazos HTTP de las APIs de Google (PB-028).
 
-Calendar y Tasks fallan igual y significan lo mismo: 401 es una credencial
-que Google ya no acepta, 403 es un token sin el scope necesario (una cuenta
-conectada antes de que ese permiso se pidiera), y el resto es el proveedor
-sin poder responder. Tener UNA traducción evita que los adaptadores
-diverjan en cómo cuentan el mismo problema.
+Calendar, Tasks y Gmail fallan igual y significan lo mismo: 401 es una
+credencial que Google ya no acepta, y el resto es el proveedor sin poder
+responder. El 403 tiene TRES causas con remedios distintos (ver
+`traducir_rechazo`). Tener UNA traducción evita que los adaptadores diverjan
+en cómo cuentan el mismo problema.
 """
 
 from __future__ import annotations
@@ -21,6 +21,20 @@ from src.domain.exceptions import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Cómo marca Google cada 403. El formato clásico pone el motivo en
+# `errors[].reason` y el nuevo en `details[].reason` (ErrorInfo): se miran los
+# dos. Los motivos son contrato; el texto del mensaje puede cambiar.
+_API_DESHABILITADA = frozenset({"SERVICE_DISABLED", "accessNotConfigured"})
+_LIMITE_DE_USO = frozenset(
+    {
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "dailyLimitExceeded",
+        "quotaExceeded",
+        "RATE_LIMIT_EXCEEDED",
+    }
+)
 
 
 def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
@@ -40,21 +54,27 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
         )
 
     if respuesta.status_code == httpx.codes.FORBIDDEN:
-        # Dos 403 con remedios distintos, y confundirlos manda a la persona a
+        # Tres 403 con remedios distintos, y confundirlos manda a la persona a
         # /conectar en vano (pasó el 15/09 con Tasks):
         #
         # - SERVICE_DISABLED: la API no está habilitada en el proyecto de
         #   Cloud Console. Lo arregla EL OPERADOR en la consola; reconectar
         #   no cambia nada. El log fuerte trae el mensaje de Google, que
         #   incluye el link exacto para habilitarla.
+        # - Límite de uso (PB-031): demasiados pedidos en poco tiempo. Se
+        #   arregla esperando, no reconectando: es un "probá en un minuto".
         # - El resto: al token le falta el scope (cuenta conectada antes de
         #   que se pidiera). Eso sí lo arregla la persona con /conectar.
         motivo = motivo_de(respuesta)
-        if _es_api_deshabilitada(respuesta):
+        motivos = _motivos(respuesta)
+        if motivos & _API_DESHABILITADA:
             logger.error(f"{servicio}.api_deshabilitada", motivo=motivo)
             raise ServiceUnavailableError(
                 f"La API de {servicio} no está habilitada en el proyecto de Google Cloud."
             )
+        if motivos & _LIMITE_DE_USO:
+            logger.warning(f"{servicio}.limite_de_uso", motivo=motivo)
+            raise ServiceUnavailableError(f"Google limitó los pedidos a {servicio} por un rato.")
         logger.warning(f"{servicio}.permiso_insuficiente", motivo=motivo)
         raise PermisoInsuficienteError(f"El token no tiene el permiso que {servicio} necesita.")
 
@@ -66,19 +86,17 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
     raise ServiceUnavailableError("Google no pudo responder la consulta.")
 
 
-def _es_api_deshabilitada(respuesta: httpx.Response) -> bool:
-    """Detecta el 403 de "API not enabled" por su marca estable.
-
-    Google lo señala con `reason: SERVICE_DISABLED` en los detalles del
-    error (el texto del mensaje puede cambiar; la razón es contrato).
-    """
+def _motivos(respuesta: httpx.Response) -> set[str]:
+    """Los `reason` del cuerpo de error, en el formato clásico y en el nuevo."""
     error = json_o_vacio(respuesta).get("error")
     if not isinstance(error, dict):
-        return False
-    for detalle in error.get("details") or []:
-        if isinstance(detalle, dict) and detalle.get("reason") == "SERVICE_DISABLED":
-            return True
-    return False
+        return set()
+    motivos: set[str] = set()
+    for lista in (error.get("errors"), error.get("details")):
+        for item in lista if isinstance(lista, list) else []:
+            if isinstance(item, dict) and isinstance(item.get("reason"), str):
+                motivos.add(item["reason"])
+    return motivos
 
 
 def motivo_de(respuesta: httpx.Response) -> str | None:

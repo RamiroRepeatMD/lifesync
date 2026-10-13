@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 814 tests + 17 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 834 tests + 19 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -444,8 +444,9 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 17 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 19 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
+posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
 recurrentes, recordatorios ("en 20 minutos" guarda la hora correcta; "avisame a las…" no es
 un evento), "el último correo" con la bandeja cambiando, y los intentos de inyección por
@@ -556,6 +557,18 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-030 | Recordatorios proactivos básicos | ✅ (hasta 24 h; plantillas de Meta al Sprint 5) |
 | PB-032 | Gmail: enviar correos | ✅ (adjuntos replanificados al Sprint 5) |
 | PB-033 | Gmail: listar, buscar y leer correos | ✅ |
+
+**Sprint 5** (entrega 14/10/2026) – Gmail completo + pruebas + documentación (Drive como Could).
+
+| Tarea | Descripción | Estado |
+|-------|-------------|--------|
+| PB-031 | Pruebas e integración de Tareas con el agente | ✅ (paginación y límites de Google corregidos) |
+| PB-034 | Responder y reenviar correos | ⏳ |
+| PB-035 | Confirmación + errores de envío (Gmail) | ⏳ |
+| PB-036 | Pruebas de integración Gmail | ⏳ |
+| PB-040 | Pruebas de las tools críticas | ⏳ |
+| PB-041 | Diagramas UML actualizados | ⏳ |
+| PB-037 · 038 | Drive: buscar, subir y compartir | ⏳ (Could) |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 

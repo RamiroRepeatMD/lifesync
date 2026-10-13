@@ -439,6 +439,22 @@ async def test_un_403_al_escribir_pide_reconectar() -> None:
     assert "/conectar" in capturado.value.mensaje_usuario
 
 
+async def test_un_403_por_limite_de_uso_no_pide_reconectar() -> None:
+    """La traducción de los 403 es compartida (PB-031): vale también para Calendar."""
+    from src.domain.entities.evento import Evento
+    from src.domain.exceptions import PermisoInsuficienteError, ServiceUnavailableError
+
+    motivo = {"domain": "usageLimits", "reason": "rateLimitExceeded"}
+    cuerpo = {"error": {"code": 403, "message": "Rate Limit Exceeded", "errors": [motivo]}}
+    calendario = await _con_token([], lambda _: httpx.Response(403, json=cuerpo))
+
+    inicio = datetime(2026, 9, 5, 13, 0, tzinfo=UTC)
+    with pytest.raises(ServiceUnavailableError) as capturado:
+        await calendario.crear_evento(USUARIO, Evento(titulo="X", inicio=inicio))
+
+    assert not isinstance(capturado.value, PermisoInsuficienteError)
+
+
 async def test_un_401_al_escribir_es_credencial_rechazada() -> None:
     from src.domain.entities.evento import Evento
 
