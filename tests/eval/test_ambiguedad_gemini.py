@@ -28,7 +28,12 @@ from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
 from src.domain.entities.tarea import Tarea
-from src.domain.exceptions import AgenteNoDisponibleError, CuotaDeAgenteAgotadaError
+from src.domain.exceptions import (
+    AgenteNoDisponibleError,
+    CuotaDeAgenteAgotadaError,
+    EnvioInciertoError,
+    ServiceUnavailableError,
+)
 from src.infrastructure.config.settings import Environment, Settings
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import (
@@ -615,3 +620,59 @@ async def test_responder_a_ana_propone_la_respuesta_en_su_hilo(
     assert "Re: ¿Nos vemos esta semana?" in respuesta  # en su hilo
     assert "jueves" in respuesta.lower()  # con lo que la persona quería decir
     assert correos.enviados == []
+
+
+# --- Errores de envío (PB-035) ------------------------------------------------------
+#
+# La herramienta ya dice si el correo salió; lo que se evalúa es que el modelo no
+# lo desdibuje al contárselo a la persona, y que ante la duda no lo repita.
+
+PEDIDO_DE_ENVIO = (
+    "mandale un mail a juan@ejemplo.com con asunto 'Llego tarde' diciendo que hoy "
+    "llego 15 minutos tarde"
+)
+
+
+def _agente_cuyo_envio_falla(falla: Exception) -> AgenteGemini:
+    """Agente real; el correo se confirma, y después del sí falla al salir."""
+    settings = Settings(
+        _env_file=None,
+        environment=Environment.TESTING,
+        google_api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    return crear_agente_gemini(settings, None, None, CorreosFalsos(fallar_al_enviar=falla))
+
+
+async def test_un_envio_en_duda_no_se_da_por_hecho_ni_se_repite() -> None:
+    """Gmail no lo confirmó: manda a revisar Enviados y no lo vuelve a proponer."""
+    modelo = _agente_cuyo_envio_falla(EnvioInciertoError("sin respuesta"))
+    hilo = uuid4()
+
+    pregunta = await _turno_en(modelo, hilo, PEDIDO_DE_ENVIO)
+    assert SENAL_DE_CONFIRMACION in pregunta  # se llegó al envío: lo de abajo no es en vano
+    respuesta = (await _turno_en(modelo, hilo, "sí")).lower()
+
+    assert "enviados" in respuesta
+    assert SENAL_DE_CONFIRMACION.lower() not in respuesta  # no lo propuso de nuevo
+    assert not respuesta.startswith(("listo", "¡listo", "hecho", "¡hecho", "enviado", "¡enviado"))
+
+
+async def test_un_envio_que_no_salio_se_cuenta_como_tal() -> None:
+    """Seguro no salió: lo dice, y no manda a revisar Enviados en vano."""
+    modelo = _agente_cuyo_envio_falla(ServiceUnavailableError("no se pudo contactar a Gmail"))
+    hilo = uuid4()
+
+    pregunta = await _turno_en(modelo, hilo, PEDIDO_DE_ENVIO)
+    assert SENAL_DE_CONFIRMACION in pregunta
+    respuesta = (await _turno_en(modelo, hilo, "sí")).lower()
+
+    no_salio = (
+        "no salió",
+        "no se envió",
+        "no se pudo enviar",
+        "no pude",
+        "no lo pude",
+        "no se mandó",
+    )
+    assert any(frase in respuesta for frase in no_salio)
+    assert "enviados" not in respuesta

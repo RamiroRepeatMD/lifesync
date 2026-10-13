@@ -41,6 +41,8 @@ from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
     EntityNotFoundError,
+    EnvioInciertoError,
+    EnvioRechazadoError,
     InfrastructureError,
     InvalidValueError,
     PermisoInsuficienteError,
@@ -1568,11 +1570,18 @@ async def _enviar_correo(
     if len(resumen) > MAX_CARACTERES_DE_LA_CONFIRMACION:
         return "El correo es demasiado largo para mostrártelo entero antes de enviarlo: acortalo."
 
+    # No se pide el sí de algo que no puede salir (PB-035). Responder y
+    # reenviar ya lo garantizan al leer el original; acá no hay nada que leer.
+    try:
+        await correos.comprobar_acceso(usuario_id)
+    except _FALLOS_DE_GOOGLE as exc:
+        return _texto_de_fallo(exc, "preparar el correo")
+
     if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se envió nada."
 
     saliente = CorreoSaliente(destinatarios, asunto_limpio, cuerpo)
-    error = await _mandar(correos, usuario_id, saliente, "enviar el correo")
+    error = await _mandar(correos, usuario_id, saliente)
     if error is not None:
         return error
 
@@ -1599,21 +1608,34 @@ async def _el_original(
         return _texto_de_fallo(exc, "abrir el correo")
 
 
-async def _mandar(
-    correos: Correos, usuario_id: UUID, saliente: CorreoSaliente, accion: str
-) -> str | None:
-    """Envía. Devuelve el texto para la persona si falló, o None si salió."""
+async def _mandar(correos: Correos, usuario_id: UUID, saliente: CorreoSaliente) -> str | None:
+    """Envía. Devuelve el texto para la persona si falló, o None si salió.
+
+    El texto arranca por lo que la persona necesita saber (PB-035): si el
+    correo salió. Un "no salió" se puede volver a pedir; un "no sé" manda a
+    revisar Enviados, porque reintentar a ciegas podría mandarlo dos veces y un
+    correo no se des-envía. Qué es cada cosa lo decide el adaptador: sólo
+    `EnvioInciertoError` deja la duda.
+    """
     try:
         await correos.enviar(usuario_id, saliente)
-    except ServiceUnavailableError:
-        # El resultado es incierto: el correo pudo haber salido. Reintentar a
-        # ciegas podría mandarlo dos veces, y un correo no se des-envía.
+    except EnvioInciertoError:
         return (
-            "No pude confirmar que el correo haya salido. Revisá tu carpeta Enviados "
-            "antes de pedírmelo de nuevo, así no sale dos veces."
+            "No sé si el correo salió: Gmail no llegó a confirmármelo. Revisá tu carpeta "
+            "Enviados antes de pedírmelo de nuevo, así no sale dos veces."
         )
-    except _FALLOS_DE_GOOGLE as exc:
-        return _texto_de_fallo(exc, accion)
+    except EnvioRechazadoError:
+        # Reintentar da lo mismo: "probá en un rato" sería mentirle.
+        return (
+            "Gmail rechazó el correo, así que no salió. Revisá que las direcciones estén "
+            "bien y pedímelo de nuevo."
+        )
+    except (CuentaNoConectadaError, AutorizacionFallidaError) as exc:
+        # El remedio de la cuenta es el de siempre (/conectar).
+        return f"El correo no salió. {_texto_de_fallo(exc, 'mandarlo')}"
+    except ServiceUnavailableError:
+        # No se pudo conectar, o Gmail lo frenó por un límite: seguro no salió.
+        return "El correo no salió: Gmail no lo tomó en este momento. Probá de nuevo en un rato."
     return None
 
 
@@ -1687,7 +1709,7 @@ async def _responder_correo(correos: Correos, runtime: Runtime, id_correo: str, 
         en_respuesta_a=original.mensaje_id,
         referencias=original.referencias,
     )
-    error = await _mandar(correos, usuario_id, saliente, "responder el correo")
+    error = await _mandar(correos, usuario_id, saliente)
     if error is not None:
         return error
 
@@ -1756,9 +1778,7 @@ async def _reenviar_correo(
     if not _confirmar(runtime, resumen):
         return "La persona lo canceló. No se envió nada."
 
-    error = await _mandar(
-        correos, usuario_id, CorreoSaliente(destinatarios, asunto, cuerpo), "reenviar el correo"
-    )
+    error = await _mandar(correos, usuario_id, CorreoSaliente(destinatarios, asunto, cuerpo))
     if error is not None:
         return error
 

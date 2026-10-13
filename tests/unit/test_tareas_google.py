@@ -299,6 +299,26 @@ async def test_el_limite_de_uso_es_transitorio_y_no_falta_de_permiso(
     assert not isinstance(capturado.value, PermisoInsuficienteError)
 
 
+@pytest.mark.parametrize(
+    "cuerpo",
+    [
+        {"error": {"code": 429, "errors": [{"reason": "rateLimitExceeded"}]}},
+        {},
+    ],
+    ids=["con_motivo", "sin_cuerpo"],
+)
+async def test_un_429_es_limite_de_uso_y_no_un_rechazo(cuerpo: dict[str, Any]) -> None:
+    """429 es "demasiados pedidos" por definición: Gmail lo usa para los límites de envío."""
+    tareas = await _con_token([], lambda _: httpx.Response(429, json=cuerpo))
+
+    with structlog.testing.capture_logs() as eventos, pytest.raises(ServiceUnavailableError):
+        await tareas.pendientes(USUARIO)
+
+    nombres = [e["event"] for e in eventos]
+    assert "tasks.limite_de_uso" in nombres
+    assert "tasks.rechazado" not in nombres  # no es un error nuestro para alertar
+
+
 async def test_la_api_deshabilitada_en_formato_clasico_tampoco_manda_a_conectar() -> None:
     motivo = {"domain": "usageLimits", "reason": "accessNotConfigured"}
     cuerpo = {"error": {"code": 403, "message": "Access Not Configured", "errors": [motivo]}}

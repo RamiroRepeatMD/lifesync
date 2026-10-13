@@ -26,6 +26,8 @@ from src.domain.exceptions import (
     DomainError,
     EncryptionError,
     EntityNotFoundError,
+    EnvioInciertoError,
+    EnvioRechazadoError,
     InfrastructureError,
     InvalidValueError,
     LifeSyncError,
@@ -51,6 +53,10 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     # DomainError, así que sin entrada propia el recorrido del MRO las dejaría
     # en 400 y una caída de la base se reportaría como "pediste algo mal".
     ServiceUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    # Un envío de correo que Gmail no confirmó o rechazó (PB-035): falla del
+    # proveedor, como su madre. Explícitas por la regla de la casa.
+    EnvioInciertoError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    EnvioRechazadoError: status.HTTP_503_SERVICE_UNAVAILABLE,
     # El modelo no contestó: es una dependencia externa caída o lenta, no un
     # bug nuestro, así que 503 y no 500 (PB-005). La falta de cuota va también
     # a 503 y no a 429: el que se quedó sin cupo somos nosotros contra Google,

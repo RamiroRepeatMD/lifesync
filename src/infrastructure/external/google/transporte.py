@@ -53,6 +53,13 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
             "Google rechazó la credencial. Hay que volver a conectar la cuenta."
         )
 
+    if respuesta.status_code == httpx.codes.TOO_MANY_REQUESTS:
+        # El otro formato del límite de uso (PB-035): Google también lo marca
+        # con 429, y Gmail lo usa para los límites de envío. Mismo remedio que
+        # el 403 por límite: esperar, no reconectar.
+        logger.warning(f"{servicio}.limite_de_uso", motivo=motivo_de(respuesta))
+        raise ServiceUnavailableError(f"Google limitó los pedidos a {servicio} por un rato.")
+
     if respuesta.status_code == httpx.codes.FORBIDDEN:
         # Tres 403 con remedios distintos, y confundirlos manda a la persona a
         # /conectar en vano (pasó el 15/09 con Tasks):

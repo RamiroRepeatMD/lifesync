@@ -19,6 +19,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel
 
 from src.domain.entities.correo import Correo
+from src.domain.exceptions import (
+    AutorizacionFallidaError,
+    CuentaNoConectadaError,
+    EnvioInciertoError,
+    EnvioRechazadoError,
+    PermisoInsuficienteError,
+    ServiceUnavailableError,
+)
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import construir_grafo
 from src.infrastructure.llm.herramientas import (
@@ -494,3 +502,137 @@ async def test_reenviar_a_una_direccion_invalida_no_llega_a_la_pausa() -> None:
 
     assert "__interrupt__" not in estado
     assert correos.enviados == []
+
+
+# --- Errores de envío (PB-035): lo que la persona necesita saber es si salió ---------
+
+ENVIOS = [
+    ("enviar_correo", ENVIO),
+    ("responder_correo", RESPUESTA),
+    ("reenviar_correo", REENVIO),
+]
+NOMBRES_DE_ENVIOS = ["enviar", "responder", "reenviar"]
+
+
+def _que_falla_al_enviar(falla: Exception) -> CorreosFalsos:
+    """Una bandeja con el original (responder y reenviar lo leen) y un envío que falla."""
+    original = _factura(hilo_id="hilo-1", mensaje_id="<m1@edenor.com>")
+    return CorreosFalsos((original,), fallar_al_enviar=falla)
+
+
+async def _aprobar(
+    correos: CorreosFalsos, herramienta: str, **args: Any
+) -> tuple[str, ContextoDeAgente]:
+    """Pide el envío, dice que sí y devuelve lo que vio el modelo y el contexto del turno."""
+    from langgraph.types import Command
+
+    _, grafo = await _pedir(correos, herramienta, **args)
+    contexto = ContextoDeAgente(usuario_id=USUARIO)
+    estado = await grafo.ainvoke(
+        Command(resume={"aprobado": True}),
+        config={"configurable": {"thread_id": "hilo"}},
+        context=contexto,
+    )
+    resultado = [m for m in estado["messages"] if isinstance(m, ToolMessage)][-1]
+    return str(resultado.content), contexto
+
+
+@pytest.mark.parametrize(("herramienta", "args"), ENVIOS, ids=NOMBRES_DE_ENVIOS)
+async def test_un_envio_en_duda_manda_a_revisar_enviados(
+    herramienta: str, args: dict[str, str]
+) -> None:
+    """Gmail no lo confirmó: pudo haber salido, así que no se invita a repetirlo a ciegas."""
+    correos = _que_falla_al_enviar(EnvioInciertoError("sin respuesta"))
+
+    texto, _ = await _aprobar(correos, herramienta, **args)
+
+    assert texto.startswith("No sé si el correo salió")
+    assert "Enviados" in texto
+
+
+@pytest.mark.parametrize(("herramienta", "args"), ENVIOS, ids=NOMBRES_DE_ENVIOS)
+async def test_un_envio_que_no_salio_lo_dice_y_no_manda_a_enviados(
+    herramienta: str, args: dict[str, str]
+) -> None:
+    """Un corte al conectar o un límite de Gmail: seguro no salió, se puede volver a pedir."""
+    correos = _que_falla_al_enviar(ServiceUnavailableError("no se pudo contactar a Gmail"))
+
+    texto, _ = await _aprobar(correos, herramienta, **args)
+
+    assert texto.startswith("El correo no salió")
+    assert "Enviados" not in texto
+
+
+@pytest.mark.parametrize(("herramienta", "args"), ENVIOS, ids=NOMBRES_DE_ENVIOS)
+async def test_un_rechazo_de_gmail_dice_que_no_salio_y_que_revise_los_datos(
+    herramienta: str, args: dict[str, str]
+) -> None:
+    """Reintentar igual da lo mismo: "probá en un rato" sería mentirle."""
+    correos = _que_falla_al_enviar(EnvioRechazadoError("Invalid To header"))
+
+    texto, _ = await _aprobar(correos, herramienta, **args)
+
+    assert texto.startswith("Gmail rechazó el correo, así que no salió")
+    assert "direcciones" in texto
+    assert "Enviados" not in texto
+
+
+@pytest.mark.parametrize(
+    "falla",
+    [
+        AutorizacionFallidaError("invalid_grant"),
+        PermisoInsuficienteError("sin gmail.send"),
+        CuentaNoConectadaError(),
+    ],
+    ids=["permiso_vencido", "sin_el_scope", "sin_cuenta"],
+)
+async def test_un_problema_de_la_cuenta_al_enviar_dice_que_no_salio_y_manda_a_conectar(
+    falla: Exception,
+) -> None:
+    correos = _que_falla_al_enviar(falla)
+
+    texto, _ = await _aprobar(correos, "enviar_correo", **ENVIO)
+
+    assert texto.startswith("El correo no salió")
+    assert "/conectar" in texto
+
+
+async def test_un_envio_fallido_no_entra_en_la_bitacora() -> None:
+    """Si el modelo falla después, PB-026 cuenta lo que se hizo: esto NO se hizo."""
+    _, exitoso = await _aprobar(CorreosFalsos(), "enviar_correo", **ENVIO)
+    _, fallido = await _aprobar(
+        _que_falla_al_enviar(EnvioInciertoError("sin respuesta")), "enviar_correo", **ENVIO
+    )
+
+    assert exitoso.acciones_realizadas  # el camino feliz sí se anota: no es en el vacío
+    assert fallido.acciones_realizadas == []
+
+
+# --- Comprobar la cuenta ANTES de pedir el sí (PB-035) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "falla",
+    [CuentaNoConectadaError(), AutorizacionFallidaError("invalid_grant")],
+    ids=["sin_cuenta", "permiso_vencido"],
+)
+async def test_sin_acceso_a_la_cuenta_no_se_pide_confirmacion(falla: Exception) -> None:
+    """Confirmar algo que no puede salir es una pregunta en vano."""
+    correos = CorreosFalsos(fallar_con=falla)
+
+    estado, _ = await _pedir_envio(correos, **ENVIO)
+
+    assert "__interrupt__" not in estado
+    assert correos.accesos_comprobados == 1
+    respuesta = [m for m in estado["messages"] if isinstance(m, ToolMessage)][-1]
+    assert "/conectar" in str(respuesta.content)
+    assert correos.enviados == []
+
+
+async def test_con_acceso_se_comprueba_y_recien_ahi_se_pide_confirmacion() -> None:
+    correos = CorreosFalsos()
+
+    estado, _ = await _pedir_envio(correos, **ENVIO)
+
+    assert correos.accesos_comprobados == 1
+    assert "__interrupt__" in estado

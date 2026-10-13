@@ -384,15 +384,26 @@ class CorreosFalsos(Correos):
     """Doble del puerto `Correos` (PB-033): una bandeja fija, sin filtrar."""
 
     def __init__(
-        self, correos: tuple[Correo, ...] = (), fallar_con: Exception | None = None
+        self,
+        correos: tuple[Correo, ...] = (),
+        fallar_con: Exception | None = None,
+        fallar_al_enviar: Exception | None = None,
     ) -> None:
         self.bandeja = correos
         self.fallar_con = fallar_con
+        # Sólo falla el envío (PB-035): responder y reenviar leen el original antes.
+        self.fallar_al_enviar = fallar_al_enviar
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidos: list[tuple[UUID, str]] = []
         # Los ids que se leyeron sin recortar (para reenviar, PB-034).
         self.leidos_completos: list[str] = []
         self.enviados: list[tuple[UUID, CorreoSaliente]] = []
+        self.accesos_comprobados = 0
+
+    async def comprobar_acceso(self, usuario_id: UUID) -> None:
+        self.accesos_comprobados += 1
+        if self.fallar_con is not None:
+            raise self.fallar_con
 
     async def buscar(self, usuario_id: UUID, consulta: str, cantidad: int) -> tuple[Correo, ...]:
         if self.fallar_con is not None:
@@ -414,6 +425,8 @@ class CorreosFalsos(Correos):
     async def enviar(self, usuario_id: UUID, saliente: CorreoSaliente) -> str:
         if self.fallar_con is not None:
             raise self.fallar_con
+        if self.fallar_al_enviar is not None:
+            raise self.fallar_al_enviar
         self.enviados.append((usuario_id, saliente))
         return f"enviado-{len(self.enviados)}"
 

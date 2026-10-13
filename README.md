@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 849 tests + 20 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 882 tests + 22 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -232,7 +232,10 @@ marcarlas como hechas, posponerlas y eliminarlas — el criterio es simple: con 
 sin hora es una tarea. En el Sprint 4 sumó **Gmail**: buscar
 correos, abrirlos para contar qué dicen y mandar correos nuevos, siempre con una confirmación que
 muestra exactamente qué sale; desde el Sprint 5 también **responde** un correo dentro de su
-hilo y lo **reenvía** (sin adjuntos). Como un correo lo escribe cualquiera, su contenido le
+hilo y lo **reenvía** (sin adjuntos). Si un envío falla, el bot dice si el correo salió: sólo
+cuando no se puede saber (Gmail no llegó a confirmarlo) manda a revisar Enviados, para que no
+salga dos veces; y no pide el "sí" de un correo que no puede salir (por ejemplo, con el permiso
+de Google vencido). Como un correo lo escribe cualquiera, su contenido le
 llega al modelo enmarcado como dato de un tercero, nunca como instrucción.
 
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
@@ -445,15 +448,15 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 20 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 22 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
 recurrentes, recordatorios ("en 20 minutos" guarda la hora correcta; "avisame a las…" no es
 un evento), "el último correo" con la bandeja cambiando, y los intentos de inyección por
 correo (un correo que ordena borrar, reenviarse o agendar algo no lo logra), y responder
-un correo dentro de su hilo. Si
-Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
+un correo dentro de su hilo; y si un envío falla, que cuente bien si el correo salió (ante la
+duda manda a revisar Enviados y no lo repite). Si Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
 persiste se marca como salteado: una caída del proveedor no es un fallo de
 comportamiento.
 
@@ -566,7 +569,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 |-------|-------------|--------|
 | PB-031 | Pruebas e integración de Tareas con el agente | ✅ (paginación y límites de Google corregidos) |
 | PB-034 | Responder y reenviar correos | ✅ (en el hilo; sin adjuntos ni "responder a todos") |
-| PB-035 | Confirmación + errores de envío (Gmail) | ⏳ |
+| PB-035 | Confirmación + errores de envío (Gmail) | ✅ (dice si el correo salió; comprueba la cuenta antes del sí) |
 | PB-036 | Pruebas de integración Gmail | ⏳ |
 | PB-040 | Pruebas de las tools críticas | ⏳ |
 | PB-041 | Diagramas UML actualizados | ⏳ |

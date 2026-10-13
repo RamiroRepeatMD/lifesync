@@ -20,7 +20,11 @@ import pytest
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.domain.entities.oauth_token import OAuthToken
 from src.domain.exceptions import (
+    AutorizacionFallidaError,
+    CuentaNoConectadaError,
     EntityNotFoundError,
+    EnvioInciertoError,
+    EnvioRechazadoError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
@@ -415,3 +419,127 @@ def test_un_message_id_con_saltos_de_linea_no_se_acepta() -> None:
             "Texto",
             en_respuesta_a="<a@x.com>\r\nBcc: atacante@malo.com",
         )
+
+
+# --- Errores del envío (PB-035): ¿salió o no? ------------------------------------
+#
+# La regla: `enviar` lanza `EnvioInciertoError` si y sólo si el correo PUDO haber
+# salido. Cualquier otra falla garantiza que no salió, y se puede volver a pedir.
+
+
+async def _enviar_ante(manejador: Manejador) -> None:
+    """Manda un correo nuevo contra la respuesta (o la falla) de Gmail que se indique."""
+    from src.domain.entities.correo import CorreoSaliente
+
+    gmail = await _gmail([], manejador)
+    await gmail.enviar(USUARIO, CorreoSaliente(("ana@ejemplo.com",), "Hola", "Llego tarde"))
+
+
+def _que_falle(falla: type[httpx.TransportError]) -> Manejador:
+    def manejador(pedido: httpx.Request) -> httpx.Response:
+        raise falla("simulada", request=pedido)
+
+    return manejador
+
+
+def _error(status: int, mensaje: str, motivo: str) -> httpx.Response:
+    cuerpo = {"error": {"code": status, "message": mensaje, "errors": [{"reason": motivo}]}}
+    return httpx.Response(status, json=cuerpo)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+async def test_un_5xx_al_enviar_deja_el_envio_en_duda(status: int) -> None:
+    """Gmail falló a mitad de camino: el correo pudo haber salido igual."""
+    with pytest.raises(EnvioInciertoError):
+        await _enviar_ante(lambda _: _error(status, "Backend Error", "backendError"))
+
+
+@pytest.mark.parametrize("falla", [httpx.ReadTimeout, httpx.RemoteProtocolError])
+async def test_si_se_pierde_la_respuesta_el_envio_queda_en_duda(
+    falla: type[httpx.TransportError],
+) -> None:
+    """El pedido llegó a Gmail y la respuesta no volvió: no hay forma de saber si salió."""
+    with pytest.raises(EnvioInciertoError):
+        await _enviar_ante(_que_falle(falla))
+
+
+@pytest.mark.parametrize("falla", [httpx.ConnectError, httpx.ConnectTimeout])
+async def test_si_no_se_pudo_conectar_seguro_que_no_salio(
+    falla: type[httpx.TransportError],
+) -> None:
+    """El pedido nunca llegó a Gmail: se puede volver a pedir sin miedo a duplicarlo."""
+    with pytest.raises(ServiceUnavailableError) as capturado:
+        await _enviar_ante(_que_falle(falla))
+
+    assert not isinstance(capturado.value, EnvioInciertoError)
+
+
+async def test_un_400_es_un_rechazo_y_el_correo_no_salio() -> None:
+    """Reintentar igual da lo mismo: hay que corregir el pedido (una dirección, por ejemplo)."""
+    with pytest.raises(EnvioRechazadoError):
+        await _enviar_ante(lambda _: _error(400, "Invalid To header", "invalidArgument"))
+
+
+@pytest.mark.parametrize(
+    ("status", "motivo"),
+    [(429, "rateLimitExceeded"), (403, "userRateLimitExceeded")],
+    ids=["429", "403_por_limite"],
+)
+async def test_el_limite_de_envios_no_deja_el_envio_en_duda(status: int, motivo: str) -> None:
+    """Gmail frenó el pedido antes de mandar nada: no salió, y más tarde se puede."""
+    with pytest.raises(ServiceUnavailableError) as capturado:
+        await _enviar_ante(lambda _: _error(status, "Rate Limit Exceeded", motivo))
+
+    assert not isinstance(capturado.value, (EnvioInciertoError, EnvioRechazadoError))
+
+
+async def test_un_5xx_al_leer_no_es_un_envio_en_duda() -> None:
+    """Leer es idempotente: la duda existe sólo para lo que pudo haber salido."""
+    gmail = await _gmail([], lambda _: httpx.Response(503, json={}))
+
+    with pytest.raises(ServiceUnavailableError) as capturado:
+        await gmail.buscar(USUARIO, "", 5)
+
+    assert not isinstance(capturado.value, EnvioInciertoError)
+
+
+# --- Comprobar la cuenta antes de confirmar un envío (PB-035) -------------------------
+
+
+async def test_comprobar_acceso_con_el_token_vigente_no_le_pide_nada_a_gmail() -> None:
+    pedidos: list[httpx.Request] = []
+    gmail = await _gmail(pedidos, lambda _: httpx.Response(500))
+
+    await gmail.comprobar_acceso(USUARIO)
+
+    assert pedidos == []
+
+
+async def test_comprobar_acceso_sin_cuenta_conectada_lo_dice() -> None:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+    conectar = ConectarGoogle(RepositorioOAuthTokenEnMemoria(), AutorizadorFalso(USUARIO))
+    gmail = GmailGoogle(http, conectar)
+
+    with pytest.raises(CuentaNoConectadaError):
+        await gmail.comprobar_acceso(USUARIO)
+
+
+async def test_comprobar_acceso_con_el_permiso_vencido_lo_dice() -> None:
+    """El caso del modo Testing: el refresh token dura 7 días y Google lo rechaza."""
+    tokens = RepositorioOAuthTokenEnMemoria()
+    await tokens.guardar(
+        OAuthToken(
+            usuario_id=USUARIO,
+            proveedor=ProveedorOAuth.GOOGLE,
+            access_token="access-viejo",
+            refresh_token="refresh-vencido",
+            expira_en=datetime.now(UTC) - timedelta(minutes=5),
+        )
+    )
+    autorizador = AutorizadorFalso(USUARIO)
+    autorizador.fallar_refresco = AutorizacionFallidaError("invalid_grant")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+    gmail = GmailGoogle(http, ConectarGoogle(tokens, autorizador))
+
+    with pytest.raises(AutorizacionFallidaError):
+        await gmail.comprobar_acceso(USUARIO)

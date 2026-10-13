@@ -110,6 +110,32 @@ class ServiceUnavailableError(InfrastructureError):
     mensaje_usuario = "El servicio no está disponible por ahora. Probá más tarde."
 
 
+class EnvioInciertoError(ServiceUnavailableError):
+    """El proveedor no confirmó un envío que pudo haber salido (PB-035).
+
+    El pedido llegó y la respuesta no (se cortó, venció el tiempo) o el
+    proveedor falló a mitad de camino (un 5xx). Se separa de su madre porque el
+    remedio es el opuesto: un envío que seguro no salió se puede volver a
+    pedir; éste no se reintenta a ciegas, porque podría salir dos veces y un
+    correo no se des-envía. Hay que mirar Enviados antes.
+    """
+
+    mensaje_usuario = (
+        "No sé si el correo salió. Revisá tu carpeta Enviados antes de volver a pedirlo."
+    )
+
+
+class EnvioRechazadoError(ServiceUnavailableError):
+    """El proveedor rechazó el envío por lo que se le mandó (PB-035).
+
+    Un 400 de Gmail: una dirección que no acepta, un dato que no valida. El
+    correo no salió, y a diferencia de un corte o de un límite de uso,
+    reintentar igual da lo mismo: hay que corregir el pedido.
+    """
+
+    mensaje_usuario = "Gmail rechazó el correo, así que no salió. Revisá las direcciones."
+
+
 class AgenteNoDisponibleError(InfrastructureError):
     """El agente conversacional no pudo producir una respuesta (PB-005).
 

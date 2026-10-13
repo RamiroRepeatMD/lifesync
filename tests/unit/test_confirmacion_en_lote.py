@@ -27,6 +27,7 @@ from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
 from src.domain.entities.tarea import Tarea
+from src.domain.exceptions import AutorizacionFallidaError
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import CIERRE_DEL_LOTE, AgenteGemini
 from src.infrastructure.llm.grafo import NO_ESTABA_EN_LA_LISTA, construir_grafo
@@ -147,6 +148,25 @@ async def test_una_invalida_queda_fuera_de_la_lista_con_su_mensaje() -> None:
         m.tool_call_id: str(m.content) for m in await bot.mensajes() if isinstance(m, ToolMessage)
     }
     assert "ya pasó" in respuestas["c3"]
+
+
+async def test_un_correo_sin_acceso_a_la_cuenta_queda_fuera_de_la_lista() -> None:
+    """PB-035: no se pide el sí de un envío que no puede salir; lo demás sigue igual."""
+    correo = ("enviar_correo", "c3", {"para": "ana@ejemplo.com", "asunto": "Hola", "texto": "x"})
+    sin_permiso = CorreosFalsos(fallar_con=AutorizacionFallidaError("invalid_grant"))
+    bot = Bot(_llamadas(EVENTO, correo), AIMessage("listo"), correos=sin_permiso)
+
+    pregunta = await bot.decir("agendame el dentista el lunes a las 16 y avisale a Ana")
+    await bot.decir("sí")
+
+    assert "ana@ejemplo.com" not in pregunta  # no se propone lo que no puede salir
+    assert 'Crear "Dentista"' in pregunta
+    assert len(bot.calendario.creados) == 1
+    assert bot.correos.enviados == []
+    respuestas = {
+        m.tool_call_id: str(m.content) for m in await bot.mensajes() if isinstance(m, ToolMessage)
+    }
+    assert "/conectar" in respuestas["c3"]
 
 
 async def test_si_ninguna_valida_no_hay_pausa() -> None:

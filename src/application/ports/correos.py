@@ -56,7 +56,28 @@ class Correos(ABC):
         Es irreversible: quien llama tiene que haber obtenido la confirmación
         explícita de la persona (RF-08) sobre exactamente este contenido.
 
+        El contrato de los errores (PB-035) es lo que le permite a quien llama
+        decirle a la persona si el correo salió: `EnvioInciertoError` se lanza
+        **si y sólo si** el correo pudo haber salido. Cualquier otra excepción
+        garantiza que NO salió, y por lo tanto que se puede volver a pedir.
+
         Raises:
-            Las mismas de `buscar`. Un `ServiceUnavailableError` deja el
-            resultado incierto: el correo pudo haber salido.
+            EnvioInciertoError: Si el proveedor no confirmó un envío que pudo
+                haber salido (la respuesta se perdió o falló a mitad de camino).
+            EnvioRechazadoError: Si el proveedor rechazó lo que se le mandó
+                (una dirección que no acepta): reintentar igual no sirve.
+            Las mismas de `buscar`.
+        """
+
+    @abstractmethod
+    async def comprobar_acceso(self, usuario_id: UUID) -> None:
+        """Verifica que haya una credencial vigente, sin tocar el correo (PB-035).
+
+        Sirve para no pedir la confirmación de un envío que no puede salir: una
+        cuenta sin conectar o con el permiso vencido se avisa ANTES del "sí".
+        Puede renovar el token si venció, que es invisible e idempotente.
+
+        Raises:
+            CuentaNoConectadaError: Si la persona nunca autorizó su cuenta.
+            AutorizacionFallidaError: Si la autorización venció o fue revocada.
         """

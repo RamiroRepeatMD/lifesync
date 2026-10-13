@@ -15,6 +15,10 @@ Lo que conviene saber antes de tocarlo:
   historial al modelo, y el contenido de un correo lo escribió un tercero:
   cuanto menos texto ajeno en el contexto, menos costo y menos superficie para
   una inyección.
+- **Un envío que falla tiene que decir si salió** (PB-035). `_publicar` separa
+  lo que seguro no salió (no se pudo conectar, Gmail lo rechazó o lo frenó por
+  un límite) de lo que quedó en duda (el pedido llegó y la respuesta no, o
+  Gmail falló a mitad de camino): sólo eso es `EnvioInciertoError`.
 """
 
 from __future__ import annotations
@@ -40,9 +44,15 @@ from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.exceptions import (
     CuentaNoConectadaError,
     EntityNotFoundError,
+    EnvioInciertoError,
+    EnvioRechazadoError,
     ServiceUnavailableError,
 )
-from src.infrastructure.external.google.transporte import json_o_vacio, traducir_rechazo
+from src.infrastructure.external.google.transporte import (
+    json_o_vacio,
+    motivo_de,
+    traducir_rechazo,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -51,6 +61,9 @@ CONSULTA_POR_DEFECTO = "in:inbox"
 CANTIDAD_MAXIMA = 10
 MAX_CARACTERES_DE_CUERPO = 2000
 ENCABEZADOS_DE_LISTADO = ("From", "Subject")
+# Las fallas en las que el pedido nunca llegó a Gmail: lo que se quiso mandar
+# seguro no salió. Cualquier otra falla del POST deja el envío en duda.
+_SIN_CONEXION = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 # Tupla y no lista: las tuplas son covariantes, y httpx tipa los valores
 # más amplio que `str`.
@@ -128,6 +141,10 @@ class GmailGoogle(Correos):
         )
         return str(datos.get("id") or "")
 
+    async def comprobar_acceso(self, usuario_id: UUID) -> None:
+        # Sólo la credencial: a Google se le habla únicamente si hay que renovarla.
+        await self._credencial(usuario_id)
+
     # --- Plomería ---------------------------------------------------------
 
     async def _credencial(self, usuario_id: UUID) -> str:
@@ -157,14 +174,37 @@ class GmailGoogle(Correos):
         return json_o_vacio(respuesta)
 
     async def _publicar(self, url: str, token: str, cuerpo: dict[str, Any]) -> dict[str, Any]:
-        """POST autenticado. Un error de red deja el envío en duda: se avisa como tal."""
+        """El POST del envío, que dice si el correo salió (PB-035).
+
+        Sólo `EnvioInciertoError` deja la duda; con cualquier otra excepción el
+        correo seguro no salió. La lectura (`_pedir`) no distingue: leer de
+        nuevo no hace daño, mandar de nuevo puede duplicar un correo.
+        """
         try:
             respuesta = await self._cliente.post(
                 url, json=cuerpo, headers={"Authorization": f"Bearer {token}"}
             )
-        except httpx.HTTPError as exc:
+        except _SIN_CONEXION as exc:
             logger.error("gmail.error_transporte", tipo=type(exc).__name__)
             raise ServiceUnavailableError("No se pudo contactar a Gmail.") from None
+        except httpx.HTTPError as exc:
+            # El pedido salió y la respuesta no volvió: Gmail pudo haberlo mandado.
+            logger.error("gmail.envio_incierto", tipo=type(exc).__name__)
+            raise EnvioInciertoError("Gmail no confirmó el envío.") from None
+
+        if respuesta.status_code >= httpx.codes.INTERNAL_SERVER_ERROR:
+            logger.error(
+                "gmail.envio_incierto",
+                status_code=respuesta.status_code,
+                motivo=motivo_de(respuesta),
+            )
+            raise EnvioInciertoError("Gmail falló mientras procesaba el envío.")
+        if respuesta.status_code == httpx.codes.BAD_REQUEST:
+            # El motivo es el texto de Google ("Invalid To header"), sin direcciones.
+            logger.warning("gmail.envio_rechazado", motivo=motivo_de(respuesta))
+            raise EnvioRechazadoError("Gmail rechazó el correo.")
+        # El resto de los 4xx (401, los tres 403, el 429 del límite de envíos):
+        # Gmail frenó el pedido antes de mandar nada.
         traducir_rechazo(respuesta, "gmail")
         return json_o_vacio(respuesta)
 
