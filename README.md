@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar y leer) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 927 tests + 22 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 1124 tests (cobertura con ramas 91,8%, piso de 90% en CI) + 22 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -430,8 +430,7 @@ e incluiría tus credenciales y el `.venv` de macOS.
 ## Desarrollo
 
 ```bash
-uv run pytest                # tests (no necesitan red ni base de datos)
-uv run pytest --cov=src      # tests con cobertura
+uv run pytest --cov          # tests con cobertura de ramas (no necesitan red ni base de datos)
 uv run ruff check .          # linting
 uv run ruff format --check . # formato (sin --check, formatea)
 uv run mypy src              # tipado estricto del código
@@ -440,7 +439,11 @@ uv run mypy tests            # ... y de los tests (CI corre ambos)
 
 `tests/integration/` prueba caminos completos sin red: del agente a los adaptadores de Google
 Calendar, Tasks y Gmail, asertando el pedido exacto que recibiría Google (en Gmail, hasta los
-encabezados del correo que sale y el texto entero de un reenvío).
+encabezados del correo que sale y el texto entero de un reenvío). Y
+`tests/unit/test_tools_criticas.py` fija las promesas que valen para todas las tools a la vez:
+ninguna escribe fuera del control de la confirmación, ninguna deja escapar una falla de Google,
+y dos acciones juntas se confirman en una sola lista y corren una vez. Si mañana se suma una
+tool que no las cumple, la suite falla.
 
 Hay además una suite de **evaluación del comportamiento del modelo** que llama a Gemini de
 verdad y gasta cuota — por eso es opt-in y CI la saltea:
@@ -572,7 +575,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-034 | Responder y reenviar correos | ✅ (en el hilo; sin adjuntos ni "responder a todos") |
 | PB-035 | Confirmación + errores de envío (Gmail) | ✅ (dice si el correo salió; comprueba la cuenta antes del sí) |
 | PB-036 | Pruebas de integración Gmail | ✅ (de punta a punta; 3 bugs corregidos) |
-| PB-040 | Pruebas de las tools críticas | ⏳ |
+| PB-040 | Pruebas de las tools críticas | ✅ (invariantes sobre las 18 tools; cobertura medida en CI) |
 | PB-041 | Diagramas UML actualizados | ⏳ |
 | PB-037 · 038 | Drive: buscar, subir y compartir | ⏳ (Could) |
 

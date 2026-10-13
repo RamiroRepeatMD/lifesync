@@ -74,6 +74,18 @@ markers = [
     "gemini: llama al modelo real (gasta cuota); se saltea sin GOOGLE_API_KEY.",
 ]
 
+# Cobertura con ramas (PB-040): `uv run pytest --cov`, también en CI. El piso
+# del 90% está debajo de lo medido al cerrar PB-040 (92%): una baja así es
+# código nuevo sin tests, y CI lo frena.
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+
 # ---------------------------------------------------------------------------
 # Linting / formato
 # ---------------------------------------------------------------------------

@@ -24,8 +24,9 @@ jobs:
       - name: Instalar dependencias
         run: uv sync --locked
 
+      # Con cobertura de ramas (PB-040): el piso está en pyproject.toml.
       - name: Tests
-        run: uv run pytest
+        run: uv run pytest --cov
 
       - name: Linting
         run: uv run ruff check .

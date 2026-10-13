@@ -292,9 +292,17 @@ class CalendarioFalso(Calendario):
         self,
         eventos: tuple[Evento, ...] | None = None,
         fallar_con: Exception | None = None,
+        fallar_al_escribir: Exception | None = None,
+        escrituras_antes_de_fallar: int = 0,
     ) -> None:
         self.eventos = eventos if eventos is not None else ()
         self.fallar_con = fallar_con
+        # Sólo fallan las escrituras (PB-040): la búsqueda previa anda, como
+        # cuando Google se cae entre la confirmación y la escritura. Las
+        # primeras `escrituras_antes_de_fallar` salen bien (un borrado de
+        # varios que se corta a mitad de camino).
+        self.fallar_al_escribir = fallar_al_escribir
+        self.escrituras_antes_de_fallar = escrituras_antes_de_fallar
         self.consultados: list[UUID] = []
         self.rangos: list[tuple[datetime, datetime]] = []
         # Registros de escritura (PB-016): son la evidencia de los tests de
@@ -302,6 +310,14 @@ class CalendarioFalso(Calendario):
         self.creados: list[tuple[UUID, Evento]] = []
         self.eliminados: list[tuple[UUID, str]] = []
         self.modificados: list[tuple[UUID, Evento]] = []
+
+    def _escribir(self) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        if self.fallar_al_escribir is not None:
+            if self.escrituras_antes_de_fallar <= 0:
+                raise self.fallar_al_escribir
+            self.escrituras_antes_de_fallar -= 1
 
     async def eventos_entre(
         self, usuario_id: UUID, desde: datetime, hasta: datetime
@@ -318,20 +334,17 @@ class CalendarioFalso(Calendario):
         return await self.eventos_entre(usuario_id, desde, hasta)
 
     async def crear_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         creado = replace(evento, id="evento-creado-1")
         self.creados.append((usuario_id, creado))
         return creado
 
     async def eliminar_evento(self, usuario_id: UUID, evento_id: str) -> None:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.eliminados.append((usuario_id, evento_id))
 
     async def modificar_evento(self, usuario_id: UUID, evento: Evento) -> Evento:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.modificados.append((usuario_id, evento))
         return evento
 
@@ -343,14 +356,23 @@ class TareasFalsas(Tareas):
         self,
         pendientes: tuple[Tarea, ...] = (),
         fallar_con: Exception | None = None,
+        fallar_al_escribir: Exception | None = None,
     ) -> None:
         self.lista = pendientes
         self.fallar_con = fallar_con
+        # Sólo fallan las escrituras (PB-040): ver `CalendarioFalso`.
+        self.fallar_al_escribir = fallar_al_escribir
         self.consultados: list[UUID] = []
         self.creadas: list[tuple[UUID, Tarea]] = []
         self.completadas: list[tuple[UUID, str]] = []
         self.pospuestas: list[tuple[UUID, str, date]] = []
         self.eliminadas: list[tuple[UUID, str]] = []
+
+    def _escribir(self) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        if self.fallar_al_escribir is not None:
+            raise self.fallar_al_escribir
 
     async def pendientes(self, usuario_id: UUID) -> tuple[Tarea, ...]:
         if self.fallar_con is not None:
@@ -359,24 +381,20 @@ class TareasFalsas(Tareas):
         return self.lista
 
     async def crear(self, usuario_id: UUID, tarea: Tarea) -> Tarea:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.creadas.append((usuario_id, tarea))
         return tarea
 
     async def completar(self, usuario_id: UUID, tarea_id: str) -> None:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.completadas.append((usuario_id, tarea_id))
 
     async def posponer(self, usuario_id: UUID, tarea_id: str, vencimiento: date) -> None:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.pospuestas.append((usuario_id, tarea_id, vencimiento))
 
     async def eliminar(self, usuario_id: UUID, tarea_id: str) -> None:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._escribir()
         self.eliminadas.append((usuario_id, tarea_id))
 
 
