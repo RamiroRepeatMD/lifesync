@@ -312,3 +312,106 @@ async def test_enviar_sin_el_scope_es_permiso_insuficiente() -> None:
 
     with pytest.raises(PermisoInsuficienteError):
         await gmail.enviar(USUARIO, CorreoSaliente(("a@b.com",), "x", "y"))
+
+
+# --- Responder y reenviar (PB-034) --------------------------------------------------
+
+
+def _con_hilo(payload: dict[str, Any]) -> Manejador:
+    """Un correo con lo que hace falta para contestarlo dentro de su hilo."""
+    mensaje = _mensaje(payload, threadId="hilo-7")
+    mensaje["payload"]["headers"] += [
+        {"name": "Message-ID", "value": "<abc123@mail.ejemplo.com>"},
+        {"name": "References", "value": "<viejo1@x.com>\r\n <viejo2@x.com>"},  # plegado
+        {"name": "Reply-To", "value": "Facturación <cobros@ejemplo.com>"},
+    ]
+    return lambda _: httpx.Response(200, json=mensaje)
+
+
+def _decodificar_envio(pedido: httpx.Request) -> tuple[Any, dict[str, Any]]:
+    import json
+    from email import message_from_bytes
+    from email.policy import default
+
+    cuerpo = json.loads(pedido.content)
+    crudo = cuerpo["raw"]
+    correo = message_from_bytes(
+        base64.urlsafe_b64decode(crudo + "=" * (-len(crudo) % 4)), policy=default
+    )
+    return correo, cuerpo
+
+
+async def test_leer_trae_los_datos_del_hilo() -> None:
+    gmail = await _gmail([], _con_hilo(_parte("text/plain", "Hola")))
+
+    correo = await gmail.leer(USUARIO, "m1")
+
+    assert correo.hilo_id == "hilo-7"
+    assert correo.mensaje_id == "<abc123@mail.ejemplo.com>"
+    assert correo.referencias == "<viejo1@x.com> <viejo2@x.com>"  # en una línea
+    assert correo.responder_a == ("cobros@ejemplo.com",)
+
+
+async def test_leer_completo_no_recorta_ni_quita_las_citas() -> None:
+    """Lo que se reenvía tiene que ir entero: lo recortado es sólo para el modelo."""
+    texto = "Arriba.\n> lo citado\n" + "x" * 10_000
+    gmail = await _gmail([], _abierto(_parte("text/plain", texto)))
+
+    correo = await gmail.leer(USUARIO, "m1", completo=True)
+
+    assert correo.cuerpo is not None
+    assert "> lo citado" in correo.cuerpo
+    assert correo.cuerpo.count("x") == 10_000
+
+
+async def test_responder_engancha_el_correo_al_hilo() -> None:
+    """Lo que pide Gmail para hilar: threadId en el cuerpo, In-Reply-To y References."""
+    from src.domain.entities.correo import CorreoSaliente
+
+    pedidos: list[httpx.Request] = []
+    gmail = await _gmail(pedidos, lambda _: httpx.Response(200, json={"id": "r1"}))
+
+    await gmail.enviar(
+        USUARIO,
+        CorreoSaliente(
+            ("cobros@ejemplo.com",),
+            "Re: Factura de septiembre",
+            "Gracias, ya la pagué.",
+            hilo_id="hilo-7",
+            en_respuesta_a="<abc123@mail.ejemplo.com>",
+            referencias="<viejo1@x.com> <viejo2@x.com>",
+        ),
+    )
+
+    correo, cuerpo = _decodificar_envio(pedidos[0])
+    assert cuerpo["threadId"] == "hilo-7"
+    assert correo["In-Reply-To"] == "<abc123@mail.ejemplo.com>"
+    assert correo["References"] == "<viejo1@x.com> <viejo2@x.com> <abc123@mail.ejemplo.com>"
+
+
+async def test_un_correo_nuevo_no_lleva_nada_del_hilo() -> None:
+    from src.domain.entities.correo import CorreoSaliente
+
+    pedidos: list[httpx.Request] = []
+    gmail = await _gmail(pedidos, lambda _: httpx.Response(200, json={"id": "n1"}))
+
+    await gmail.enviar(USUARIO, CorreoSaliente(("ana@ejemplo.com",), "Hola", "Texto"))
+
+    correo, cuerpo = _decodificar_envio(pedidos[0])
+    assert "threadId" not in cuerpo
+    assert "In-Reply-To" not in correo
+    assert "References" not in correo
+
+
+def test_un_message_id_con_saltos_de_linea_no_se_acepta() -> None:
+    """Viene de un correo ajeno: un salto permitiría inyectar un Bcc."""
+    from src.domain.entities.correo import CorreoSaliente
+    from src.domain.exceptions import InvalidValueError
+
+    with pytest.raises(InvalidValueError):
+        CorreoSaliente(
+            ("ana@ejemplo.com",),
+            "Re: Hola",
+            "Texto",
+            en_respuesta_a="<a@x.com>\r\nBcc: atacante@malo.com",
+        )

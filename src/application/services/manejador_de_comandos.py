@@ -55,7 +55,8 @@ ESTADO_CON_GOOGLE = (
     "Puedo leer tu calendario y crear (incluso eventos que se repiten), "
     "modificar o eliminar eventos; también "
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
-    "cambiarles la fecha o eliminarlas; buscar, leer y mandar correos de Gmail; "
+    "cambiarles la fecha o eliminarlas; buscar, leer, mandar, responder y "
+    "reenviar correos de Gmail; "
     "y escribirte a una hora para recordarte algo. Antes de borrar algo, mandar "
     "un correo o hacer varias cosas juntas, te pido confirmación."
 )

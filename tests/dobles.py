@@ -390,6 +390,8 @@ class CorreosFalsos(Correos):
         self.fallar_con = fallar_con
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidos: list[tuple[UUID, str]] = []
+        # Los ids que se leyeron sin recortar (para reenviar, PB-034).
+        self.leidos_completos: list[str] = []
         self.enviados: list[tuple[UUID, CorreoSaliente]] = []
 
     async def buscar(self, usuario_id: UUID, consulta: str, cantidad: int) -> tuple[Correo, ...]:
@@ -398,10 +400,12 @@ class CorreosFalsos(Correos):
         self.busquedas.append((usuario_id, consulta, cantidad))
         return self.bandeja
 
-    async def leer(self, usuario_id: UUID, correo_id: str) -> Correo:
+    async def leer(self, usuario_id: UUID, correo_id: str, *, completo: bool = False) -> Correo:
         if self.fallar_con is not None:
             raise self.fallar_con
         self.leidos.append((usuario_id, correo_id))
+        if completo:
+            self.leidos_completos.append(correo_id)
         for correo in self.bandeja:
             if correo.id == correo_id:
                 return correo

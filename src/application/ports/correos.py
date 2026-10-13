@@ -2,7 +2,8 @@
 
 Capacidad externa, como `Calendario` y `Tareas`: los correos viven en el
 proveedor y esta interfaz describe sólo lo que el agente necesita de ellos.
-Leer y buscar (PB-033) y enviar correos nuevos (PB-032).
+Leer y buscar (PB-033), enviar correos nuevos (PB-032), y con los mismos dos
+métodos responder dentro de un hilo y reenviar (PB-034).
 """
 
 from __future__ import annotations
@@ -33,8 +34,12 @@ class Correos(ABC):
         """
 
     @abstractmethod
-    async def leer(self, usuario_id: UUID, correo_id: str) -> Correo:
-        """Abre un correo y lo devuelve con cuerpo y adjuntos.
+    async def leer(self, usuario_id: UUID, correo_id: str, *, completo: bool = False) -> Correo:
+        """Abre un correo y lo devuelve con cuerpo, adjuntos y datos del hilo.
+
+        Args:
+            completo: Sin recortar el cuerpo ni quitarle las citas. Lo que lee
+                el modelo va recortado; lo que se reenvía tiene que ir entero.
 
         Raises:
             EntityNotFoundError: Si el correo no existe o ya no está.
@@ -43,7 +48,10 @@ class Correos(ABC):
 
     @abstractmethod
     async def enviar(self, usuario_id: UUID, saliente: CorreoSaliente) -> str:
-        """Envía un correo nuevo desde la cuenta de la persona y devuelve su id.
+        """Envía un correo desde la cuenta de la persona y devuelve su id.
+
+        Si el saliente trae `en_respuesta_a`, sale como respuesta dentro de su
+        hilo; si no, como correo nuevo.
 
         Es irreversible: quien llama tiene que haber obtenido la confirmación
         explícita de la persona (RF-08) sobre exactamente este contenido.

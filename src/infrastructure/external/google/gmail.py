@@ -1,4 +1,4 @@
-"""Adaptador de Gmail, sólo lectura (PB-033).
+"""Adaptador de Gmail: leer, buscar (PB-033), enviar (PB-032), responder y reenviar (PB-034).
 
 Implementa el puerto `Correos` contra la API REST de Gmail, con el mismo trío
 que Calendar y Tasks: el cliente httpx compartido de Google, las credenciales
@@ -25,7 +25,7 @@ import re
 from datetime import UTC, datetime
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -89,7 +89,7 @@ class GmailGoogle(Correos):
         logger.info("gmail.buscados", usuario_id=str(usuario_id), cantidad=len(correos))
         return correos
 
-    async def leer(self, usuario_id: UUID, correo_id: str) -> Correo:
+    async def leer(self, usuario_id: UUID, correo_id: str, *, completo: bool = False) -> Correo:
         token = await self._credencial(usuario_id)
         mensaje = await self._pedir(
             f"{BASE}/messages/{httpx.URL(correo_id)}",
@@ -97,7 +97,7 @@ class GmailGoogle(Correos):
             (("format", "full"),),
             error_404=EntityNotFoundError("Ese correo no existe o ya no está."),
         )
-        correo = _a_correo(mensaje, con_cuerpo=True)
+        correo = _a_correo(mensaje, con_cuerpo=True, completo=completo)
         logger.info("gmail.leido", usuario_id=str(usuario_id), adjuntos=len(correo.adjuntos))
         return correo
 
@@ -107,10 +107,19 @@ class GmailGoogle(Correos):
         # Sin `From`: Gmail pone la cuenta autenticada, que es la única válida.
         mensaje["To"] = ", ".join(saliente.destinatarios)
         mensaje["Subject"] = saliente.asunto
+        if saliente.en_respuesta_a:
+            # Lo que Gmail (y cualquier cliente) usa para enganchar la
+            # respuesta al hilo: RFC 2822, más el threadId en el cuerpo.
+            mensaje["In-Reply-To"] = saliente.en_respuesta_a
+            cadena = f"{saliente.referencias} {saliente.en_respuesta_a}".strip()
+            mensaje["References"] = cadena
         mensaje.set_content(saliente.cuerpo)
         crudo = base64.urlsafe_b64encode(mensaje.as_bytes()).decode("ascii")
 
-        datos = await self._publicar(f"{BASE}/messages/send", token, {"raw": crudo})
+        cuerpo: dict[str, Any] = {"raw": crudo}
+        if saliente.hilo_id:
+            cuerpo["threadId"] = saliente.hilo_id
+        datos = await self._publicar(f"{BASE}/messages/send", token, cuerpo)
         # La cantidad de destinatarios, nunca las direcciones (RF-18).
         logger.info(
             "gmail.enviado",
@@ -163,7 +172,7 @@ class GmailGoogle(Correos):
 # --- De JSON a entidad ---------------------------------------------------------
 
 
-def _a_correo(mensaje: dict[str, Any], con_cuerpo: bool = False) -> Correo:
+def _a_correo(mensaje: dict[str, Any], con_cuerpo: bool = False, completo: bool = False) -> Correo:
     payload = mensaje.get("payload") if isinstance(mensaje.get("payload"), dict) else {}
     encabezados = _encabezados(payload or {})
     fragmento = unescape(str(mensaje.get("snippet") or ""))
@@ -173,7 +182,7 @@ def _a_correo(mensaje: dict[str, Any], con_cuerpo: bool = False) -> Correo:
     if con_cuerpo:
         textos, htmls, nombres = _recorrer(payload or {})
         crudo = "\n".join(textos) or "\n".join(_html_a_texto(h) for h in htmls) or fragmento
-        cuerpo = _limpiar(crudo)
+        cuerpo = _entero(crudo) if completo else _limpiar(crudo)
         adjuntos = tuple(nombres)
 
     return Correo(
@@ -185,7 +194,22 @@ def _a_correo(mensaje: dict[str, Any], con_cuerpo: bool = False) -> Correo:
         fragmento=fragmento,
         cuerpo=cuerpo,
         adjuntos=adjuntos,
+        hilo_id=str(mensaje["threadId"]) if mensaje.get("threadId") else None,
+        mensaje_id=_una_linea(encabezados.get("message-id", "")) or None,
+        referencias=_una_linea(encabezados.get("references", "")),
+        responder_a=_direcciones_de(encabezados.get("reply-to", "")),
     )
+
+
+def _una_linea(valor: str) -> str:
+    """Un encabezado en una sola línea: los ajenos pueden venir plegados."""
+    return " ".join(valor.split())
+
+
+def _direcciones_de(valor: str) -> tuple[str, ...]:
+    """Las direcciones de un encabezado como `Reply-To`, sin los nombres."""
+    pares = getaddresses([_decodificar_encabezado(valor)]) if valor else []
+    return tuple(direccion for _, direccion in pares if "@" in direccion)
 
 
 def _encabezados(parte: dict[str, Any]) -> dict[str, str]:
@@ -300,6 +324,11 @@ def _html_a_texto(html: str) -> str:
     extractor.feed(html)
     extractor.close()
     return "".join(extractor.partes)
+
+
+def _entero(texto: str) -> str:
+    """El texto para reenviar: sin recorte y con sus citas, sólo normalizado."""
+    return re.sub(r"\n{3,}", "\n\n", texto.replace("\r\n", "\n")).strip()
 
 
 def _limpiar(texto: str) -> str:

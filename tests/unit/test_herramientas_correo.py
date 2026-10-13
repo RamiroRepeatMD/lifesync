@@ -164,7 +164,14 @@ def test_sin_puerto_de_correo_no_se_ofrecen_las_tools() -> None:
 def test_con_puerto_de_correo_se_ofrecen() -> None:
     nombres = [h.name for h in construir_herramientas(None, None, CorreosFalsos())]
 
-    assert nombres == ["fecha_y_hora_actual", "buscar_correos", "leer_correo", "enviar_correo"]
+    assert nombres == [
+        "fecha_y_hora_actual",
+        "buscar_correos",
+        "leer_correo",
+        "enviar_correo",
+        "responder_correo",
+        "reenviar_correo",
+    ]
 
 
 # --- Enviar (PB-032): lo que se confirma es lo que sale --------------------------------
@@ -344,3 +351,146 @@ async def test_direcciones_asunto_y_texto_no_se_loguean() -> None:
     registrado = json.dumps(eventos, default=str)
     for dato in ("medica@clinica.com", "Resultados", "diagnóstico"):
         assert dato not in registrado
+
+
+# --- Responder y reenviar (PB-034) --------------------------------------------------
+
+
+async def _pedir(correos: CorreosFalsos, herramienta: str, **args: Any) -> tuple[Any, Any]:
+    """Pide una acción de correo y devuelve (estado, grafo), sin resolver la pausa."""
+    pedido = AIMessage("", tool_calls=[{"name": herramienta, "args": args, "id": "c1"}])
+    modelo = ModeloFalso(guion=[pedido, AIMessage("listo")])
+    grafo = construir_grafo(modelo, construir_herramientas(None, None, correos), InMemorySaver())
+    estado = await grafo.ainvoke(
+        {"messages": [HumanMessage("pedido")]},
+        config={"configurable": {"thread_id": "hilo"}},
+        context=ContextoDeAgente(usuario_id=USUARIO),
+    )
+    return estado, grafo
+
+
+def _en_hilo(**cambios: Any) -> CorreosFalsos:
+    datos: dict[str, Any] = {
+        "hilo_id": "hilo-1",
+        "mensaje_id": "<m1@edenor.com>",
+        "referencias": "<m0@edenor.com>",
+        **cambios,
+    }
+    return CorreosFalsos((_factura(**datos),))
+
+
+RESPUESTA = {"id_correo": "m-factura", "texto": "Gracias, ya la pagué."}
+
+
+async def test_responder_muestra_a_quien_el_asunto_y_el_texto() -> None:
+    correos = _en_hilo()
+
+    estado, _ = await _pedir(correos, "responder_correo", **RESPUESTA)
+
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    assert "Para: facturas@edenor.com" in resumen
+    assert "Asunto: Re: Tu factura de septiembre" in resumen
+    assert resumen.endswith("Gracias, ya la pagué.")
+    assert "Ojo:" not in resumen  # responde al remitente: nada raro
+    assert correos.enviados == []  # nada sin el sí
+
+
+async def test_responder_con_el_si_sale_dentro_del_hilo() -> None:
+    correos = _en_hilo()
+    _, grafo = await _pedir(correos, "responder_correo", **RESPUESTA)
+
+    await _resolver(grafo, aprobado=True)
+
+    [(_, saliente)] = correos.enviados
+    assert saliente.destinatarios == ("facturas@edenor.com",)
+    assert saliente.asunto == "Re: Tu factura de septiembre"
+    assert saliente.cuerpo == "Gracias, ya la pagué."
+    assert (saliente.hilo_id, saliente.en_respuesta_a, saliente.referencias) == (
+        "hilo-1",
+        "<m1@edenor.com>",
+        "<m0@edenor.com>",
+    )
+
+
+async def test_el_re_no_se_duplica() -> None:
+    estado, _ = await _pedir(_en_hilo(asunto="RE: Tu factura"), "responder_correo", **RESPUESTA)
+
+    assert "Asunto: RE: Tu factura\n" in estado["__interrupt__"][0].value["resumen"]
+
+
+async def test_un_reply_to_distinto_del_remitente_se_avisa() -> None:
+    """El truco clásico de phishing: la persona lo ve antes del sí."""
+    estado, _ = await _pedir(
+        _en_hilo(responder_a=("cobros@otro-dominio.com",)), "responder_correo", **RESPUESTA
+    )
+
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    assert "Para: cobros@otro-dominio.com" in resumen
+    assert "Ojo: el correo pide que la respuesta vaya a una dirección distinta" in resumen
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        ({"id_correo": "m-factura", "texto": "  "}, "¿Qué le contesto?"),
+        ({"id_correo": "no-existe", "texto": "Hola"}, "No encontré ese correo"),
+        ({"id_correo": "m-factura", "texto": "x" * 3001}, "Hay que acortarla"),
+    ],
+    ids=["sin_texto", "id_inexistente", "texto_largo"],
+)
+async def test_responder_invalido_no_llega_a_la_pausa(args: dict[str, str], esperado: str) -> None:
+    correos = _en_hilo()
+
+    estado, _ = await _pedir(correos, "responder_correo", **args)
+
+    assert "__interrupt__" not in estado
+    respuesta = [m for m in estado["messages"] if isinstance(m, ToolMessage)][-1]
+    assert esperado in str(respuesta.content)
+    assert correos.enviados == []
+
+
+REENVIO = {"id_correo": "m-factura", "para": "beto@ejemplo.com", "nota": "Mirá esto"}
+
+
+async def test_reenviar_muestra_a_quien_cual_la_nota_y_un_adelanto() -> None:
+    correos = CorreosFalsos((_factura(cuerpo="Detalle. " + "x" * 1500),))
+
+    estado, _ = await _pedir(correos, "reenviar_correo", **REENVIO)
+
+    resumen = estado["__interrupt__"][0].value["resumen"]
+    assert "Para: beto@ejemplo.com" in resumen
+    assert "Asunto: Fwd: Tu factura de septiembre" in resumen
+    assert "(El correo de Edenor <facturas@edenor.com>, «Tu factura de septiembre»" in resumen
+    assert "Tu nota: Mirá esto" in resumen
+    assert "caracteres más: se reenvía completo)" in resumen
+    assert "(Los adjuntos no se reenvían: 1.)" in resumen  # la factura.pdf no viaja
+    assert len(resumen) < 3900  # entra en un WhatsApp aunque el correo no entre
+    assert correos.enviados == []
+
+
+async def test_reenviar_con_el_si_manda_el_original_completo() -> None:
+    largo = "Detalle. " + "x" * 5000
+    correos = CorreosFalsos((_factura(cuerpo=largo),))
+    _, grafo = await _pedir(correos, "reenviar_correo", **REENVIO)
+
+    await _resolver(grafo, aprobado=True)
+
+    assert correos.leidos_completos  # leído SIN el recorte del modelo
+    [(_, saliente)] = correos.enviados
+    assert saliente.destinatarios == ("beto@ejemplo.com",)
+    assert saliente.asunto == "Fwd: Tu factura de septiembre"
+    assert saliente.cuerpo.startswith("Mirá esto\n\n---------- Mensaje reenviado ----------")
+    assert "De: Edenor <facturas@edenor.com>" in saliente.cuerpo
+    assert saliente.cuerpo.endswith(largo)  # entero, no el adelanto
+    assert saliente.en_respuesta_a is None  # un reenvío es un correo nuevo
+
+
+async def test_reenviar_a_una_direccion_invalida_no_llega_a_la_pausa() -> None:
+    correos = CorreosFalsos((_factura(),))
+
+    estado, _ = await _pedir(
+        correos, "reenviar_correo", id_correo="m-factura", para="beto(arroba)ejemplo"
+    )
+
+    assert "__interrupt__" not in estado
+    assert correos.enviados == []

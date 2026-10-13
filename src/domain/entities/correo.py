@@ -27,6 +27,12 @@ class Correo:
         fragmento: La vista previa corta que arma el proveedor.
         cuerpo: El texto completo; sólo al abrirlo (None en un listado).
         adjuntos: Nombres de los archivos adjuntos. No se descargan.
+        hilo_id: El hilo (conversación) al que pertenece; sólo al abrirlo.
+        mensaje_id: El encabezado `Message-ID`: con él una respuesta se
+            engancha a este correo (PB-034).
+        referencias: El encabezado `References`, la cadena del hilo.
+        responder_a: Las direcciones del `Reply-To`, si el correo pide que la
+            respuesta vaya a otro lado que al remitente.
     """
 
     id: str
@@ -37,6 +43,10 @@ class Correo:
     fragmento: str = field(default="", repr=False)
     cuerpo: str | None = field(default=None, repr=False)
     adjuntos: tuple[str, ...] = field(default=(), repr=False)
+    hilo_id: str | None = None
+    mensaje_id: str | None = field(default=None, repr=False)
+    referencias: str = field(default="", repr=False)
+    responder_a: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""
@@ -55,10 +65,23 @@ class CorreoSaliente:
     destinatarios: tuple[str, ...] = field(repr=False)
     asunto: str = field(repr=False)
     cuerpo: str = field(repr=False)
+    # Para responder dentro de un hilo (PB-034): el hilo de Gmail, el
+    # `Message-ID` del correo al que se contesta y la cadena `References`.
+    hilo_id: str | None = None
+    en_respuesta_a: str | None = field(default=None, repr=False)
+    referencias: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""
         if not self.destinatarios:
             raise InvalidValueError("Un correo necesita al menos un destinatario.")
-        if "\n" in self.asunto or "\r" in self.asunto:
-            raise InvalidValueError("El asunto no puede tener saltos de línea.")
+        # Asunto y encabezados del hilo van en una línea: un salto permitiría
+        # inyectar otro encabezado (un `Bcc`). Los del hilo además vienen de un
+        # correo ajeno, así que no se puede suponer que estén limpios.
+        for nombre, valor in (
+            ("El asunto", self.asunto),
+            ("El Message-ID de la respuesta", self.en_respuesta_a or ""),
+            ("Las referencias del hilo", self.referencias),
+        ):
+            if "\n" in valor or "\r" in valor:
+                raise InvalidValueError(f"{nombre} no puede tener saltos de línea.")
