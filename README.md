@@ -576,8 +576,8 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-035 | Confirmación + errores de envío (Gmail) | ✅ (dice si el correo salió; comprueba la cuenta antes del sí) |
 | PB-036 | Pruebas de integración Gmail | ✅ (de punta a punta; 3 bugs corregidos) |
 | PB-040 | Pruebas de las tools críticas | ✅ (invariantes sobre las 18 tools; cobertura medida en CI) |
-| PB-041 | Diagramas UML actualizados | ⏳ |
-| PB-037 · 038 | Drive: buscar, subir y compartir | ⏳ (Could) |
+| PB-041 | Diagramas UML actualizados | — (no aplica: no había diagramas que actualizar) |
+| PB-037 · 038 | Drive: buscar, subir y compartir | ⏳ (Could; replanificado al Sprint 6) |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 
