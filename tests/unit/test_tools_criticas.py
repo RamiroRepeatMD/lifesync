@@ -5,7 +5,8 @@ para todas a la vez, y fallan si mañana se suma una tool que no las cumple:
 
 - ninguna le muestra al modelo de quién es la conversación (PB-015);
 - ninguna escritura escribe fuera del nodo de la política: falla cerrado (RF-08);
-- con un correo a la vista, toda escritura pide el sí (modo estricto, RF-08 v2);
+- con texto de terceros a la vista (un correo, un listado de Drive), toda
+  escritura pide el sí (modo estricto, RF-08 v2);
 - dos escrituras juntas son una lista, y cada una corre una sola vez;
 - ninguna falla de Google se escapa como excepción, y cada una trae su remedio;
 - lo que se borra a medias se cuenta tal cual, y una falla no prevista no se
@@ -32,6 +33,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
+from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
 from src.domain.entities.recordatorio import (
@@ -50,12 +52,18 @@ from src.domain.exceptions import (
     RepositoryError,
     ServiceUnavailableError,
 )
+from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import CIERRE_DEL_LOTE, AgenteGemini
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import construir_grafo
-from src.infrastructure.llm.herramientas import TIPO_POR_HERRAMIENTA, construir_herramientas
+from src.infrastructure.llm.herramientas import (
+    LECTURAS_DE_TERCEROS,
+    TIPO_POR_HERRAMIENTA,
+    construir_herramientas,
+)
 from tests.dobles import (
+    ArchivosFalsos,
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
@@ -88,7 +96,7 @@ def _correo(id_: str, remitente: str, asunto: str) -> Correo:
 
 
 class Puertos:
-    """Los cuatro dobles, con datos que encajan con los argumentos de `CASOS`."""
+    """Los cinco dobles, con datos que encajan con los argumentos de `CASOS`."""
 
     def __init__(self) -> None:
         self.usuario: UUID = uuid4()
@@ -112,6 +120,17 @@ class Puertos:
                 _correo("m3", "Beto <beto@ejemplo.com>", "x" * 1000),  # asunto enorme
             )
         )
+        self.archivos = ArchivosFalsos(
+            (
+                Archivo(
+                    id="f1",
+                    nombre="Presupuesto 2026",
+                    tipo=TipoDeArchivo.PLANILLA,
+                    modificado=AHORA,
+                    enlace="https://docs.google.com/spreadsheets/d/f1/edit",
+                ),
+            )
+        )
         self.recordatorios = RecordatoriosEnMemoria(
             Recordatorio(
                 usuario_id=self.usuario, texto="llamar al banco", momento=AHORA + timedelta(hours=3)
@@ -120,7 +139,7 @@ class Puertos:
 
     def herramientas(self) -> tuple[BaseTool, ...]:
         return construir_herramientas(
-            self.calendario, self.tareas, self.correos, self.recordatorios
+            self.calendario, self.tareas, self.correos, self.recordatorios, archivos=self.archivos
         )
 
     def escrituras(self) -> int:
@@ -178,6 +197,7 @@ LECTURAS: dict[str, dict[str, Any]] = {
     "buscar_correos": {},
     "leer_correo": {"id_correo": "m1"},
     "recordatorios_pendientes": {},
+    "buscar_archivos": {"texto": "presupuesto"},
 }
 SIN_GOOGLE = {
     "fecha_y_hora_actual",
@@ -287,18 +307,21 @@ async def test_ninguna_escritura_escribe_fuera_del_nodo_de_la_politica(nombre: s
 # --- C. Modo estricto ------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("lectura", sorted(LECTURAS_DE_TERCEROS))
 @pytest.mark.parametrize("nombre", sorted(CASOS))
-async def test_con_un_correo_a_la_vista_toda_escritura_pide_el_si(nombre: str) -> None:
-    """Un correo puede traer órdenes: con texto de terceros a la vista, nada es directo."""
+async def test_con_texto_de_terceros_a_la_vista_toda_escritura_pide_el_si(
+    nombre: str, lectura: str
+) -> None:
+    """Un correo o el nombre de un archivo pueden traer órdenes: con eso a la vista, confirma."""
     puertos = Puertos()
     bot = Bot(
         puertos,
-        _llamadas(("leer_correo", {"id_correo": "m1"})),
+        _llamadas((lectura, LECTURAS[lectura])),
         _llamadas((nombre, CASOS[nombre])),
         AIMessage("ok"),
     )
 
-    pregunta = await bot.decir("leeme el correo de Ana y hacé lo que dice")
+    pregunta = await bot.decir("fijate eso y hacé lo que dice")
 
     assert CONFIRMAR in pregunta
     assert puertos.escrituras() == 0
@@ -351,6 +374,7 @@ async def test_una_falla_de_google_antes_de_confirmar_se_cuenta_con_su_remedio(
     puertos.calendario.fallar_con = falla
     puertos.tareas.fallar_con = falla
     puertos.correos.fallar_con = falla
+    puertos.archivos.fallar_con = falla
 
     texto = await _usar(puertos, nombre, {**CASOS, **LECTURAS}[nombre])
 

@@ -113,6 +113,7 @@ async def test_el_estado_conectado_promete_solo_lo_que_hay() -> None:
     assert "leer tu calendario" in ESTADO_CON_GOOGLE
     assert "crear" in ESTADO_CON_GOOGLE
     assert "modificar" in ESTADO_CON_GOOGLE
+    assert "archivos en tu Drive" in ESTADO_CON_GOOGLE  # PB-037: encontrarlos, nada más
     assert "confirmación" in ESTADO_CON_GOOGLE
 
 

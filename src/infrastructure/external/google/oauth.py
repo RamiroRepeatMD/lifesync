@@ -47,6 +47,10 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly",
     # PB-032: enviar correos nuevos. Sólo enviar: ni modificar ni borrar.
     "https://www.googleapis.com/auth/gmail.send",
+    # PB-037: encontrar archivos de Drive (nombre, tipo, fecha y link). Sólo
+    # metadatos: no deja abrir ni tocar ningún archivo. Una cuenta conectada
+    # antes recibe 403 al buscar → /conectar de nuevo.
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
 )
 
 TIMEOUT_SEGUNDOS = 10.0

@@ -21,6 +21,7 @@ from pydantic import Field
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
+from src.application.ports.archivos import Archivos
 from src.application.ports.autorizador_google import (
     AutorizadorGoogle,
     CredencialesGoogle,
@@ -29,6 +30,7 @@ from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
+from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
@@ -41,6 +43,7 @@ from src.domain.repositories.recordatorio_repository import RecordatorioReposito
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
+from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
 
 
 @dataclass
@@ -447,6 +450,30 @@ class CorreosFalsos(Correos):
             raise self.fallar_al_enviar
         self.enviados.append((usuario_id, saliente))
         return f"enviado-{len(self.enviados)}"
+
+
+class ArchivosFalsos(Archivos):
+    """Doble del puerto `Archivos` (PB-037): un Drive fijo, sin filtrar."""
+
+    def __init__(
+        self, archivos: tuple[Archivo, ...] = (), fallar_con: Exception | None = None
+    ) -> None:
+        self.archivos = archivos
+        self.fallar_con = fallar_con
+        self.busquedas: list[tuple[UUID, str, TipoDeArchivo | None, datetime | None, int]] = []
+
+    async def buscar(
+        self,
+        usuario_id: UUID,
+        texto: str,
+        tipo: TipoDeArchivo | None,
+        desde: datetime | None,
+        cantidad: int,
+    ) -> tuple[Archivo, ...]:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.busquedas.append((usuario_id, texto, tipo, desde, cantidad))
+        return self.archivos
 
 
 class AutorizadorFalso(AutorizadorGoogle):

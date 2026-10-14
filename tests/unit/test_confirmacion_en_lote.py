@@ -33,6 +33,7 @@ from src.infrastructure.llm.agente_gemini import CIERRE_DEL_LOTE, AgenteGemini
 from src.infrastructure.llm.grafo import NO_ESTABA_EN_LA_LISTA, construir_grafo
 from src.infrastructure.llm.herramientas import construir_herramientas
 from tests.dobles import (
+    ArchivosFalsos,
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
@@ -319,7 +320,11 @@ def test_toda_herramienta_esta_clasificada_una_sola_vez() -> None:
     todas = {
         h.name
         for h in construir_herramientas(
-            CalendarioFalso(), TareasFalsas(), CorreosFalsos(), RecordatoriosEnMemoria()
+            CalendarioFalso(),
+            TareasFalsas(),
+            CorreosFalsos(),
+            RecordatoriosEnMemoria(),
+            archivos=ArchivosFalsos(),
         )
     }
 

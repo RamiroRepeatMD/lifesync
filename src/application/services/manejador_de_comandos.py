@@ -56,7 +56,7 @@ ESTADO_CON_GOOGLE = (
     "modificar o eliminar eventos; también "
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
     "cambiarles la fecha o eliminarlas; buscar, leer, mandar, responder y "
-    "reenviar correos de Gmail; "
+    "reenviar correos de Gmail; buscar archivos en tu Drive y pasarte el link; "
     "y escribirte a una hora para recordarte algo. Antes de borrar algo, mandar "
     "un correo o hacer varias cosas juntas, te pido confirmación."
 )

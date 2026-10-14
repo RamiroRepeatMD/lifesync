@@ -17,6 +17,7 @@ import httpx
 import structlog
 from fastapi import FastAPI
 
+from src.application.ports.archivos import Archivos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
@@ -212,6 +213,7 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
         _correos_de(app),
         checkpointer=app.state.checkpointer,
         recordatorios=_recordatorios_de(app),
+        archivos=_archivos_de(app),
     )
 
 
@@ -321,6 +323,16 @@ def _correos_de(app: FastAPI) -> Correos | None:
     from src.infrastructure.external.google.gmail import create_gmail_google
 
     return create_gmail_google(*piezas)
+
+
+def _archivos_de(app: FastAPI) -> Archivos | None:
+    """El adaptador de Google Drive (PB-037), si están sus piezas."""
+    piezas = _conectar_google_de(app, "drive")
+    if piezas is None:
+        return None
+    from src.infrastructure.external.google.drive import create_drive_google
+
+    return create_drive_google(*piezas)
 
 
 def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:

@@ -22,6 +22,7 @@ from langgraph.types import Command
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
+from src.application.ports.archivos import Archivos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
@@ -453,6 +454,7 @@ def crear_agente_gemini(
     correos: Correos | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     recordatorios: RecordatorioRepository | None = None,
+    archivos: Archivos | None = None,
 ) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
@@ -468,6 +470,8 @@ def crear_agente_gemini(
             sobrevive a un redeploy: es el modo degradado, no el normal.
         recordatorios: Dónde se guardan los recordatorios (PB-030). Con
             `None` —sin Supabase— el agente no ofrece programarlos.
+        archivos: Adaptador de Google Drive (PB-037). Con `None` el agente
+            no ofrece buscar archivos.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -489,7 +493,9 @@ def crear_agente_gemini(
         **_ajustes_de_razonamiento(settings.gemini_model),
     )
 
-    herramientas = construir_herramientas(calendario, tareas, correos, recordatorios)
+    herramientas = construir_herramientas(
+        calendario, tareas, correos, recordatorios, archivos=archivos
+    )
     grafo = construir_grafo(
         modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
     )
@@ -500,6 +506,7 @@ def crear_agente_gemini(
         con_tareas=tareas is not None,
         con_correo=correos is not None,
         con_recordatorios=recordatorios is not None,
+        con_drive=archivos is not None,
         memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)
