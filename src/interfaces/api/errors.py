@@ -19,11 +19,15 @@ from starlette.responses import JSONResponse
 
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
+    ArchivoDemasiadoGrandeError,
+    ArchivoNoDisponibleError,
     AutorizacionFallidaError,
     ConfirmationRequiredError,
     CuentaNoConectadaError,
     CuotaDeAgenteAgotadaError,
     DomainError,
+    DriveLlenoError,
+    DriveRechazoError,
     EncryptionError,
     EntityNotFoundError,
     EnvioInciertoError,
@@ -43,6 +47,13 @@ MENSAJE_GENERICO = "Ocurrió un error inesperado. Probá de nuevo en unos minuto
 
 # Cada error del dominio sabe qué significa; acá sólo decidimos el código HTTP.
 _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
+    # Archivos (PB-038): el que ya no está en WhatsApp es un 404 como su madre;
+    # el demasiado grande, un dato que no cumple como la suya; y lo que Drive no
+    # deja hacer (permisos, espacio) choca con el estado de la cuenta: 409.
+    ArchivoNoDisponibleError: status.HTTP_404_NOT_FOUND,
+    ArchivoDemasiadoGrandeError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    DriveRechazoError: status.HTTP_409_CONFLICT,
+    DriveLlenoError: status.HTTP_409_CONFLICT,
     EntityNotFoundError: status.HTTP_404_NOT_FOUND,
     InvalidValueError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     ConfirmationRequiredError: status.HTTP_409_CONFLICT,

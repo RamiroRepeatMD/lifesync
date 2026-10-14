@@ -22,13 +22,16 @@ Dos reglas de diseño de este módulo:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.mensaje_entrante import MensajeEntrante
 from src.domain.exceptions import InvalidValueError
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
+from src.infrastructure.config.zona import ZONA_HORARIA
 
 # Un cuerpo firmado por Meta es válido para siempre: la firma no lleva timestamp
 # ni nonce. Como el caché de deduplicación se vacía en cada despliegue, se
@@ -40,6 +43,13 @@ FRESCURA_MAXIMA = timedelta(hours=12)
 MAXIMO_MENSAJES = 50
 
 TIPO_TEXTO = "text"
+# Lo que se puede subir a Drive (PB-038). Audio, video, stickers y el resto se
+# siguen descartando: todavía no hay nada que hacer con ellos.
+TIPOS_DE_ARCHIVO = frozenset({"image", "document"})
+# Los ids de media de Meta son números. El id termina en una URL de Graph que
+# va con nuestro token: uno con otra forma no se acepta.
+ID_DE_MEDIA = re.compile(r"\d{1,32}")
+LARGO_MAXIMO_DE_NOMBRE = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +174,8 @@ class _Acumulador:
         self, crudo: dict[str, Any], nombres: dict[str, str], *, unico: bool
     ) -> None:
         """Convierte un mensaje individual, o lo contabiliza como descartado."""
-        if crudo.get("type") != TIPO_TEXTO:
+        tipo = crudo.get("type")
+        if tipo != TIPO_TEXTO and tipo not in TIPOS_DE_ARCHIVO:
             self.no_soportados += 1
             return
 
@@ -190,7 +201,14 @@ class _Acumulador:
             self.vencidos += 1
             return
 
-        texto_crudo = _texto_de(crudo)
+        adjunto: ArchivoAdjunto | None = None
+        if tipo == TIPO_TEXTO:
+            texto_crudo = _texto_de(crudo)
+        else:
+            # Un archivo pasa los mismos controles que un texto (id, remitente,
+            # frescura); su texto es el pie, que puede no venir.
+            adjunto = _adjunto_de(crudo, str(tipo), enviado_en)
+            texto_crudo = _pie_de(crudo, str(tipo)) if adjunto is not None else None
         if texto_crudo is None:
             self.ignorados += 1
             return
@@ -206,6 +224,7 @@ class _Acumulador:
                 texto=texto,
                 enviado_en=enviado_en,
                 nombre_perfil=_nombre_para(remitente_crudo, nombres, unico=unico),
+                adjunto=adjunto,
             )
         )
 
@@ -247,6 +266,64 @@ def _texto_de(mensaje: dict[str, Any]) -> str | None:
     if not isinstance(cuerpo, str) or not cuerpo.strip():
         return None
     return cuerpo
+
+
+def _adjunto_de(mensaje: dict[str, Any], tipo: str, enviado_en: datetime) -> ArchivoAdjunto | None:
+    """El archivo de un mensaje de imagen o documento, o None si no se puede usar."""
+    media = mensaje.get(tipo)
+    if not isinstance(media, dict):
+        return None
+    referencia = media.get("id")
+    if not isinstance(referencia, str) or not ID_DE_MEDIA.fullmatch(referencia):
+        return None
+    tipo_mime = media.get("mime_type")
+    if not isinstance(tipo_mime, str) or not tipo_mime.strip():
+        tipo_mime = "application/octet-stream"
+    nombre = _nombre_propio(media.get("filename")) or _nombre_armado(
+        tipo, tipo_mime.strip(), enviado_en, referencia
+    )
+    return ArchivoAdjunto(referencia=referencia, tipo_mime=tipo_mime.strip(), nombre=nombre)
+
+
+def _pie_de(mensaje: dict[str, Any], tipo: str) -> str:
+    """El pie (`caption`) del archivo, o vacío: un archivo sin pie es válido."""
+    media = mensaje.get(tipo)
+    pie = media.get("caption") if isinstance(media, dict) else None
+    return pie if isinstance(pie, str) else ""
+
+
+def _nombre_propio(valor: object) -> str | None:
+    """El `filename` de un documento, en una línea y acotado sin perder la extensión."""
+    if not isinstance(valor, str):
+        return None
+    limpio = " ".join("".join(c if c.isprintable() else " " for c in valor).split())
+    if len(limpio) <= LARGO_MAXIMO_DE_NOMBRE:
+        return limpio or None
+    base, punto, extension = limpio.rpartition(".")
+    if punto and base and len(extension) <= 10:
+        return f"{base[: LARGO_MAXIMO_DE_NOMBRE - len(extension) - 1]}.{extension}"
+    return limpio[:LARGO_MAXIMO_DE_NOMBRE]
+
+
+# La extensión del nombre armado para lo que llega sin `filename` (las fotos).
+_EXTENSION_POR_TIPO = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+}
+
+
+def _nombre_armado(tipo: str, tipo_mime: str, enviado_en: datetime, referencia: str) -> str:
+    """`foto-AAAAMMDD-HHMMSS-1234.jpg`, con la hora de Argentina.
+
+    El final del id va porque varias fotos mandadas juntas llegan en el mismo
+    segundo: sin él tendrían el mismo nombre y no habría cómo elegir una.
+    """
+    base = "foto" if tipo == "image" else "documento"
+    local = enviado_en.astimezone(ZONA_HORARIA)
+    extension = _EXTENSION_POR_TIPO.get(tipo_mime.split(";")[0].strip().lower(), "")
+    return f"{base}-{local:%Y%m%d-%H%M%S}-{referencia[-4:]}{extension}"
 
 
 def _truncar(texto: str) -> tuple[str, bool]:

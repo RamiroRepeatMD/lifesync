@@ -23,14 +23,19 @@ from src.domain.entities.oauth_token import OAuthToken
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     CuentaNoConectadaError,
+    DriveLlenoError,
+    DriveRechazoError,
+    EntityNotFoundError,
     PermisoInsuficienteError,
     ServiceUnavailableError,
 )
+from src.domain.value_objects.permiso_de_archivo import PermisoDeArchivo
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.external.google.drive import (
     CAMPOS,
+    CAMPOS_DE_ARCHIVO,
     MAX_CARACTERES_DE_TEXTO,
     DriveGoogle,
 )
@@ -348,3 +353,222 @@ async def test_sin_red_es_servicio_no_disponible() -> None:
 
     with pytest.raises(ServiceUnavailableError):
         await drive.buscar(USUARIO, "", None, None, 5)
+
+
+# --- Un archivo y las carpetas (PB-038) -------------------------------------------------
+
+
+async def test_obtener_lee_un_archivo_con_los_campos_sin_envoltorio() -> None:
+    """`files(...)` sólo lo acepta la búsqueda: un get con eso da 400."""
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json=_item()))
+
+    archivo = await drive.obtener(USUARIO, "f1")
+
+    [pedido] = pedidos
+    assert pedido.url.path == "/drive/v3/files/f1"
+    assert parse_qs(urlparse(str(pedido.url)).query)["fields"] == [CAMPOS_DE_ARCHIVO]
+    assert archivo.nombre == "Presupuesto 2026"
+
+
+@pytest.mark.parametrize("archivo_id", ["../about", "f1/permissions", "", "x" * 200])
+async def test_obtener_con_un_id_que_no_es_de_drive_no_genera_pedido(archivo_id: str) -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json=_item()))
+
+    with pytest.raises(EntityNotFoundError):
+        await drive.obtener(USUARIO, archivo_id)
+
+    assert pedidos == []
+
+
+async def test_obtener_uno_que_no_existe() -> None:
+    drive = await _drive([], lambda _: httpx.Response(404, json={}))
+
+    with pytest.raises(EntityNotFoundError):
+        await drive.obtener(USUARIO, "borrado")
+
+
+async def test_las_carpetas_son_solo_las_propias() -> None:
+    """Subir a una carpeta que te compartieron le daría el archivo a su dueño."""
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _archivos())
+
+    await drive.carpetas(USUARIO, "Facu'ltad")
+
+    q = parse_qs(urlparse(str(pedidos[0].url)).query)["q"][0]
+    assert "mimeType = 'application/vnd.google-apps.folder'" in q
+    assert "'me' in owners" in q
+    assert "name contains 'Facu\\'ltad'" in q  # el literal escapado de siempre
+    assert "trashed = false" in q
+
+
+# --- Subir (PB-038) ---------------------------------------------------------------------
+
+SESION = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=abc"
+
+
+def _subida(location: str = SESION, abrir: int = 200, cuerpo: Any = None) -> Manejador:
+    """Abre la sesión (POST) y recibe los bytes (PUT), como la API reanudable."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "POST":
+            if abrir != 200:
+                return httpx.Response(abrir, json=cuerpo or {})
+            return httpx.Response(200, headers={"Location": location})
+        return httpx.Response(200, json=_item(id="nuevo", name="informe.pdf"))
+
+    return responder
+
+
+async def test_subir_abre_la_sesion_y_manda_los_bytes() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _subida())
+
+    archivo = await drive.subir(USUARIO, "informe.pdf", "application/pdf", b"%PDF", "carpeta1")
+
+    abrir, mandar = pedidos
+    assert abrir.url.path == "/upload/drive/v3/files"
+    parametros = parse_qs(urlparse(str(abrir.url)).query)
+    assert parametros["uploadType"] == ["resumable"]
+    assert parametros["fields"] == [CAMPOS_DE_ARCHIVO]
+    assert json.loads(abrir.content) == {
+        "name": "informe.pdf",
+        "mimeType": "application/pdf",  # tal cual: sin convertir a Docs
+        "parents": ["carpeta1"],
+    }
+    assert abrir.headers["X-Upload-Content-Length"] == "4"
+    assert mandar.method == "PUT"
+    assert str(mandar.url) == SESION
+    assert mandar.content == b"%PDF"
+    assert archivo.id == "nuevo"
+
+
+async def test_subir_sin_carpeta_va_a_mi_unidad() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _subida())
+
+    await drive.subir(USUARIO, "foto.jpg", "image/jpeg", b"x", None)
+
+    assert "parents" not in json.loads(pedidos[0].content)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/upload/drive/v3/files?upload_id=abc",
+        "http://www.googleapis.com/upload/drive/v3/files?upload_id=abc",
+        "https://www.googleapis.com.evil.example/upload?upload_id=abc",
+        "",
+    ],
+)
+async def test_una_sesion_fuera_de_google_no_recibe_los_bytes(location: str) -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _subida(location=location))
+
+    with pytest.raises(ServiceUnavailableError):
+        await drive.subir(USUARIO, "informe.pdf", "application/pdf", b"%PDF", None)
+
+    assert [p.method for p in pedidos] == ["POST"]
+
+
+async def test_si_se_corta_al_mandar_los_bytes_es_servicio_no_disponible() -> None:
+    """Pudo haber llegado: quien lo cuenta aclara que se fije en Drive."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "POST":
+            return httpx.Response(200, headers={"Location": SESION})
+        raise httpx.ReadTimeout("se cortó", request=pedido)
+
+    drive = await _drive([], responder)
+
+    with pytest.raises(ServiceUnavailableError):
+        await drive.subir(USUARIO, "informe.pdf", "application/pdf", b"%PDF", None)
+
+
+async def test_con_el_drive_lleno_lo_dice() -> None:
+    cuerpo = {"error": {"code": 403, "errors": [{"reason": "storageQuotaExceeded"}]}}
+    drive = await _drive([], _subida(abrir=403, cuerpo=cuerpo))
+
+    with pytest.raises(DriveLlenoError):
+        await drive.subir(USUARIO, "informe.pdf", "application/pdf", b"%PDF", None)
+
+
+# --- Compartir (PB-038) -----------------------------------------------------------------
+
+
+async def test_compartir_con_una_persona_le_avisa_google() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json={"id": "p1"}))
+
+    await drive.compartir(USUARIO, "f1", PermisoDeArchivo.EDITOR, "ana@ejemplo.com")
+
+    [pedido] = pedidos
+    assert pedido.method == "POST"
+    assert pedido.url.path == "/drive/v3/files/f1/permissions"
+    assert json.loads(pedido.content) == {
+        "type": "user",
+        "role": "writer",
+        "emailAddress": "ana@ejemplo.com",
+    }
+    # El aviso por correo queda en su valor por defecto: sin aviso, Drive
+    # rechaza a quien no tiene cuenta de Google.
+    assert "sendNotificationEmail" not in parse_qs(urlparse(str(pedido.url)).query)
+
+
+async def test_compartir_por_link_es_cualquiera_que_lo_tenga() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json={"id": "p1"}))
+
+    await drive.compartir(USUARIO, "f1", PermisoDeArchivo.LECTOR, None)
+
+    assert json.loads(pedidos[0].content) == {"type": "anyone", "role": "reader"}
+
+
+@pytest.mark.parametrize(
+    ("status", "motivo", "esperado"),
+    [
+        (403, "insufficientFilePermissions", DriveRechazoError),
+        (400, "invalidSharingRequest", DriveRechazoError),
+        (403, "shareOutNotPermitted", DriveRechazoError),  # política de Workspace
+        (403, "insufficientPermissions", PermisoInsuficienteError),  # falta el scope
+        (403, "sharingRateLimitExceeded", ServiceUnavailableError),
+        (404, "notFound", EntityNotFoundError),
+    ],
+)
+async def test_los_rechazos_al_compartir_tienen_su_remedio(
+    status: int, motivo: str, esperado: type[Exception]
+) -> None:
+    """Sólo la falta de scope manda a /conectar (el remedio equivocado de PB-031)."""
+    cuerpo = {"error": {"code": status, "errors": [{"reason": motivo}], "message": "x"}}
+    drive = await _drive([], lambda _: httpx.Response(status, json=cuerpo))
+
+    with pytest.raises(esperado):
+        await drive.compartir(USUARIO, "f1", PermisoDeArchivo.LECTOR, "ana@ejemplo.com")
+
+
+async def test_al_compartir_la_direccion_no_se_loguea() -> None:
+    """El mensaje de Google puede repetir la dirección invitada (RF-18)."""
+    cuerpo = {
+        "error": {
+            "code": 400,
+            "errors": [{"reason": "invalidSharingRequest"}],
+            "message": "Bad Request. User message: could not notify ana@ejemplo.com",
+        }
+    }
+    drive = await _drive([], lambda _: httpx.Response(400, json=cuerpo))
+
+    with structlog.testing.capture_logs() as eventos, pytest.raises(DriveRechazoError):
+        await drive.compartir(USUARIO, "f1", PermisoDeArchivo.LECTOR, "ana@ejemplo.com")
+
+    assert eventos
+    assert "ana@ejemplo.com" not in json.dumps(eventos, default=str)
+
+
+async def test_comprobar_acceso_no_le_pide_nada_a_drive() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json={}))
+
+    await drive.comprobar_acceso(USUARIO)
+
+    assert pedidos == []

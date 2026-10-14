@@ -113,6 +113,19 @@ def test_el_mensaje_se_recupera_intacto() -> None:
     assert recuperado.content == CONTENIDO_PRIVADO
 
 
+def test_lo_que_viaja_oculto_en_el_mensaje_sobrevive_al_checkpoint() -> None:
+    """PB-038: la referencia del archivo recibido vive en `additional_kwargs`."""
+    serde = crear_serializador_cifrado(CLAVE_MAESTRA)
+    oculto = {"archivo_recibido": {"referencia": "123", "nombre": "x.pdf"}}
+
+    recuperado = serde.loads_typed(
+        serde.dumps_typed(HumanMessage(CONTENIDO_PRIVADO, additional_kwargs=oculto))
+    )
+
+    assert isinstance(recuperado, HumanMessage)
+    assert recuperado.additional_kwargs == oculto
+
+
 def test_puede_leer_datos_sin_cifrar() -> None:
     """El serializer tolera checkpoints viejos en claro: lee, aunque ya no escriba así."""
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer

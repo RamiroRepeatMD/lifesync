@@ -8,6 +8,7 @@ nada que no deba salir.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -18,6 +19,7 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
@@ -37,6 +39,7 @@ from src.infrastructure.llm.agente_gemini import (
 )
 from src.infrastructure.llm.contexto import ContextoDeAgente  # noqa: F401
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS
+from src.infrastructure.llm.herramientas import CLAVE_DE_ARCHIVO
 
 CONVERSACION = uuid4()
 USUARIO = uuid4()
@@ -498,3 +501,119 @@ async def test_la_pregunta_de_un_lote_cierra_con_su_frase() -> None:
     respuesta = await AgenteGemini(grafo).responder(_consulta("agendame X y anotá Y"))
 
     assert respuesta == f"{lista}\n\n{CIERRE_DEL_LOTE}"
+
+
+# --- Archivos (PB-038) ------------------------------------------------------------
+
+ADJUNTO = ArchivoAdjunto(
+    referencia="1037543291543636", tipo_mime="application/pdf", nombre="informe.pdf"
+)
+
+
+def _con_archivo(texto: str = "") -> ConsultaDelUsuario:
+    return ConsultaDelUsuario(
+        conversacion_id=CONVERSACION, usuario_id=USUARIO, texto=texto, adjunto=ADJUNTO
+    )
+
+
+async def test_un_archivo_sin_pie_es_un_turno_y_no_un_texto_vacio() -> None:
+    grafo = GrafoFalso()
+
+    respuesta = await AgenteGemini(grafo).responder(_con_archivo())
+
+    assert respuesta != TEXTO_VACIO
+    [mensaje] = grafo.invocaciones[0][0]["messages"]
+    assert mensaje.content.startswith("[Archivo recibido: «informe.pdf» (PDF)")
+
+
+async def test_la_referencia_viaja_oculta_y_el_pie_va_despues_de_la_nota() -> None:
+    grafo = GrafoFalso()
+
+    await AgenteGemini(grafo).responder(_con_archivo("subilo a mi Drive"))
+
+    [mensaje] = grafo.invocaciones[0][0]["messages"]
+    assert mensaje.content.endswith("\nsubilo a mi Drive")
+    assert ADJUNTO.referencia not in mensaje.content  # el modelo no la ve
+    guardado = mensaje.additional_kwargs[CLAVE_DE_ARCHIVO]
+    assert guardado["referencia"] == ADJUNTO.referencia
+    assert guardado["nombre"] == "informe.pdf"
+    # Sólo texto: un objeto propio volvería distinto después de un checkpoint.
+    assert all(isinstance(valor, str) for valor in guardado.values())
+
+
+@pytest.mark.parametrize("texto", ["sí", "no"])
+async def test_un_archivo_nunca_resuelve_una_confirmacion_pendiente(texto: str) -> None:
+    """Con pie "sí" no aprueba; con "no", el archivo no se pierde: entra igual."""
+    grafo = GrafoFalso(pendiente={"resumen": "Borrar el dentista"})
+
+    await AgenteGemini(grafo).responder(_con_archivo(texto))
+
+    assert grafo.resumes == [{"aprobado": False}]
+    entrada, _ = grafo.invocaciones[-1]
+    assert entrada["messages"][0].additional_kwargs[CLAVE_DE_ARCHIVO]
+
+
+async def test_un_archivo_con_si_a_una_confirmacion_vencida_entra_igual() -> None:
+    grafo = GrafoFalso(pendiente={"resumen": "Borrar el dentista"}, antiguedad_segundos=10_000)
+
+    respuesta = await AgenteGemini(grafo).responder(_con_archivo("sí"))
+
+    assert respuesta != CONFIRMACION_VENCIDA
+    entrada, _ = grafo.invocaciones[-1]
+    assert entrada["messages"][0].additional_kwargs[CLAVE_DE_ARCHIVO]
+
+
+class GrafoLento(GrafoFalso):
+    """Tarda en contestar y cuenta cuántas invocaciones corren a la vez."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.activas = 0
+        self.maximo_simultaneas = 0
+
+    async def ainvoke(
+        self, entrada: Any, config: dict[str, Any], context: Any = None
+    ) -> dict[str, Any]:
+        self.activas += 1
+        self.maximo_simultaneas = max(self.maximo_simultaneas, self.activas)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().ainvoke(entrada, config, context)
+        finally:
+            self.activas -= 1
+
+
+async def test_dos_turnos_de_la_misma_conversacion_no_corren_a_la_vez() -> None:
+    """La foto y enseguida "subila": sin candado, los dos parten del mismo checkpoint."""
+    grafo = GrafoLento()
+    agente = AgenteGemini(grafo)
+
+    await asyncio.gather(agente.responder(_con_archivo()), agente.responder(_consulta("subila")))
+
+    assert grafo.maximo_simultaneas == 1
+
+
+async def test_conversaciones_distintas_no_se_esperan() -> None:
+    grafo = GrafoLento()
+    agente = AgenteGemini(grafo)
+    otra = ConsultaDelUsuario(conversacion_id=uuid4(), usuario_id=uuid4(), texto="hola")
+
+    await asyncio.gather(agente.responder(_consulta()), agente.responder(otra))
+
+    assert grafo.maximo_simultaneas == 2
+
+
+def test_gemini_no_recibe_lo_que_viaja_en_additional_kwargs() -> None:
+    """Canario de la suposición de PB-038, contra la librería instalada.
+
+    Si una versión nueva de la integración empezara a mandar los
+    `additional_kwargs` de la persona, el modelo vería la referencia del archivo
+    (y podría elegirla). Este test lo delata en la actualización.
+    """
+    from langchain_google_genai.chat_models import _parse_chat_history
+
+    oculto = {CLAVE_DE_ARCHIVO: {"referencia": "REFERENCIA-OCULTA"}}
+    _, contenidos = _parse_chat_history([HumanMessage("hola", additional_kwargs=oculto)])
+
+    assert "hola" in repr(contenidos)
+    assert "REFERENCIA-OCULTA" not in repr(contenidos)

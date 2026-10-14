@@ -17,8 +17,9 @@ def test_una_accion_reversible_sale_directo(tipo: TipoDeEscritura) -> None:
     assert requiere_confirmacion([tipo]) is False
 
 
-@pytest.mark.parametrize("tipo", [T.ELIMINAR, T.ENVIAR])
+@pytest.mark.parametrize("tipo", [T.ELIMINAR, T.ENVIAR, T.COMPARTIR])
 def test_una_accion_irreversible_confirma(tipo: TipoDeEscritura) -> None:
+    """Compartir (PB-038) también: lo que un tercero ya vio o se bajó no vuelve."""
     assert requiere_confirmacion([tipo]) is True
 
 

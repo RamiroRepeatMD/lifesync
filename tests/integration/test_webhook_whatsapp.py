@@ -7,6 +7,8 @@ pasaría aunque no se procesara nada. Las aserciones van sobre los dobles.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +25,7 @@ from tests.payloads_meta import (
     WA_ID,
     acuse_de_entrega,
     mensaje_no_texto,
+    webhook_con_archivo,
     webhook_fresco,
 )
 
@@ -164,9 +167,26 @@ def test_un_acuse_de_entrega_no_genera_respuesta(
 def test_un_mensaje_no_texto_no_genera_respuesta(
     client_con_whatsapp: TestClient, mensajero_falso: MensajeroFalso
 ) -> None:
-    _postear(client_con_whatsapp, mensaje_no_texto("image"))
+    _postear(client_con_whatsapp, mensaje_no_texto("audio"))
 
     assert mensajero_falso.enviados == []
+
+
+def test_un_documento_llega_al_agente_con_su_archivo(
+    client_con_whatsapp: TestClient,
+    mensajero_falso: MensajeroFalso,
+    agente_falso: AgenteFalso,
+) -> None:
+    """PB-038: antes se descartaba sin responder; ahora es un turno con su archivo."""
+    ahora = int(datetime.now(UTC).timestamp())
+
+    _postear(client_con_whatsapp, webhook_con_archivo(timestamp=ahora))
+
+    [consulta] = agente_falso.consultas
+    assert consulta.texto == ""
+    assert consulta.adjunto is not None
+    assert consulta.adjunto.nombre == "informe.pdf"
+    assert mensajero_falso.textos == [agente_falso.respuesta]
 
 
 def test_un_reintento_de_meta_no_duplica_la_respuesta(

@@ -47,10 +47,15 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly",
     # PB-032: enviar correos nuevos. Sólo enviar: ni modificar ni borrar.
     "https://www.googleapis.com/auth/gmail.send",
-    # PB-037: encontrar archivos de Drive (nombre, tipo, fecha y link). Sólo
-    # metadatos: no deja abrir ni tocar ningún archivo. Una cuenta conectada
-    # antes recibe 403 al buscar → /conectar de nuevo.
-    "https://www.googleapis.com/auth/drive.metadata.readonly",
+    # PB-037 · PB-038: Drive completo. Es el único que deja compartir
+    # cualquier archivo y subir a una carpeta existente (`drive.file` sólo
+    # toca lo que creó la app; la carpeta se elige con el Picker, que en
+    # WhatsApp no existe). Reemplaza a `drive.metadata.readonly`, que queda
+    # incluido. Lo que se hace con él lo acota el código: buscar, subir y
+    # compartir; nada lee el contenido, ni mueve, ni borra. Restringido para
+    # Google, como `gmail.readonly`. Una cuenta conectada antes recibe 403
+    # al subir o compartir → /conectar de nuevo.
+    "https://www.googleapis.com/auth/drive",
 )
 
 TIMEOUT_SEGUNDOS = 10.0

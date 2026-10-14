@@ -1,4 +1,4 @@
-"""Cliente de envío contra la WhatsApp Cloud API (PB-004).
+"""Cliente de la WhatsApp Cloud API: enviar (PB-004) y bajar archivos recibidos (PB-038).
 
 El cliente HTTP se abre una vez en el `lifespan` y se comparte durante todo el
 proceso: abrir uno por mensaje agregaría un handshake TLS a cada respuesta y
@@ -13,14 +13,18 @@ from typing import Any
 import httpx
 import structlog
 
+from src.application.ports.archivos_recibidos import ArchivoDescargado, ArchivosRecibidos
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.exceptions import (
+    ArchivoDemasiadoGrandeError,
+    ArchivoNoDisponibleError,
     MensajeNoEnviadoError,
     MensajeRechazadoError,
     ServiceUnavailableError,
 )
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.infrastructure.config.settings import Settings
+from src.infrastructure.external.whatsapp.parser import ID_DE_MEDIA
 
 logger = structlog.get_logger(__name__)
 
@@ -59,6 +63,12 @@ CODIGOS_PERMANENTES = frozenset({131026, 131047, 131051, 100, 131030, 190})
 # identidad del usuario —la que se guarda en Supabase y con la que se lo
 # busca— sigue siendo la que Meta entregó, con el 9. Lo único que cambia es
 # el formato de cable del campo `to`.
+# Archivos recibidos (PB-038). Meta sirve la media desde su CDN; el cliente
+# manda nuestro token en TODOS los pedidos (header por defecto), así que un
+# link que no sea de ahí se lo entregaría a un tercero: se valida antes.
+DOMINIO_DE_MEDIA = "fbsbx.com"
+TIMEOUT_DE_DESCARGA_SEGUNDOS = 60.0
+
 PREFIJO_AR_MOVIL = "+549"
 PREFIJO_AR = "+54"
 
@@ -77,8 +87,8 @@ def destino_para_meta(numero: NumeroWhatsApp) -> str:
     return numero.valor
 
 
-class ClienteWhatsApp(MensajeroWhatsApp):
-    """Implementación de `MensajeroWhatsApp` contra la Graph API de Meta."""
+class ClienteWhatsApp(MensajeroWhatsApp, ArchivosRecibidos):
+    """`MensajeroWhatsApp` y `ArchivosRecibidos` contra la Graph API de Meta."""
 
     def __init__(self, cliente: httpx.AsyncClient, settings: Settings) -> None:
         """Recibe sus dependencias por constructor (inyección explícita)."""
@@ -110,6 +120,99 @@ class ClienteWhatsApp(MensajeroWhatsApp):
         except httpx.HTTPError as exc:
             logger.error("whatsapp.envio.error_transporte", tipo=type(exc).__name__)
             raise MensajeNoEnviadoError("No se pudo contactar a WhatsApp.") from None
+
+    async def descargar(self, referencia: str, maximo_bytes: int) -> ArchivoDescargado:
+        """Baja un archivo recibido: primero sus datos en Graph, después los bytes.
+
+        El link que devuelve Graph vale 5 minutos y está firmado: se pide al
+        toque y nunca se loguea. Todo dentro de un tiempo máximo: el timeout de
+        httpx es por lectura, no por descarga completa.
+        """
+        if not ID_DE_MEDIA.fullmatch(referencia):
+            # Termina en la URL de Graph, que va con nuestro token.
+            raise ArchivoNoDisponibleError("La referencia no es un id de media.")
+        try:
+            async with asyncio.timeout(TIMEOUT_DE_DESCARGA_SEGUNDOS):
+                datos = await self._datos_de_media(referencia)
+                tamaño = _tamaño_de(datos)
+                if tamaño is not None and tamaño > maximo_bytes:
+                    logger.info("whatsapp.media.demasiado_grande", bytes=tamaño)
+                    raise ArchivoDemasiadoGrandeError("El archivo supera el tope.")
+                contenido = await self._bajar(_link_de_media(datos), maximo_bytes)
+        except TimeoutError:
+            logger.error("whatsapp.media.timeout")
+            raise ServiceUnavailableError(
+                "WhatsApp tardó demasiado en entregar el archivo."
+            ) from None
+
+        tipo = datos.get("mime_type")
+        logger.info("whatsapp.media.descargada", bytes=len(contenido))
+        return ArchivoDescargado(
+            contenido=contenido,
+            tipo_mime=tipo if isinstance(tipo, str) and tipo else "application/octet-stream",
+        )
+
+    async def _datos_de_media(self, referencia: str) -> dict[str, Any]:
+        """`GET /{id}` en Graph, sólo para media de nuestro número."""
+        try:
+            respuesta = await self._cliente.get(
+                f"{BASE_GRAPH}/{VERSION_GRAPH}/{referencia}",
+                params={"phone_number_id": self._settings.whatsapp_phone_number_id or ""},
+            )
+        except httpx.HTTPError as exc:
+            logger.error("whatsapp.media.error_transporte", tipo=type(exc).__name__)
+            raise ServiceUnavailableError("No se pudo contactar a WhatsApp.") from None
+
+        if respuesta.status_code in (httpx.codes.BAD_REQUEST, httpx.codes.NOT_FOUND):
+            # Un id que ya venció (los de lo recibido duran días) o que no
+            # existe: Graph contesta 400 (código 100) o 404.
+            error = _error_de(respuesta)
+            logger.warning(
+                "whatsapp.media.no_disponible",
+                status_code=respuesta.status_code,
+                codigo_meta=error.get("code"),
+                subcodigo=error.get("error_subcode"),
+            )
+            raise ArchivoNoDisponibleError("WhatsApp ya no tiene ese archivo.")
+        if respuesta.status_code >= httpx.codes.BAD_REQUEST:
+            error = _error_de(respuesta)
+            logger.error(
+                "whatsapp.media.rechazada",
+                status_code=respuesta.status_code,
+                codigo_meta=error.get("code"),
+            )
+            raise ServiceUnavailableError("WhatsApp no entregó el archivo.")
+        try:
+            datos = respuesta.json()
+        except ValueError:
+            datos = None
+        return datos if isinstance(datos, dict) else {}
+
+    async def _bajar(self, link: httpx.URL, maximo_bytes: int) -> bytes:
+        """Los bytes del archivo, cortando apenas superan el tope."""
+        partes: list[bytes] = []
+        total = 0
+        try:
+            async with self._cliente.stream("GET", link, follow_redirects=False) as respuesta:
+                if respuesta.status_code == httpx.codes.NOT_FOUND:
+                    logger.warning("whatsapp.media.link_vencido")
+                    raise ArchivoNoDisponibleError("El link del archivo venció.")
+                if respuesta.status_code != httpx.codes.OK:
+                    # Incluye las redirecciones: no se sigue ninguna.
+                    logger.error(
+                        "whatsapp.media.descarga_fallida", status_code=respuesta.status_code
+                    )
+                    raise ServiceUnavailableError("WhatsApp no entregó el archivo.")
+                async for parte in respuesta.aiter_bytes():
+                    total += len(parte)
+                    if total > maximo_bytes:
+                        logger.info("whatsapp.media.demasiado_grande", bytes=total)
+                        raise ArchivoDemasiadoGrandeError("El archivo supera el tope.")
+                    partes.append(parte)
+        except httpx.HTTPError as exc:
+            logger.error("whatsapp.media.error_transporte", tipo=type(exc).__name__)
+            raise ServiceUnavailableError("No se pudo bajar el archivo de WhatsApp.") from None
+        return b"".join(partes)
 
     def _url_de_envio(self) -> str:
         """Arma la URL desde la configuración, nunca desde el payload entrante.
@@ -172,6 +275,33 @@ class ClienteWhatsApp(MensajeroWhatsApp):
                 largo_enviado=len(enviado),
                 largo_devuelto=len(devuelto),
             )
+
+
+def _tamaño_de(datos: dict[str, Any]) -> int | None:
+    """`file_size` de Graph, que la referencia documenta como texto."""
+    try:
+        return int(datos["file_size"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _link_de_media(datos: dict[str, Any]) -> httpx.URL:
+    """El link de descarga, sólo si es de Meta: https, su dominio, sin trampas.
+
+    Se valida con `httpx.URL` y no por substring: `fbsbx.com.evil.example` o
+    `usuario@…` pasarían un `in`. Al host ajeno no se le pide nada.
+    """
+    crudo = datos.get("url")
+    try:
+        link = httpx.URL(crudo) if isinstance(crudo, str) else None
+    except httpx.InvalidURL:
+        link = None
+    host = link.host if link is not None else ""
+    de_meta = host == DOMINIO_DE_MEDIA or host.endswith(f".{DOMINIO_DE_MEDIA}")
+    if link is None or link.scheme != "https" or not de_meta or link.userinfo or link.port:
+        logger.error("whatsapp.media.link_inesperado", host=host)
+        raise ServiceUnavailableError("WhatsApp devolvió un link de descarga inesperado.")
+    return link
 
 
 def _error_de(respuesta: httpx.Response) -> dict[str, Any]:

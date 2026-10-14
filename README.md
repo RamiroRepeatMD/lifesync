@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar y listar) · Notion API (pendiente) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp y compartir) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 1219 tests (cobertura con ramas 92,0%, piso de 90% en CI) + 24 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 1371 tests (cobertura con ramas 92,2%, piso de 90% en CI) + 28 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -247,6 +247,12 @@ creó), así que reciben el trato de un correo, y además se les quita todo lo q
 link: si no, un archivo llamado con un link falso lograba que el modelo lo pasara como el
 del archivo (lo detectó la evaluación contra Gemini).
 
+Y el bot **recibe archivos**: un PDF o una foto mandados por WhatsApp se suben al Drive de la
+persona ("subilo a la carpeta Facultad"), y cualquier archivo se **comparte** con alguien por
+correo o con un link de sólo lectura, siempre con confirmación: la pregunta muestra el nombre que
+el archivo tiene en Drive y a quién se le da acceso. Lo que se manda queda en Meta y se baja
+recién al subirlo; el modelo nunca ve ni elige qué archivo se baja.
+
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
 "Recordame en 20 minutos que saque la pizza" → confirmación → a esa hora llega
 "⏰ Recordatorio: sacar la pizza". Se pueden listar y cancelar, y no necesitan la cuenta de
@@ -284,7 +290,9 @@ Tres decisiones que conviene conocer antes de tocarlo:
 
 - La identidad del usuario se apoya en el teléfono. Meta está migrando a IDs de usuario (BSUID) y
   algún día los webhooks pueden llegar sin `wa_id`; el parser ya lo detecta y lo loguea.
-- No se manejan mensajes que no son de texto: se descartan con `whatsapp.tipo_no_soportado`.
+- De lo que no es texto, sólo se reciben documentos y fotos (PB-038). Audio, video, stickers y el
+  resto se descartan sin respuesta, y quedan contados en `no_soportados` del evento
+  `whatsapp.webhook.recibido`.
 - Fuera de la ventana de 24 h de atención hay que usar plantillas. Hoy sólo se loguea el error 131047.
 
 ---
@@ -295,9 +303,11 @@ La persona conecta su cuenta desde WhatsApp: escribe `/conectar`, el bot le mand
 un enlace firmado que vence en 10 minutos, autoriza en Google y vuelve al chat.
 Se piden seis permisos: lectura de calendario (`calendar.readonly`), gestión de
 eventos (`calendar.events`), tareas (`tasks`), lectura de correo (`gmail.readonly`), envío
-(`gmail.send`, que sólo permite mandar: ni modificar ni borrar) y los datos de los archivos
-de Drive (`drive.metadata.readonly`: nombre, tipo, fecha y link; no deja abrir ni tocar
-ninguno). Una cuenta conectada antes de sumar un permiso tiene que volver a hacer `/conectar`.
+(`gmail.send`, que sólo permite mandar: ni modificar ni borrar) y Drive (`drive`). Drive va
+completo porque es el único permiso que deja compartir cualquier archivo y subir a una carpeta
+que ya existe; lo que el bot hace con él lo acota el código: buscar, subir y compartir, sin
+leer el contenido, mover ni borrar. Una cuenta conectada antes de sumar un permiso tiene que
+volver a hacer `/conectar`.
 Además de pedir el permiso, cada API hay que **habilitarla** en el proyecto de Google Cloud
 (Calendar, Tasks, Gmail y Drive): son dos llaves distintas. Para desvincular: `/desconectar` —
 pide confirmación y **revoca el permiso en Google de verdad**, no sólo borra la
@@ -587,9 +597,9 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-035 | Confirmación + errores de envío (Gmail) | ✅ (dice si el correo salió; comprueba la cuenta antes del sí) |
 | PB-036 | Pruebas de integración Gmail | ✅ (de punta a punta; 3 bugs corregidos) |
 | PB-037 | Drive: buscar y listar archivos | ✅ (nombre, tipo, fecha y link; sin abrirlos) |
-| PB-040 | Pruebas de las tools críticas | ✅ (invariantes sobre las 19 tools; cobertura medida en CI) |
+| PB-038 | Drive: subir y compartir archivos | ✅ (recibe documentos y fotos por WhatsApp; comparte con personas o por link) |
+| PB-040 | Pruebas de las tools críticas | ✅ (invariantes sobre las 22 tools; cobertura medida en CI) |
 | PB-041 | Diagramas UML actualizados | — (no aplica: no había diagramas que actualizar) |
-| PB-038 | Drive: subir y compartir archivos | ⏳ (Could; replanificado al Sprint 6) |
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 

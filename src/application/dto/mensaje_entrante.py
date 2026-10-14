@@ -1,4 +1,4 @@
-"""DTO de un mensaje de texto recibido por WhatsApp (PB-004).
+"""DTO de un mensaje recibido por WhatsApp: texto, o un archivo con su pie (PB-004 · PB-038).
 
 Transporta lo que el caso de uso necesita, sin arrastrar la forma del payload
 de Meta hacia adentro. Deliberadamente NO lleva el `phone_number_id` del
@@ -12,20 +12,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 
 
 @dataclass(frozen=True, slots=True)
 class MensajeEntrante:
-    """Un mensaje de texto que un usuario nos mandó.
+    """Un mensaje que un usuario nos mandó: texto, o un archivo con su pie.
 
     Attributes:
         wamid: Identificador único del mensaje. Es la clave de deduplicación.
         remitente: Quién escribió; se usa para resolver el `Usuario` y responder.
-        texto: Cuerpo del mensaje. `repr=False` porque es contenido privado y
-            no debe aparecer en un traceback ni en un log (RF-18).
+        texto: Cuerpo del mensaje, o el pie del archivo (que puede venir
+            vacío). `repr=False` porque es contenido privado y no debe
+            aparecer en un traceback ni en un log (RF-18).
         enviado_en: Momento en que Meta dice que se envió, con zona horaria.
         nombre_perfil: Nombre del perfil de WhatsApp, si vino.
+        adjunto: El documento o la foto que mandó, si mandó uno (PB-038).
     """
 
     wamid: str
@@ -33,3 +36,4 @@ class MensajeEntrante:
     texto: str = field(repr=False)
     enviado_en: datetime
     nombre_perfil: str | None = None
+    adjunto: ArchivoAdjunto | None = field(default=None, repr=False)

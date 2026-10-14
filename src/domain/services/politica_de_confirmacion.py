@@ -6,8 +6,8 @@ resultó fricción pura: agendar un turno no debería frenar. Desde que hay
 acciones con criticidad distinta, la regla es de negocio y vive acá, en el
 dominio, sin saber nada de LangGraph ni de WhatsApp:
 
-- **Lo irreversible confirma**: borrar y mandar algo a un tercero no tienen
-  vuelta atrás.
+- **Lo irreversible confirma**: borrar, mandar algo a un tercero o darle
+  acceso a un archivo no tienen vuelta atrás.
 - **Varias acciones juntas confirman**, todas en una sola pregunta: es "muchas
   cosas", y la persona merece ver la lista completa antes.
 - **Con texto de terceros a la vista, todo confirma.** Un correo lo escribe
@@ -35,10 +35,15 @@ class TipoDeEscritura(Enum):
     POSPONER = "posponer"
     ELIMINAR = "eliminar"
     ENVIAR = "enviar"
+    COMPARTIR = "compartir"
 
 
-# Lo que no tiene vuelta atrás: lo borrado no vuelve, y un correo no se des-envía.
-IRREVERSIBLES = frozenset({TipoDeEscritura.ELIMINAR, TipoDeEscritura.ENVIAR})
+# Lo que no tiene vuelta atrás: lo borrado no vuelve, un correo no se des-envía,
+# y lo que un tercero ya vio o se bajó de un archivo compartido tampoco (PB-038:
+# además, Google le avisa por correo en el momento).
+IRREVERSIBLES = frozenset(
+    {TipoDeEscritura.ELIMINAR, TipoDeEscritura.ENVIAR, TipoDeEscritura.COMPARTIR}
+)
 
 
 def requiere_confirmacion(

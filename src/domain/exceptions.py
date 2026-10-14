@@ -66,6 +66,53 @@ class CuentaNoConectadaError(DomainError):
     )
 
 
+class ArchivoNoDisponibleError(EntityNotFoundError):
+    """El archivo que mandó la persona ya no se puede bajar del canal (PB-038).
+
+    WhatsApp guarda lo recibido unos días (7, según su documentación): pasado
+    ese plazo, o si el id no existe, no hay de dónde sacarlo. El remedio lo
+    tiene la persona: mandarlo de nuevo.
+    """
+
+    mensaje_usuario = "Ese archivo ya no está disponible en WhatsApp: mandámelo de nuevo y lo subo."
+
+
+class ArchivoDemasiadoGrandeError(InvalidValueError):
+    """El archivo pesa más de lo que se sube desde el chat (PB-038).
+
+    El tope es nuestro, no de Drive: el archivo pasa por la memoria del
+    proceso entre la descarga y la subida.
+    """
+
+    mensaje_usuario = (
+        "Ese archivo es demasiado grande para subirlo desde acá: subilo desde la app de Drive."
+    )
+
+
+class DriveRechazoError(DomainError):
+    """Drive no dejó hacer lo pedido sobre un archivo (PB-038).
+
+    Cubre lo que reconectar no arregla: la persona no tiene permiso sobre ese
+    archivo, la cuenta (de una organización) no deja compartir afuera, o Drive
+    rechazó la dirección. Un 400 de Drive al compartir a veces llega aunque el
+    archivo SÍ quedó compartido (no pudo mandar el aviso): por eso el mensaje
+    no afirma que no pasó, y manda a mirar Drive antes de repetirlo.
+    """
+
+    mensaje_usuario = (
+        "Drive no confirmó que se haya hecho: puede que no tengas permiso sobre ese "
+        "archivo o que tu cuenta no lo permita. Fijate en Drive antes de pedírmelo de nuevo."
+    )
+
+
+class DriveLlenoError(DomainError):
+    """No hay espacio en el Drive de la persona para subir el archivo (PB-038)."""
+
+    mensaje_usuario = (
+        "Tu Google Drive está lleno, así que no pude subirlo. Liberá espacio y pedímelo de nuevo."
+    )
+
+
 class InfrastructureError(LifeSyncError):
     """Falla técnica al hablar con un sistema externo (base de datos, APIs).
 

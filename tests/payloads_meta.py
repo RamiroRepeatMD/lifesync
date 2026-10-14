@@ -170,8 +170,11 @@ def acuse_de_entrega() -> bytes:
     )
 
 
-def mensaje_no_texto(tipo: str = "image", *, timestamp: int = TIMESTAMP_FIJO) -> bytes:
-    """Un mensaje que no es de texto: hay que descartarlo sin romperse."""
+def mensaje_no_texto(tipo: str = "audio", *, timestamp: int = TIMESTAMP_FIJO) -> bytes:
+    """Un mensaje que no es texto ni archivo: hay que descartarlo sin romperse.
+
+    Desde PB-038 las fotos y los documentos SÍ entran (ver `webhook_con_archivo`).
+    """
     return _a_bytes(
         _envolver(
             {
@@ -184,9 +187,52 @@ def mensaje_no_texto(tipo: str = "image", *, timestamp: int = TIMESTAMP_FIJO) ->
                         "id": WAMID,
                         "timestamp": str(timestamp),
                         "type": tipo,
-                        tipo: {"id": "1234", "mime_type": "image/jpeg"},
+                        tipo: {"id": "1234", "mime_type": "audio/ogg; codecs=opus"},
                     }
                 ],
             }
         )
     )
+
+
+# --- Archivos (PB-038) ------------------------------------------------------------
+
+# Los ids de media de Meta son números largos, como texto.
+MEDIA_ID = "1037543291543636"
+
+
+def mensaje_con_archivo(
+    tipo: str = "document",
+    *,
+    caption: str | None = None,
+    filename: str | None = "informe.pdf",
+    mime_type: str = "application/pdf",
+    media_id: str = MEDIA_ID,
+    timestamp: int = TIMESTAMP_FIJO,
+) -> dict[str, Any]:
+    """Un `value` con un documento o una foto, con los campos que manda Meta.
+
+    Una foto no trae `filename` (sólo los documentos); el pie es opcional.
+    """
+    media: dict[str, Any] = {
+        "mime_type": mime_type,
+        "sha256": "rC9hcQoXq8Q0eHg+0bQBPm2wbm8CT8kB2Qd1WRsZm8Q=",
+        "id": media_id,
+    }
+    if caption is not None:
+        media["caption"] = caption
+    if filename is not None and tipo == "document":
+        media["filename"] = filename
+    return {
+        "messaging_product": "whatsapp",
+        "metadata": _metadata(),
+        "contacts": [{"profile": {"name": "Ramiro Gracia"}, "wa_id": WA_ID}],
+        "messages": [
+            {"from": WA_ID, "id": WAMID, "timestamp": str(timestamp), "type": tipo, tipo: media}
+        ],
+    }
+
+
+def webhook_con_archivo(**kwargs: Any) -> bytes:
+    """Payload completo con un documento o una foto, listo para firmar y postear."""
+    return _a_bytes(_envolver(mensaje_con_archivo(**kwargs)))

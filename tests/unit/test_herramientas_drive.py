@@ -34,6 +34,7 @@ from tests.dobles import (
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
+    RecibidosFalsos,
     TareasFalsas,
 )
 
@@ -82,7 +83,7 @@ async def test_cada_archivo_va_con_tipo_fecha_local_y_link() -> None:
     assert texto.splitlines() == [
         INICIO_DE_ARCHIVOS,
         "1. «Presupuesto 2026» — planilla — modificado el lunes 12 de octubre, 18:30"
-        " — link: https://docs.google.com/spreadsheets/d/f1/edit",
+        " — id: f1 — link: https://docs.google.com/spreadsheets/d/f1/edit",
     ]
 
 
@@ -96,8 +97,10 @@ async def test_un_archivo_ajeno_dice_de_quien_es_y_uno_sin_tipo_ni_link_no_inven
 
     _, ajeno, sin_datos = (await _usar(archivos)).splitlines()
 
-    assert " — de «Ana Gómez» — link: https://" in ajeno
-    assert sin_datos == "2. «notas.txt» — archivo — modificado el lunes 12 de octubre, 18:30"
+    assert " — de «Ana Gómez» — id: f1 — link: https://" in ajeno
+    assert sin_datos == (
+        "2. «notas.txt» — archivo — modificado el lunes 12 de octubre, 18:30 — id: f2"
+    )
 
 
 async def test_sin_resultados_lo_dice_sin_inventar() -> None:
@@ -209,7 +212,7 @@ async def test_un_nombre_no_puede_colar_un_link_falso(falso: str) -> None:
     )
     assert linea.count("«") == linea.count("»") == 2  # sólo las del listado
     assert linea.endswith(
-        " — de «Ana [link quitado]» — link: https://docs.google.com/spreadsheets/d/f1/edit"
+        " — de «Ana [link quitado]» — id: f1 — link: https://docs.google.com/spreadsheets/d/f1/edit"
     )
 
 
@@ -283,7 +286,21 @@ def test_sin_puerto_de_drive_no_se_ofrece() -> None:
     assert "buscar_archivos" not in nombres
 
 
-def test_con_puerto_de_drive_se_ofrece() -> None:
+def test_con_puerto_de_drive_se_ofrece_buscar_y_compartir() -> None:
     nombres = [h.name for h in construir_herramientas(None, archivos=ArchivosFalsos())]
 
-    assert nombres == ["fecha_y_hora_actual", "buscar_archivos"]
+    # Sin quien baje lo recibido, subir no se ofrece (PB-038).
+    assert nombres == [
+        "fecha_y_hora_actual",
+        "buscar_archivos",
+        "compartir_archivo",
+        "compartir_por_link",
+    ]
+
+
+def test_con_los_archivos_recibidos_tambien_se_ofrece_subir() -> None:
+    herramientas = construir_herramientas(
+        None, archivos=ArchivosFalsos(), recibidos=RecibidosFalsos()
+    )
+
+    assert [h.name for h in herramientas][1:3] == ["buscar_archivos", "subir_archivo"]

@@ -8,6 +8,7 @@ para todas a la vez, y fallan si mañana se suma una tool que no las cumple:
 - con texto de terceros a la vista (un correo, un listado de Drive), toda
   escritura pide el sí (modo estricto, RF-08 v2);
 - dos escrituras juntas son una lista, y cada una corre una sola vez;
+- un archivo recibido no se baja antes del sí (PB-038);
 - ninguna falla de Google se escapa como excepción, y cada una trae su remedio;
 - lo que se borra a medias se cuenta tal cual, y una falla no prevista no se
   reintenta sola.
@@ -19,7 +20,7 @@ sondas previas no encontraron bugs: lo que faltaba era la red que lo garantice.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -32,6 +33,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from pydantic import BaseModel
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
@@ -61,12 +63,14 @@ from src.infrastructure.llm.herramientas import (
     LECTURAS_DE_TERCEROS,
     TIPO_POR_HERRAMIENTA,
     construir_herramientas,
+    mensaje_de_la_persona,
 )
 from tests.dobles import (
     ArchivosFalsos,
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
+    RecibidosFalsos,
     RecordatoriosEnMemoria,
     TareasFalsas,
 )
@@ -96,7 +100,7 @@ def _correo(id_: str, remitente: str, asunto: str) -> Correo:
 
 
 class Puertos:
-    """Los cinco dobles, con datos que encajan con los argumentos de `CASOS`."""
+    """Los seis dobles, con datos que encajan con los argumentos de `CASOS`."""
 
     def __init__(self) -> None:
         self.usuario: UUID = uuid4()
@@ -129,8 +133,17 @@ class Puertos:
                     modificado=AHORA,
                     enlace="https://docs.google.com/spreadsheets/d/f1/edit",
                 ),
-            )
+            ),
+            carpetas=(
+                Archivo(
+                    id="c1",
+                    nombre="Facultad",
+                    tipo=TipoDeArchivo.CARPETA,
+                    modificado=AHORA,
+                ),
+            ),
         )
+        self.recibidos = RecibidosFalsos()
         self.recordatorios = RecordatoriosEnMemoria(
             Recordatorio(
                 usuario_id=self.usuario, texto="llamar al banco", momento=AHORA + timedelta(hours=3)
@@ -139,11 +152,16 @@ class Puertos:
 
     def herramientas(self) -> tuple[BaseTool, ...]:
         return construir_herramientas(
-            self.calendario, self.tareas, self.correos, self.recordatorios, archivos=self.archivos
+            self.calendario,
+            self.tareas,
+            self.correos,
+            self.recordatorios,
+            archivos=self.archivos,
+            recibidos=self.recibidos,
         )
 
     def escrituras(self) -> int:
-        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 12 tools."""
+        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 15 tools."""
         c, t = self.calendario, self.tareas
         recordatorios = sum(
             1
@@ -159,6 +177,8 @@ class Puertos:
             + len(t.pospuestas)
             + len(t.eliminadas)
             + len(self.correos.enviados)
+            + len(self.archivos.subidos)
+            + len(self.archivos.compartidos)
             + recordatorios
         )
 
@@ -189,6 +209,9 @@ CASOS: dict[str, dict[str, Any]] = {
         "hora": f"{EN_DOS_HORAS:%H:%M}",
     },
     "cancelar_recordatorio": {"texto": "banco"},
+    "subir_archivo": {},
+    "compartir_archivo": {"id_archivo": "f1", "con": "beto@ejemplo.com"},
+    "compartir_por_link": {"id_archivo": "f1"},
 }
 LECTURAS: dict[str, dict[str, Any]] = {
     "fecha_y_hora_actual": {},
@@ -209,6 +232,11 @@ DE_GOOGLE = sorted((set(CASOS) | set(LECTURAS)) - SIN_GOOGLE)
 ESCRITURAS_DE_GOOGLE = sorted(set(CASOS) - SIN_GOOGLE)
 
 
+ARCHIVO = ArchivoAdjunto(
+    referencia="1037543291543636", tipo_mime="application/pdf", nombre="informe.pdf"
+)
+
+
 def _llamadas(*pedidos: tuple[str, dict[str, Any]]) -> AIMessage:
     """Un mensaje del modelo con todas las llamadas juntas, como hace Gemini."""
     return AIMessage(
@@ -225,6 +253,10 @@ class Bot:
 
     def __init__(self, puertos: Puertos, *guion: AIMessage) -> None:
         self.puertos = puertos
+        # La persona manda un archivo en su primer mensaje (PB-038): sin eso,
+        # la matriz de `subir_archivo` pasaría en el vacío. Sólo en el primero:
+        # un "sí" con archivo no aprueba nada.
+        self._archivo: ArchivoAdjunto | None = ARCHIVO
         self.grafo = construir_grafo(
             ModeloFalso(guion=list(guion)), puertos.herramientas(), InMemorySaver()
         )
@@ -232,8 +264,11 @@ class Bot:
 
     async def decir(self, texto: str) -> str:
         usuario = self.puertos.usuario
+        adjunto, self._archivo = self._archivo, None
         return await self.agente.responder(
-            ConsultaDelUsuario(conversacion_id=usuario, usuario_id=usuario, texto=texto)
+            ConsultaDelUsuario(
+                conversacion_id=usuario, usuario_id=usuario, texto=texto, adjunto=adjunto
+            )
         )
 
     async def respuestas(self) -> dict[str, str]:
@@ -294,14 +329,16 @@ async def test_ninguna_escritura_escribe_fuera_del_nodo_de_la_politica(nombre: s
     grafo.add_edge(START, "herramientas")
     grafo.add_edge("herramientas", END)
 
+    con_archivo = mensaje_de_la_persona("hacelo", ARCHIVO, datetime.now(UTC))
     estado = await grafo.compile(checkpointer=InMemorySaver()).ainvoke(
-        {"messages": [_llamadas((nombre, CASOS[nombre]))]},
+        {"messages": [con_archivo, _llamadas((nombre, CASOS[nombre]))]},
         config={"configurable": {"thread_id": "hilo"}},
         context=ContextoDeAgente(usuario_id=puertos.usuario),
     )
 
     assert "__interrupt__" not in estado  # tampoco pausa: no es su decisión
     assert puertos.escrituras() == 0
+    assert puertos.recibidos.descargas == []
 
 
 # --- C. Modo estricto ------------------------------------------------------------------
@@ -325,8 +362,10 @@ async def test_con_texto_de_terceros_a_la_vista_toda_escritura_pide_el_si(
 
     assert CONFIRMAR in pregunta
     assert puertos.escrituras() == 0
+    assert puertos.recibidos.descargas == []  # nada se baja antes del sí
     await bot.decir("no")
     assert puertos.escrituras() == 0
+    assert puertos.recibidos.descargas == []
 
 
 # --- D. Lote -----------------------------------------------------------------------------
@@ -350,6 +389,7 @@ async def test_dos_escrituras_juntas_son_una_lista_y_cada_una_corre_una_vez(
 
     assert pregunta.endswith(CIERRE_DEL_LOTE)
     assert puertos.escrituras() == 0
+    assert puertos.recibidos.descargas == []
     await bot.decir(decision)
     assert puertos.escrituras() == (2 if decision == "sí" else 0)
 
@@ -392,6 +432,7 @@ async def test_una_falla_de_google_al_escribir_se_cuenta_con_su_remedio(
     puertos.calendario.fallar_al_escribir = falla
     puertos.tareas.fallar_al_escribir = falla
     puertos.correos.fallar_al_enviar = falla
+    puertos.archivos.fallar_al_escribir = falla
 
     texto = await _usar(puertos, nombre, CASOS[nombre])
 
@@ -443,6 +484,8 @@ async def test_si_la_base_se_cae_al_cancelar_el_recordatorio_sigue_programado() 
         ("modificar_evento_del_calendario", "Ese evento ya no está en el calendario"),
         ("completar_tarea", "Esa tarea ya no está en la lista"),
         ("posponer_tarea", "Esa tarea ya no está en la lista"),
+        ("compartir_archivo", "Ese archivo ya no está en tu Drive"),
+        ("compartir_por_link", "Ese archivo ya no está en tu Drive"),
     ],
 )
 async def test_si_lo_borraron_entre_la_busqueda_y_la_escritura_lo_dice(
@@ -451,6 +494,7 @@ async def test_si_lo_borraron_entre_la_busqueda_y_la_escritura_lo_dice(
     puertos = Puertos()
     puertos.calendario.fallar_al_escribir = EntityNotFoundError("404")
     puertos.tareas.fallar_al_escribir = EntityNotFoundError("404")
+    puertos.archivos.fallar_al_escribir = EntityNotFoundError("404")
 
     texto = await _usar(puertos, nombre, CASOS[nombre])
 
@@ -632,6 +676,20 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
             "Es muy largo para un recordatorio",
         ),
         ("cancelar_recordatorio", {"texto": " "}, "¿Cuál recordatorio?"),
+        ("subir_archivo", {"carpeta": "Trabajo"}, "No encontré una carpeta tuya"),
+        ("subir_archivo", {"nombre": "x" * 300}, "Ese nombre es muy largo"),
+        ("subir_archivo", {"archivo": "planilla"}, "No encontré un archivo tuyo"),
+        (
+            "compartir_archivo",
+            {"id_archivo": "f1", "con": "beto"},
+            "no parece una dirección de correo válida",
+        ),
+        (
+            "compartir_archivo",
+            {"id_archivo": "no-existe", "con": "beto@ejemplo.com"},
+            "No encontré ese archivo",
+        ),
+        ("compartir_por_link", {"id_archivo": "c1"}, "es una carpeta"),
     ],
 )
 async def test_lo_invalido_se_explica_sin_pausa_y_sin_escribir(

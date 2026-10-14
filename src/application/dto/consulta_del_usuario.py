@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
+
 
 @dataclass(frozen=True, slots=True)
 class ConsultaDelUsuario:
@@ -29,9 +31,12 @@ class ConsultaDelUsuario:
             privado y no debe aparecer en un traceback ni en un log (RF-18).
         nombre_usuario: Nombre de pila, si se conoce, para que el agente pueda
             dirigirse a la persona.
+        adjunto: El archivo que mandó con este turno, si mandó uno (PB-038).
+            Con archivo, `texto` puede venir vacío.
     """
 
     conversacion_id: UUID
     usuario_id: UUID
     texto: str = field(repr=False)
     nombre_usuario: str | None = None
+    adjunto: ArchivoAdjunto | None = field(default=None, repr=False)

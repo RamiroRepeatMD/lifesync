@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.external.whatsapp.parser import (
     FRESCURA_MAXIMA,
     LARGO_MAXIMO_TEXTO,
@@ -20,6 +21,7 @@ from src.infrastructure.external.whatsapp.parser import (
     parsear,
 )
 from tests.payloads_meta import (
+    MEDIA_ID,
     MOMENTO_FIJO,
     PHONE_NUMBER_ID,
     TELEFONO_E164,
@@ -27,6 +29,7 @@ from tests.payloads_meta import (
     WAMID,
     acuse_de_entrega,
     mensaje_no_texto,
+    webhook_con_archivo,
     webhook_con_dos_entradas,
     webhook_con_varios_mensajes,
     webhook_de_texto,
@@ -96,8 +99,9 @@ def test_un_acuse_de_entrega_no_es_un_mensaje() -> None:
     assert contenido.hay_trabajo is False
 
 
-def test_un_mensaje_no_texto_se_descarta() -> None:
-    contenido = _parsear(mensaje_no_texto("image"))
+@pytest.mark.parametrize("tipo", ["audio", "sticker", "video", "location"])
+def test_lo_que_no_es_texto_ni_archivo_se_descarta(tipo: str) -> None:
+    contenido = _parsear(mensaje_no_texto(tipo))
 
     assert contenido.mensajes == ()
     assert contenido.no_soportados == 1
@@ -264,3 +268,69 @@ def test_el_repr_del_dto_no_expone_el_texto() -> None:
 
     assert "mi secreto medico" not in repr(mensaje)
     assert WA_ID in repr(mensaje) or TELEFONO_E164 in repr(mensaje)
+
+
+# --- Archivos (PB-038) ----------------------------------------------------------------
+
+
+def test_un_documento_trae_su_archivo_y_el_pie_como_texto() -> None:
+    contenido = _parsear(webhook_con_archivo(caption="subilo a mi Drive"))
+
+    [mensaje] = contenido.mensajes
+    assert mensaje.texto == "subilo a mi Drive"
+    assert mensaje.adjunto is not None
+    assert mensaje.adjunto.referencia == MEDIA_ID
+    assert mensaje.adjunto.tipo_mime == "application/pdf"
+    assert mensaje.adjunto.nombre == "informe.pdf"
+    assert mensaje.wamid == WAMID  # pasa los mismos controles que el texto
+
+
+def test_una_foto_sin_pie_se_nombra_con_la_hora_y_el_final_del_id() -> None:
+    """Varias fotos llegan en el mismo segundo: el final del id evita que se pisen."""
+    contenido = _parsear(webhook_con_archivo(tipo="image", mime_type="image/jpeg"))
+
+    [mensaje] = contenido.mensajes
+    assert mensaje.texto == ""
+    local = MOMENTO_FIJO.astimezone(ZONA_HORARIA)
+    assert mensaje.adjunto is not None
+    assert mensaje.adjunto.nombre == f"foto-{local:%Y%m%d-%H%M%S}-{MEDIA_ID[-4:]}.jpg"
+
+
+def test_un_archivo_viejo_se_descarta_como_un_texto_viejo() -> None:
+    viejo = int((MOMENTO_FIJO - FRESCURA_MAXIMA - timedelta(minutes=1)).timestamp())
+
+    contenido = _parsear(webhook_con_archivo(timestamp=viejo))
+
+    assert contenido.mensajes == ()
+    assert contenido.vencidos == 1
+
+
+@pytest.mark.parametrize("media_id", ["../me", "123abc", ""])
+def test_un_id_de_media_que_no_son_digitos_se_descarta(media_id: str) -> None:
+    """El id termina en una URL de Graph que va con nuestro token: sólo dígitos."""
+    contenido = _parsear(webhook_con_archivo(media_id=media_id))
+
+    assert contenido.mensajes == ()
+    assert contenido.ignorados == 1
+
+
+def test_el_nombre_del_archivo_queda_en_una_linea() -> None:
+    contenido = _parsear(webhook_con_archivo(filename="Infor\nme\x00 final.pdf"))
+
+    assert contenido.mensajes[0].adjunto.nombre == "Infor me final.pdf"
+
+
+def test_un_nombre_larguisimo_se_acota_sin_perder_la_extension() -> None:
+    contenido = _parsear(webhook_con_archivo(filename="a" * 300 + ".pdf"))
+
+    nombre = contenido.mensajes[0].adjunto.nombre
+    assert len(nombre) <= 200
+    assert nombre.endswith(".pdf")
+
+
+def test_el_repr_no_muestra_el_archivo() -> None:
+    """El nombre del archivo es contenido de la persona (RF-18)."""
+    contenido = _parsear(webhook_con_archivo(filename="Resultados de biopsia.pdf"))
+
+    assert "biopsia" not in repr(contenido.mensajes[0])
+    assert "biopsia" not in repr(contenido.mensajes[0].adjunto)

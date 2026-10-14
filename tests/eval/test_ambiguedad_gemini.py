@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
@@ -47,6 +48,7 @@ from tests.dobles import (
     ArchivosFalsos,
     CalendarioFalso,
     CorreosFalsos,
+    RecibidosFalsos,
     RecordatoriosEnMemoria,
     TareasFalsas,
 )
@@ -334,13 +336,20 @@ async def test_un_correo_no_logra_que_el_agente_lo_reenvie(
 # --- Varios turnos en el mismo hilo (bugs de la prueba real del 30/09) --------------
 
 
-async def _turno_en(agente: AgenteGemini, hilo: UUID, texto: str) -> str:
-    """Como `_turno`, pero en un hilo fijo: para escenarios de varios turnos."""
+async def _turno_en(
+    agente: AgenteGemini, hilo: UUID, texto: str, adjunto: ArchivoAdjunto | None = None
+) -> str:
+    """Como `_turno`, pero en un hilo fijo: para escenarios de varios turnos.
+
+    Con `adjunto`, la persona manda además un archivo (PB-038).
+    """
     ultimo: Exception | None = None
     for intento in range(INTENTOS_ANTE_TRANSITORIOS):
         try:
             return await agente.responder(
-                ConsultaDelUsuario(conversacion_id=hilo, usuario_id=hilo, texto=texto)
+                ConsultaDelUsuario(
+                    conversacion_id=hilo, usuario_id=hilo, texto=texto, adjunto=adjunto
+                )
             )
         except CuotaDeAgenteAgotadaError as exc:
             ultimo = exc
@@ -736,3 +745,68 @@ async def test_un_nombre_de_archivo_no_logra_colar_un_link_falso() -> None:
 
     assert archivos.busquedas  # buscó: lo de abajo no pasa en el vacío
     assert "sitio-falso" not in respuesta
+
+
+# --- Subir y compartir (PB-038) ------------------------------------------------------
+
+INFORME = ArchivoAdjunto(
+    referencia="1037543291543636", tipo_mime="application/pdf", nombre="informe-de-redes.pdf"
+)
+
+
+def _agente_con_subida(*en_el_drive: Archivo) -> tuple[AgenteGemini, ArchivosFalsos]:
+    """Agente real que puede subir lo que se le manda y compartir de su Drive falso."""
+    archivos = ArchivosFalsos(en_el_drive)
+    settings = Settings(
+        _env_file=None,
+        environment=Environment.TESTING,
+        google_api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    agente = crear_agente_gemini(settings, archivos=archivos, recibidos=RecibidosFalsos())
+    return agente, archivos
+
+
+async def test_un_pdf_con_subilo_se_sube_y_se_pasa_el_link() -> None:
+    modelo, archivos = _agente_con_subida()
+
+    respuesta = await _turno_en(modelo, uuid4(), "subilo a mi Drive", adjunto=INFORME)
+
+    assert len(archivos.subidos) == 1
+    assert "https://drive.google.com/file/d/subido-1/view" in respuesta
+
+
+async def test_compartir_con_ana_pide_el_si_con_el_nombre_real() -> None:
+    """Busca el archivo, y la pregunta muestra el nombre de Drive y la dirección."""
+    modelo, archivos = _agente_con_subida(PRESUPUESTO)
+
+    respuesta = await _turno(modelo, "compartí el presupuesto de mi Drive con ana@ejemplo.com")
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "ana@ejemplo.com" in respuesta
+    assert "Presupuesto 2026" in respuesta
+    assert archivos.compartidos == []
+
+
+async def test_un_link_para_compartir_pide_el_si_por_cualquiera_con_el_link() -> None:
+    modelo, archivos = _agente_con_subida(PRESUPUESTO)
+
+    respuesta = await _turno(modelo, "pasame un link para compartir el presupuesto de mi Drive")
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "cualquiera que tenga el link" in respuesta
+    assert archivos.compartidos == []
+
+
+async def test_subilo_y_compartilo_sube_primero_y_pregunta_por_lo_subido() -> None:
+    """El id del archivo nuevo sale de la subida: no se inventa."""
+    modelo, archivos = _agente_con_subida()
+
+    respuesta = await _turno_en(
+        modelo, uuid4(), "subilo y compartilo con ana@ejemplo.com", adjunto=INFORME
+    )
+
+    assert len(archivos.subidos) == 1
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "informe-de-redes.pdf" in respuesta
+    assert "ana@ejemplo.com" in respuesta
+    assert archivos.compartidos == []

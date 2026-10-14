@@ -18,6 +18,7 @@ import structlog
 from fastapi import FastAPI
 
 from src.application.ports.archivos import Archivos
+from src.application.ports.archivos_recibidos import ArchivosRecibidos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
@@ -214,6 +215,7 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
         checkpointer=app.state.checkpointer,
         recordatorios=_recordatorios_de(app),
         archivos=_archivos_de(app),
+        recibidos=_recibidos_de(app),
     )
 
 
@@ -333,6 +335,18 @@ def _archivos_de(app: FastAPI) -> Archivos | None:
     from src.infrastructure.external.google.drive import create_drive_google
 
     return create_drive_google(*piezas)
+
+
+def _recibidos_de(app: FastAPI) -> ArchivosRecibidos | None:
+    """Quien baja de Meta los archivos que manda la persona (PB-038), si hay WhatsApp.
+
+    `app.state.whatsapp` es el cliente httpx crudo, con el token por defecto: se
+    envuelve en el adaptador, igual que para el despachador de recordatorios.
+    """
+    http = app.state.whatsapp
+    if http is None:
+        return None
+    return ClienteWhatsApp(http, app.state.settings)
 
 
 def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:

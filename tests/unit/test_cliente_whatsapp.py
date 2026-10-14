@@ -16,6 +16,8 @@ import pytest
 import structlog
 
 from src.domain.exceptions import (
+    ArchivoDemasiadoGrandeError,
+    ArchivoNoDisponibleError,
     MensajeNoEnviadoError,
     MensajeRechazadoError,
     ServiceUnavailableError,
@@ -336,3 +338,156 @@ async def test_el_cliente_construido_trae_el_token_y_timeout() -> None:
         assert http.timeout.read is not None
     finally:
         await http.aclose()
+
+
+# --- Bajar los archivos recibidos (PB-038) -------------------------------------------
+
+MEDIA = "1037543291543636"
+LINK_FIRMADO = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1&hash=FIRMA-SECRETA"
+PDF = b"%PDF-1.4 contenido del informe"
+
+
+def _meta_con_media(
+    url: str = LINK_FIRMADO, tamaño: str = str(len(PDF)), contenido: bytes = PDF
+) -> Manejador:
+    """Graph contesta los datos del archivo; el host de media, los bytes."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.host == "graph.facebook.com":
+            datos = {"url": url, "mime_type": "application/pdf", "file_size": tamaño, "id": MEDIA}
+            return httpx.Response(200, json=datos)
+        return httpx.Response(200, content=contenido)
+
+    return responder
+
+
+async def test_descargar_pide_los_datos_del_archivo_y_despues_los_bytes() -> None:
+    cliente, pedidos = _cliente_con(_meta_con_media())
+
+    archivo = await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+    assert archivo.contenido == PDF
+    assert archivo.tipo_mime == "application/pdf"
+    datos, bytes_ = pedidos
+    assert datos.url.path == f"/{VERSION_GRAPH}/{MEDIA}"
+    # Sólo media de nuestro número: Graph rechaza la de otro.
+    assert datos.url.params["phone_number_id"] == PHONE_NUMBER_ID
+    assert bytes_.url.host == "lookaside.fbsbx.com"
+    assert bytes_.headers["Authorization"] == f"Bearer {TOKEN}"  # Meta la exige
+
+
+async def test_un_archivo_mas_grande_que_el_tope_ni_se_baja() -> None:
+    cliente, pedidos = _cliente_con(_meta_con_media(tamaño="999999"))
+
+    with pytest.raises(ArchivoDemasiadoGrandeError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+    assert len(pedidos) == 1  # sólo los datos
+
+
+async def test_si_los_bytes_superan_el_tope_la_descarga_se_corta() -> None:
+    """El tamaño lo informa Meta; lo que se cuenta al bajar es lo que manda."""
+    cliente, _ = _cliente_con(_meta_con_media(tamaño="10", contenido=b"x" * 5000))
+
+    with pytest.raises(ArchivoDemasiadoGrandeError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://lookaside.fbsbx.com.evil.example/x",
+        "https://evil.example/fbsbx.com/x",
+        "http://lookaside.fbsbx.com/x",
+        "https://usuario@lookaside.fbsbx.com/x",
+        "https://lookaside.fbsbx.com:8443/x",
+        "no es una url",
+    ],
+)
+async def test_un_link_que_no_es_de_meta_no_recibe_el_token(url: str) -> None:
+    """El cliente manda el token en todo pedido: un link ajeno se lo entregaría."""
+    cliente, pedidos = _cliente_con(_meta_con_media(url=url))
+
+    with pytest.raises(ServiceUnavailableError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+    assert len(pedidos) == 1  # al link no se le pidió nada
+
+
+async def test_una_redireccion_al_bajar_no_se_sigue() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.host == "graph.facebook.com":
+            return _meta_con_media()(pedido)
+        return httpx.Response(302, headers={"Location": "https://evil.example/robar"})
+
+    cliente, pedidos = _cliente_con(responder)
+
+    with pytest.raises(ServiceUnavailableError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+    assert [p.url.host for p in pedidos] == ["graph.facebook.com", "lookaside.fbsbx.com"]
+
+
+@pytest.mark.parametrize(
+    ("status", "cuerpo"),
+    [
+        (400, {"error": {"code": 100, "error_subcode": 33, "message": "does not exist"}}),
+        (404, {}),
+    ],
+)
+async def test_un_archivo_que_meta_ya_no_tiene(status: int, cuerpo: dict[str, Any]) -> None:
+    """Los ids de lo recibido vencen: es un "mandámelo de nuevo", no una caída."""
+    cliente, _ = _cliente_con(lambda _: httpx.Response(status, json=cuerpo))
+
+    with pytest.raises(ArchivoNoDisponibleError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+
+async def test_con_el_token_de_meta_vencido_no_se_culpa_al_archivo() -> None:
+    """El token de prueba de Meta dura 24 h: eso es nuestro, no "mandámelo de nuevo"."""
+    vencido = {"error": {"code": 190, "message": "Error validating access token"}}
+    cliente, _ = _cliente_con(lambda _: httpx.Response(401, json=vencido))
+
+    with pytest.raises(ServiceUnavailableError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+
+async def test_un_link_vencido_al_bajar_tampoco_esta_disponible() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.host == "graph.facebook.com":
+            return _meta_con_media()(pedido)
+        return httpx.Response(404)
+
+    cliente, _ = _cliente_con(responder)
+
+    with pytest.raises(ArchivoNoDisponibleError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+
+async def test_una_referencia_que_no_es_un_id_de_media_no_genera_pedido() -> None:
+    cliente, pedidos = _cliente_con(_meta_con_media())
+
+    with pytest.raises(ArchivoNoDisponibleError):
+        await cliente.descargar("../me", maximo_bytes=1024)
+
+    assert pedidos == []
+
+
+async def test_meta_caida_al_pedir_los_datos_es_servicio_no_disponible() -> None:
+    def caido(pedido: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sin red", request=pedido)
+
+    cliente, _ = _cliente_con(caido)
+
+    with pytest.raises(ServiceUnavailableError):
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+
+async def test_la_url_firmada_nunca_se_loguea() -> None:
+    cliente, _ = _cliente_con(_meta_con_media())
+
+    with structlog.testing.capture_logs() as eventos:
+        await cliente.descargar(MEDIA, maximo_bytes=1024)
+
+    assert eventos
+    assert "FIRMA-SECRETA" not in json.dumps(eventos, default=str)

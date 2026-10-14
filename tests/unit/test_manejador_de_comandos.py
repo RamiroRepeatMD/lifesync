@@ -139,14 +139,20 @@ async def test_el_mensaje_avisa_que_el_enlace_vence() -> None:
     assert "10 minutos" in respuesta
 
 
-async def test_el_mensaje_aclara_que_solo_es_lectura() -> None:
-    """La persona tiene que saber qué está por conceder."""
+async def test_el_mensaje_dice_que_se_pide_y_que_nada_sale_sin_confirmar() -> None:
+    """La persona tiene que saber qué está por conceder.
+
+    Desde PB-038 Google le muestra "ver, editar y borrar todos tus archivos de
+    Drive": el mensaje nombra cada cosa y la promesa de RF-08.
+    """
     manejador, _ = _con_google()
 
     respuesta = await manejador.responder("/conectar", USUARIO, AHORA)
 
     assert respuesta is not None
-    assert "ver" in respuesta.lower()
+    for pedido in ("calendario", "tareas", "correo", "Drive"):
+        assert pedido in respuesta
+    assert "sin confirmarte antes" in respuesta
 
 
 async def test_conectar_sin_oauth_configurado_avisa() -> None:

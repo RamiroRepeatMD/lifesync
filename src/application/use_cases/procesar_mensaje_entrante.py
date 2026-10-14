@@ -68,6 +68,8 @@ class ProcesarMensajeEntrante:
             usuario_id=str(usuario.id),
             wamid=mensaje.wamid,
             largo_texto=len(mensaje.texto),
+            # El tipo sí, el nombre del archivo nunca (PB-038).
+            archivo=mensaje.adjunto.tipo_mime if mensaje.adjunto else None,
         )
 
         respuesta = await self._decidir_respuesta(mensaje, usuario)
@@ -88,6 +90,7 @@ class ProcesarMensajeEntrante:
                 usuario_id=usuario.id,
                 texto=mensaje.texto,
                 nombre_usuario=usuario.nombre,
+                adjunto=mensaje.adjunto,
             )
         )
 

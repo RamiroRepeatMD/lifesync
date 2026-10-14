@@ -8,14 +8,16 @@ fallas** para que no se filtren hacia adentro.
 
 from __future__ import annotations
 
+import asyncio
 import time
+import weakref
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -23,6 +25,7 @@ from langgraph.types import Command
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
 from src.application.ports.archivos import Archivos
+from src.application.ports.archivos_recibidos import ArchivosRecibidos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.tareas import Tareas
@@ -40,7 +43,7 @@ from src.infrastructure.llm.confirmacion import (
 )
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, NODO_AGENTE, construir_grafo
-from src.infrastructure.llm.herramientas import construir_herramientas
+from src.infrastructure.llm.herramientas import construir_herramientas, mensaje_de_la_persona
 
 logger = structlog.get_logger(__name__)
 
@@ -96,8 +99,26 @@ class AgenteGemini(AgenteConversacional):
     def __init__(self, grafo: Any) -> None:
         """Recibe el grafo ya compilado (inyección explícita)."""
         self._grafo = grafo
+        # Un candado por conversación (PB-038). Cada webhook corre en su propia
+        # tarea, y dos mensajes seguidos de una persona —la foto y enseguida
+        # "subila"— partían del mismo checkpoint: el último en guardar pisaba
+        # al otro, y se perdía el archivo o una confirmación pendiente. Débil:
+        # el candado se libera solo cuando nadie lo espera. Alcanza con una
+        # instancia, que es lo que ya asume el checkpointer.
+        self._candados: weakref.WeakValueDictionary[UUID, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     async def responder(self, consulta: ConsultaDelUsuario) -> str:
+        """Corre un turno de conversación, de a uno por conversación."""
+        candado = self._candados.get(consulta.conversacion_id)
+        if candado is None:
+            candado = asyncio.Lock()
+            self._candados[consulta.conversacion_id] = candado
+        async with candado:
+            return await self._responder(consulta)
+
+    async def _responder(self, consulta: ConsultaDelUsuario) -> str:
         """Corre un turno de conversación y devuelve el texto de respuesta.
 
         Si el hilo quedó pausado esperando una confirmación (RF-08), este turno
@@ -108,9 +129,10 @@ class AgenteGemini(AgenteConversacional):
         400 en el turno siguiente. Acá no existe ese camino: o se reanuda con
         una decisión, o no se invoca.
         """
-        if not consulta.texto.strip():
+        if not consulta.texto.strip() and consulta.adjunto is None:
             # Sin esto, un mensaje en blanco se convierte en una llamada paga
-            # que Gemini además rechaza por contenido vacío.
+            # que Gemini además rechaza por contenido vacío. Un archivo sin pie
+            # no está en blanco: lleva su nota (PB-038).
             logger.info("agente.consulta_vacia", conversacion_id=str(consulta.conversacion_id))
             return TEXTO_VACIO
 
@@ -126,9 +148,8 @@ class AgenteGemini(AgenteConversacional):
             if estado is None:
                 # No había confirmación pendiente, o había y se canceló para dar
                 # paso a este mensaje: turno normal.
-                estado = await self._invocar(
-                    {"messages": [HumanMessage(consulta.texto)]}, configuracion, contexto
-                )
+                turno = mensaje_de_la_persona(consulta.texto, consulta.adjunto, datetime.now(UTC))
+                estado = await self._invocar({"messages": [turno]}, configuracion, contexto)
         except AgenteNoDisponibleError:
             # Incluye la cuota agotada, que es subclase. Si una escritura YA se
             # ejecutó en esta invocación, avisar un error invitaría a repetirla
@@ -179,7 +200,10 @@ class AgenteGemini(AgenteConversacional):
         antiguedad, propuesta = pendiente
 
         vencida = antiguedad >= VIGENCIA_DE_CONFIRMACION_SEGUNDOS
-        decision = clasificar(consulta.texto)
+        # Un mensaje con archivo nunca resuelve lo pendiente (PB-038): con un
+        # pie "sí" aprobaría sin que el archivo entre al historial, y con "no"
+        # se lo comería. Es otra cosa: cancela y se procesa como turno nuevo.
+        decision = Decision.OTRA_COSA if consulta.adjunto else clasificar(consulta.texto)
 
         if vencida:
             # Aprobar con un "sí" algo propuesto hace 10 minutos, sin volver a
@@ -455,6 +479,7 @@ def crear_agente_gemini(
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     recordatorios: RecordatorioRepository | None = None,
     archivos: Archivos | None = None,
+    recibidos: ArchivosRecibidos | None = None,
 ) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
@@ -472,6 +497,8 @@ def crear_agente_gemini(
             `None` —sin Supabase— el agente no ofrece programarlos.
         archivos: Adaptador de Google Drive (PB-037). Con `None` el agente
             no ofrece buscar archivos.
+        recibidos: De dónde se bajan los archivos que manda la persona
+            (PB-038). Sin esto, no se ofrece subirlos a Drive.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -494,7 +521,7 @@ def crear_agente_gemini(
     )
 
     herramientas = construir_herramientas(
-        calendario, tareas, correos, recordatorios, archivos=archivos
+        calendario, tareas, correos, recordatorios, archivos=archivos, recibidos=recibidos
     )
     grafo = construir_grafo(
         modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
@@ -507,6 +534,7 @@ def crear_agente_gemini(
         con_correo=correos is not None,
         con_recordatorios=recordatorios is not None,
         con_drive=archivos is not None,
+        con_subida=archivos is not None and recibidos is not None,
         memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)

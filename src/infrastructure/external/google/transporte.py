@@ -25,27 +25,35 @@ logger = structlog.get_logger(__name__)
 # Cómo marca Google cada 403. El formato clásico pone el motivo en
 # `errors[].reason` y el nuevo en `details[].reason` (ErrorInfo): se miran los
 # dos. Los motivos son contrato; el texto del mensaje puede cambiar.
-_API_DESHABILITADA = frozenset({"SERVICE_DISABLED", "accessNotConfigured"})
-_LIMITE_DE_USO = frozenset(
+API_DESHABILITADA = frozenset({"SERVICE_DISABLED", "accessNotConfigured"})
+LIMITE_DE_USO = frozenset(
     {
         "rateLimitExceeded",
         "userRateLimitExceeded",
         "dailyLimitExceeded",
         "quotaExceeded",
         "RATE_LIMIT_EXCEEDED",
+        # El de compartir archivos de Drive (PB-038): muchos avisos por correo.
+        "sharingRateLimitExceeded",
     }
 )
 
 
-def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
+def traducir_rechazo(
+    respuesta: httpx.Response, servicio: str, *, registrar_mensaje: bool = True
+) -> None:
     """Convierte un status de error en la excepción del dominio que toca.
 
     Args:
         respuesta: La respuesta HTTP de Google.
         servicio: Nombre corto para los logs y mensajes ("calendar", "tasks").
+        registrar_mensaje: Si el log lleva el texto de Google. Con `False`, sólo
+            los códigos: al compartir, ese texto puede repetir la dirección
+            invitada (PB-038, RF-18).
     """
     if respuesta.status_code < httpx.codes.BAD_REQUEST:
         return
+    motivo = motivo_de(respuesta) if registrar_mensaje else None
 
     if respuesta.status_code == httpx.codes.UNAUTHORIZED:
         logger.warning(f"{servicio}.credencial_rechazada")
@@ -57,7 +65,7 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
         # El otro formato del límite de uso (PB-035): Google también lo marca
         # con 429, y Gmail lo usa para los límites de envío. Mismo remedio que
         # el 403 por límite: esperar, no reconectar.
-        logger.warning(f"{servicio}.limite_de_uso", motivo=motivo_de(respuesta))
+        logger.warning(f"{servicio}.limite_de_uso", motivo=motivo)
         raise ServiceUnavailableError(f"Google limitó los pedidos a {servicio} por un rato.")
 
     if respuesta.status_code == httpx.codes.FORBIDDEN:
@@ -72,14 +80,13 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
         #   arregla esperando, no reconectando: es un "probá en un minuto".
         # - El resto: al token le falta el scope (cuenta conectada antes de
         #   que se pidiera). Eso sí lo arregla la persona con /conectar.
-        motivo = motivo_de(respuesta)
-        motivos = _motivos(respuesta)
-        if motivos & _API_DESHABILITADA:
+        motivos = motivos_de(respuesta)
+        if motivos & API_DESHABILITADA:
             logger.error(f"{servicio}.api_deshabilitada", motivo=motivo)
             raise ServiceUnavailableError(
                 f"La API de {servicio} no está habilitada en el proyecto de Google Cloud."
             )
-        if motivos & _LIMITE_DE_USO:
+        if motivos & LIMITE_DE_USO:
             logger.warning(f"{servicio}.limite_de_uso", motivo=motivo)
             raise ServiceUnavailableError(f"Google limitó los pedidos a {servicio} por un rato.")
         logger.warning(f"{servicio}.permiso_insuficiente", motivo=motivo)
@@ -88,12 +95,12 @@ def traducir_rechazo(respuesta: httpx.Response, servicio: str) -> None:
     logger.error(
         f"{servicio}.rechazado",
         status_code=respuesta.status_code,
-        motivo=motivo_de(respuesta),
+        motivo=motivo,
     )
     raise ServiceUnavailableError("Google no pudo responder la consulta.")
 
 
-def _motivos(respuesta: httpx.Response) -> set[str]:
+def motivos_de(respuesta: httpx.Response) -> set[str]:
     """Los `reason` del cuerpo de error, en el formato clásico y en el nuevo."""
     error = json_o_vacio(respuesta).get("error")
     if not isinstance(error, dict):

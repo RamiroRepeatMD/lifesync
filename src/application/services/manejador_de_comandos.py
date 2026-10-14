@@ -56,9 +56,10 @@ ESTADO_CON_GOOGLE = (
     "modificar o eliminar eventos; también "
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
     "cambiarles la fecha o eliminarlas; buscar, leer, mandar, responder y "
-    "reenviar correos de Gmail; buscar archivos en tu Drive y pasarte el link; "
-    "y escribirte a una hora para recordarte algo. Antes de borrar algo, mandar "
-    "un correo o hacer varias cosas juntas, te pido confirmación."
+    "reenviar correos de Gmail; buscar archivos en tu Drive, subir los que me "
+    "mandes por acá y compartirlos; y escribirte a una hora para recordarte "
+    "algo. Antes de borrar algo, mandar un correo, compartir un archivo o hacer "
+    "varias cosas juntas, te pido confirmación."
 )
 
 CONECTAR_NO_DISPONIBLE = (
@@ -96,9 +97,9 @@ def _texto_del_enlace(enlace: str) -> str:
     return (
         "Para conectar tu cuenta de Google, entrá acá y autorizá el acceso:\n\n"
         f"{enlace}\n\n"
-        "El enlace vence en 10 minutos. Te voy a pedir permiso para ver tu "
-        "calendario y gestionar eventos; nunca borro nada ni mando un correo sin "
-        "confirmarte antes."
+        "El enlace vence en 10 minutos. Te voy a pedir permiso para tu calendario, "
+        "tus tareas, tu correo y tu Drive; nunca borro nada, ni mando un correo, ni "
+        "comparto un archivo sin confirmarte antes."
     )
 
 

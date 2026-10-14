@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,6 +22,7 @@ from pydantic import Field
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 from src.application.ports.agente import AgenteConversacional
 from src.application.ports.archivos import Archivos
+from src.application.ports.archivos_recibidos import ArchivoDescargado, ArchivosRecibidos
 from src.application.ports.autorizador_google import (
     AutorizadorGoogle,
     CredencialesGoogle,
@@ -37,11 +38,16 @@ from src.domain.entities.oauth_token import OAuthToken
 from src.domain.entities.recordatorio import EstadoDeRecordatorio, Recordatorio
 from src.domain.entities.tarea import Tarea
 from src.domain.entities.usuario import Usuario
-from src.domain.exceptions import EntityNotFoundError, InvalidValueError
+from src.domain.exceptions import (
+    ArchivoDemasiadoGrandeError,
+    EntityNotFoundError,
+    InvalidValueError,
+)
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
 from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
+from src.domain.value_objects.permiso_de_archivo import PermisoDeArchivo
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
 
@@ -453,14 +459,82 @@ class CorreosFalsos(Correos):
 
 
 class ArchivosFalsos(Archivos):
-    """Doble del puerto `Archivos` (PB-037): un Drive fijo, sin filtrar."""
+    """Doble del puerto `Archivos` (PB-037 · PB-038): un Drive fijo, sin filtrar.
+
+    `fallar_con` hace fallar todo (cuenta, lecturas y escrituras);
+    `fallar_al_escribir`, sólo subir y compartir: lo de antes del sí anduvo.
+    """
 
     def __init__(
-        self, archivos: tuple[Archivo, ...] = (), fallar_con: Exception | None = None
+        self,
+        archivos: tuple[Archivo, ...] = (),
+        fallar_con: Exception | None = None,
+        *,
+        carpetas: tuple[Archivo, ...] = (),
+        fallar_al_escribir: Exception | None = None,
     ) -> None:
         self.archivos = archivos
+        # Las carpetas propias, la más reciente primero (como las ordena Drive).
+        self.carpetas_propias = carpetas
         self.fallar_con = fallar_con
+        self.fallar_al_escribir = fallar_al_escribir
         self.busquedas: list[tuple[UUID, str, TipoDeArchivo | None, datetime | None, int]] = []
+        self.subidos: list[tuple[UUID, str, str, bytes, str | None]] = []
+        self.compartidos: list[tuple[UUID, str, PermisoDeArchivo, str | None]] = []
+        self.accesos_comprobados = 0
+
+    def _fallar(self, *, escritura: bool = False) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        if escritura and self.fallar_al_escribir is not None:
+            raise self.fallar_al_escribir
+
+    async def comprobar_acceso(self, usuario_id: UUID) -> None:
+        self.accesos_comprobados += 1
+        self._fallar()
+
+    async def obtener(self, usuario_id: UUID, archivo_id: str) -> Archivo:
+        self._fallar()
+        for archivo in (*self.archivos, *self.carpetas_propias):
+            if archivo.id == archivo_id:
+                return archivo
+        raise EntityNotFoundError("Ese archivo no está en tu Drive.")
+
+    async def carpetas(self, usuario_id: UUID, nombre: str) -> tuple[Archivo, ...]:
+        self._fallar()
+        return tuple(c for c in self.carpetas_propias if nombre.lower() in c.nombre.lower())
+
+    async def subir(
+        self,
+        usuario_id: UUID,
+        nombre: str,
+        tipo_mime: str,
+        contenido: bytes,
+        carpeta_id: str | None,
+    ) -> Archivo:
+        self._fallar(escritura=True)
+        self.subidos.append((usuario_id, nombre, tipo_mime, contenido, carpeta_id))
+        nuevo = f"subido-{len(self.subidos)}"
+        subido = Archivo(
+            id=nuevo,
+            nombre=nombre,
+            tipo=None,
+            modificado=datetime.now(UTC),
+            enlace=f"https://drive.google.com/file/d/{nuevo}/view",
+        )
+        # Queda en el Drive: después se lo puede leer y compartir.
+        self.archivos = (*self.archivos, subido)
+        return subido
+
+    async def compartir(
+        self,
+        usuario_id: UUID,
+        archivo_id: str,
+        permiso: PermisoDeArchivo,
+        direccion: str | None,
+    ) -> None:
+        self._fallar(escritura=True)
+        self.compartidos.append((usuario_id, archivo_id, permiso, direccion))
 
     async def buscar(
         self,
@@ -474,6 +548,29 @@ class ArchivosFalsos(Archivos):
             raise self.fallar_con
         self.busquedas.append((usuario_id, texto, tipo, desde, cantidad))
         return self.archivos
+
+
+class RecibidosFalsos(ArchivosRecibidos):
+    """Doble de `ArchivosRecibidos` (PB-038): siempre el mismo PDF.
+
+    `descargas` registra cada pedido, también los que fallan: es lo que deja
+    afirmar que nada se baja antes del sí.
+    """
+
+    def __init__(
+        self, contenido: bytes = b"%PDF-1.4 de prueba", fallar_con: Exception | None = None
+    ) -> None:
+        self.contenido = contenido
+        self.fallar_con = fallar_con
+        self.descargas: list[str] = []
+
+    async def descargar(self, referencia: str, maximo_bytes: int) -> ArchivoDescargado:
+        self.descargas.append(referencia)
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        if len(self.contenido) > maximo_bytes:
+            raise ArchivoDemasiadoGrandeError("Supera el tope.")
+        return ArchivoDescargado(contenido=self.contenido, tipo_mime="application/pdf")
 
 
 class AutorizadorFalso(AutorizadorGoogle):
