@@ -286,7 +286,7 @@ def test_sin_puerto_de_drive_no_se_ofrece() -> None:
     assert "buscar_archivos" not in nombres
 
 
-def test_con_puerto_de_drive_se_ofrece_buscar_y_compartir() -> None:
+def test_con_puerto_de_drive_se_ofrecen_todas_menos_subir() -> None:
     nombres = [h.name for h in construir_herramientas(None, archivos=ArchivosFalsos())]
 
     # Sin quien baje lo recibido, subir no se ofrece (PB-038).
@@ -295,6 +295,9 @@ def test_con_puerto_de_drive_se_ofrece_buscar_y_compartir() -> None:
         "buscar_archivos",
         "compartir_archivo",
         "compartir_por_link",
+        "renombrar_archivo",
+        "mover_archivo",
+        "borrar_archivo",
     ]
 
 

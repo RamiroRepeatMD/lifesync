@@ -704,6 +704,7 @@ PRESUPUESTO = Archivo(
     tipo=TipoDeArchivo.PLANILLA,
     modificado=datetime.now(UTC) - timedelta(days=2),
     enlace=LINK_DEL_PRESUPUESTO,
+    propio=True,
 )
 
 
@@ -810,3 +811,42 @@ async def test_subilo_y_compartilo_sube_primero_y_pregunta_por_lo_subido() -> No
     assert "informe-de-redes.pdf" in respuesta
     assert "ana@ejemplo.com" in respuesta
     assert archivos.compartidos == []
+
+
+# --- Renombrar, mover y mandar a la papelera (PB-039) ---------------------------------
+
+INFORME_DEL_TP = Archivo(
+    id="informe-tp",
+    nombre="Informe TP final.docx",
+    tipo=TipoDeArchivo.DOCUMENTO,
+    modificado=datetime.now(UTC) - timedelta(days=1),
+    enlace="https://docs.google.com/document/d/informe-tp/edit",
+    propio=True,
+)
+
+
+async def test_mandar_a_la_papelera_pide_el_si_y_nombra_la_papelera() -> None:
+    """Borrar siempre pide el sí, y la pregunta dice adónde va: no es para siempre."""
+    modelo, archivos = _agente_con_drive(INFORME_DEL_TP, PRESUPUESTO)
+
+    respuesta = await _turno(modelo, "mandá a la papelera el informe del TP que está en mi Drive")
+
+    assert archivos.busquedas  # buscó: el id no se inventa
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "papelera" in respuesta
+    assert "Informe TP final.docx" in respuesta
+    assert archivos.en_la_papelera == []
+
+
+async def test_buscar_y_renombrar_en_dos_turnos_pide_el_si_y_queda_renombrado() -> None:
+    """El id sale del listado, que activa el modo estricto: renombrar también pregunta."""
+    modelo, archivos = _agente_con_drive(PRESUPUESTO)
+    hilo = uuid4()
+
+    await _turno_en(modelo, hilo, "buscá el presupuesto en mi Drive")
+    pregunta = await _turno_en(modelo, hilo, "cambiale el nombre a Presupuesto final")
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert archivos.renombrados == []
+    await _turno_en(modelo, hilo, "sí")
+    assert archivos.renombrados == [(hilo, "presu-2026", "Presupuesto final")]

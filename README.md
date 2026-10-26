@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp y compartir) · Notion API (pendiente) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · Notion API (pendiente) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 1371 tests (cobertura con ramas 92,2%, piso de 90% en CI) + 28 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 1522 tests (cobertura con ramas 92,4%, piso de 90% en CI) + 30 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -253,6 +253,15 @@ correo o con un link de sólo lectura, siempre con confirmación: la pregunta mu
 el archivo tiene en Drive y a quién se le da acceso. Lo que se manda queda en Meta y se baja
 recién al subirlo; el modelo nunca ve ni elige qué archivo se baja.
 
+En el Sprint 6 el bot también **ordena el Drive**: renombra archivos y carpetas ("al informe
+ponele Informe final": si no se dice la extensión, queda la que tenía), mueve archivos a otra
+carpeta o a Mi unidad, y los manda a la **papelera**. Nunca borra para siempre: desde la
+papelera se recuperan durante 30 días, y la pregunta muestra el tipo y la fecha para
+distinguir dos archivos que se llaman igual. Sólo toca lo que es de la persona (lo que le
+compartieron otros, no), las carpetas sólo se renombran (moverlas o borrarlas arrastraría lo
+de adentro), y mover o subir algo a una carpeta compartida pide el "sí": es darle acceso a
+quienes la ven.
+
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
 "Recordame en 20 minutos que saque la pizza" → confirmación → a esa hora llega
 "⏰ Recordatorio: sacar la pizza". Se pueden listar y cancelar, y no necesitan la cuenta de
@@ -305,8 +314,9 @@ Se piden seis permisos: lectura de calendario (`calendar.readonly`), gestión de
 eventos (`calendar.events`), tareas (`tasks`), lectura de correo (`gmail.readonly`), envío
 (`gmail.send`, que sólo permite mandar: ni modificar ni borrar) y Drive (`drive`). Drive va
 completo porque es el único permiso que deja compartir cualquier archivo y subir a una carpeta
-que ya existe; lo que el bot hace con él lo acota el código: buscar, subir y compartir, sin
-leer el contenido, mover ni borrar. Una cuenta conectada antes de sumar un permiso tiene que
+que ya existe; lo que el bot hace con él lo acota el código: buscar, subir, compartir,
+renombrar, mover y mandar a la papelera, sin leer el contenido ni borrar nada para siempre.
+Una cuenta conectada antes de sumar un permiso tiene que
 volver a hacer `/conectar`.
 Además de pedir el permiso, cada API hay que **habilitarla** en el proyecto de Google Cloud
 (Calendar, Tasks, Gmail y Drive): son dos llaves distintas. Para desvincular: `/desconectar` —
@@ -459,8 +469,9 @@ uv run mypy tests            # ... y de los tests (CI corre ambos)
 ```
 
 `tests/integration/` prueba caminos completos sin red: del agente a los adaptadores de Google
-Calendar, Tasks y Gmail, asertando el pedido exacto que recibiría Google (en Gmail, hasta los
-encabezados del correo que sale y el texto entero de un reenvío). Y
+Calendar, Tasks, Gmail y Drive, asertando el pedido exacto que recibiría Google (en Gmail, hasta
+los encabezados del correo que sale y el texto entero de un reenvío; en Drive, los padres que
+se agregan y se sacan al mover). Y
 `tests/unit/test_tools_criticas.py` fija las promesas que valen para todas las tools a la vez:
 ninguna escribe fuera del control de la confirmación, ninguna deja escapar una falla de Google,
 y dos acciones juntas se confirman en una sola lista y corren una vez. Si mañana se suma una
@@ -473,7 +484,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 22 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 30 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -481,7 +492,10 @@ recurrentes, recordatorios ("en 20 minutos" guarda la hora correcta; "avisame a 
 un evento), "el último correo" con la bandeja cambiando, y los intentos de inyección por
 correo (un correo que ordena borrar, reenviarse o agendar algo no lo logra), y responder
 un correo dentro de su hilo; y si un envío falla, que cuente bien si el correo salió (ante la
-duda manda a revisar Enviados y no lo repite). Si Gemini no responde o se agota la cuota por minuto, el caso espera y reintenta, y si
+duda manda a revisar Enviados y no lo repite). En Drive: pasa el link tal cual (y un nombre
+de archivo con un link falso no lo cuela), sube lo que le mandan y lo comparte con el sí, y
+mandar a la papelera o renombrar lo que encontró también pide el sí. Si Gemini no responde o
+se agota la cuota por minuto, el caso espera y reintenta, y si
 persiste se marca como salteado: una caída del proveedor no es un fallo de
 comportamiento.
 
@@ -600,6 +614,20 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-038 | Drive: subir y compartir archivos | ✅ (recibe documentos y fotos por WhatsApp; comparte con personas o por link) |
 | PB-040 | Pruebas de las tools críticas | ✅ (invariantes sobre las 22 tools; cobertura medida en CI) |
 | PB-041 | Diagramas UML actualizados | — (no aplica: no había diagramas que actualizar) |
+
+**Sprint 6** (entrega 28/10/2026) – Cierre: Drive, auditoría, documentación y demos.
+
+| Tarea | Descripción | Estado |
+|-------|-------------|--------|
+| PB-039 | Drive: integración + pruebas (sumó renombrar, mover y mandar a la papelera) | ✅ (de punta a punta contra un Drive simulado; sólo archivos propios) |
+| PB-021 | Logging de acciones importantes (auditoría básica) | ⏳ |
+| PB-042 | Mantenimiento del documento de Sprint Planning | ⏳ |
+| PB-043 | Preparación de demos y evidencia | ⏳ |
+| PB-044 | Refinamiento final del backlog y replanificación documentada | ⏳ |
+| PB-014 | OAuth2 de Notion básico (si hay capacidad) | ⏳ |
+
+Además: corrección de defectos y pulido, y la documentación técnica final con un manual de
+usuario básico.
 
 Planificación completa en [`docs/02-sprint-planning.md`](docs/02-sprint-planning.md).
 

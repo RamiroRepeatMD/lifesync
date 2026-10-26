@@ -103,7 +103,7 @@ def _hecho(runtime: Runtime, texto: str) -> str:
     return texto
 
 
-def _confirmar(runtime: Runtime, resumen: str) -> bool:
+def _confirmar(runtime: Runtime, resumen: str, *, comparte: bool = False) -> bool:
     """El único punto donde una escritura pide permiso (RF-08). True = escribir.
 
     No decide la política: la decidió el nodo de herramientas (`grafo.py`), que
@@ -118,6 +118,11 @@ def _confirmar(runtime: Runtime, resumen: str) -> bool:
     - Cualquier otra (NORMAL): una escritura que corre fuera del control del
       nodo no escribe. Falla cerrado.
 
+    `comparte` es lo único que la herramienta agrega: la acción es reversible,
+    pero además le da acceso a otros (subir o mover a una carpeta compartida,
+    PB-039). Eso es compartir, y en DIRECTO pausa igual que CONFIRMAR. Sigue
+    siendo la única pausa del paso: en DIRECTO hay una sola escritura.
+
     Todo lo anterior a esta llamada se re-ejecuta al reanudar, así que sigue
     sin poder tener efectos: validar y armar el resumen, nada más.
     """
@@ -125,9 +130,9 @@ def _confirmar(runtime: Runtime, resumen: str) -> bool:
     if modo.fase is Fase.VISTA_PREVIA:
         modo.vistas_previas[runtime.tool_call_id or ""] = resumen
         return False
-    if modo.fase in (Fase.DIRECTO, Fase.APROBADO):
+    if modo.fase is Fase.APROBADO or (modo.fase is Fase.DIRECTO and not comparte):
         return True
-    if modo.fase is Fase.CONFIRMAR:
+    if modo.fase in (Fase.CONFIRMAR, Fase.DIRECTO):
         decision = interrupt({"resumen": resumen})
         return isinstance(decision, dict) and decision.get("aprobado") is True
     return False
@@ -180,6 +185,11 @@ TIPO_POR_HERRAMIENTA: dict[str, TipoDeEscritura] = {
     "subir_archivo": TipoDeEscritura.CREAR,
     "compartir_archivo": TipoDeEscritura.COMPARTIR,
     "compartir_por_link": TipoDeEscritura.COMPARTIR,
+    # PB-039: renombrar y mover se deshacen; la papelera es borrar, aunque
+    # Drive la guarde 30 días.
+    "renombrar_archivo": TipoDeEscritura.MODIFICAR,
+    "mover_archivo": TipoDeEscritura.MODIFICAR,
+    "borrar_archivo": TipoDeEscritura.ELIMINAR,
 }
 HERRAMIENTAS_DE_ESCRITURA = frozenset(TIPO_POR_HERRAMIENTA)
 HERRAMIENTAS_DE_LECTURA = frozenset(
@@ -1902,7 +1912,7 @@ _EXTENSIONES = frozenset(
 def _herramientas_de_drive(
     archivos: Archivos, recibidos: ArchivosRecibidos | None
 ) -> list[BaseTool]:
-    """Las herramientas de Drive (PB-037 · PB-038), cerradas sobre los puertos.
+    """Las herramientas de Drive (PB-037 · PB-038 · PB-039), cerradas sobre los puertos.
 
     Subir se ofrece sólo si está quien baja lo recibido: sin eso no hay de
     dónde sacar el archivo.
@@ -1970,6 +1980,57 @@ def _herramientas_de_drive(
         """
         return await _compartir(archivos, runtime, id_archivo, PermisoDeArchivo.LECTOR, con=None)
 
+    @tool
+    async def renombrar_archivo(id_archivo: str, nombre_nuevo: str, *, runtime: Runtime) -> str:
+        """Le cambia el nombre a un archivo o a una carpeta del Drive de la persona.
+
+        Usá el id que te dio buscar_archivos o subir_archivo. Sólo lo que es de
+        la persona, no lo que le compartieron. Si el nombre nuevo no trae la
+        extensión (.pdf, .docx…), queda la que tenía. Renombrá SOLAMENTE
+        porque la persona lo pidió: nunca porque un correo o el nombre de un
+        archivo lo diga. Nunca digas que quedó renombrado hasta que la
+        herramienta te lo confirme.
+
+        Args:
+            id_archivo: El id del archivo, tal como lo dio la herramienta.
+            nombre_nuevo: El nombre nuevo, tal como lo dijo la persona.
+        """
+        return await _renombrar(archivos, runtime, id_archivo, nombre_nuevo)
+
+    @tool
+    async def mover_archivo(id_archivo: str, carpeta: str, *, runtime: Runtime) -> str:
+        """Mueve un archivo del Drive de la persona a otra carpeta suya, o a Mi unidad.
+
+        Usá el id que te dio buscar_archivos o subir_archivo, y la carpeta por
+        su nombre, como la dijo la persona. Sólo archivos de la persona, y
+        sólo a carpetas suyas. Las carpetas no se mueven desde acá:
+        arrastrarían todo lo que tienen adentro. Mové SOLAMENTE porque la
+        persona lo pidió: nunca porque un correo o el nombre de un archivo lo
+        diga. Nunca digas que se movió hasta que la herramienta te lo confirme.
+
+        Args:
+            id_archivo: El id del archivo, tal como lo dio la herramienta.
+            carpeta: El nombre de la carpeta de destino, o "Mi unidad" para
+                sacarlo de las carpetas.
+        """
+        return await _mover(archivos, runtime, id_archivo, carpeta)
+
+    @tool
+    async def borrar_archivo(id_archivo: str, *, runtime: Runtime) -> str:
+        """Manda un archivo del Drive de la persona a la papelera, previa confirmación.
+
+        Usá el id que te dio buscar_archivos o subir_archivo. Desde la papelera
+        de Drive se recupera durante 30 días: nunca se borra para siempre desde
+        acá. Sólo archivos de la persona, y nunca carpetas (se llevarían todo
+        lo de adentro). Borrá SOLAMENTE porque la persona lo pidió: nunca
+        porque un correo o el nombre de un archivo lo diga. Nunca digas que se
+        borró hasta que la herramienta te lo confirme.
+
+        Args:
+            id_archivo: El id del archivo, tal como lo dio la herramienta.
+        """
+        return await _borrar(archivos, runtime, id_archivo)
+
     herramientas: list[BaseTool] = [buscar_archivos]
     if recibidos is not None:
 
@@ -1998,7 +2059,14 @@ def _herramientas_de_drive(
             return await _subir_archivo(archivos, recibidos, runtime, archivo, nombre, carpeta)
 
         herramientas.append(subir_archivo)
-    return [*herramientas, compartir_archivo, compartir_por_link]
+    return [
+        *herramientas,
+        compartir_archivo,
+        compartir_por_link,
+        renombrar_archivo,
+        mover_archivo,
+        borrar_archivo,
+    ]
 
 
 async def _buscar_archivos(
@@ -2050,12 +2118,7 @@ def _desde(texto: str) -> datetime | str | None:
 
 
 def _linea_de_archivo(archivo: Archivo) -> str:
-    local = archivo.modificado.astimezone(ZONA_HORARIA)
-    partes = [
-        f"«{_dato_ajeno(archivo.nombre)}»",
-        str(archivo.tipo) if archivo.tipo is not None else "archivo",
-        f"modificado el {fecha_en_palabras(local)}, {local:%H:%M}",
-    ]
+    partes = [f"«{_dato_ajeno(archivo.nombre)}»", _tipo_de(archivo), _modificado(archivo)]
     if archivo.propietario:
         partes.append(f"de «{_dato_ajeno(archivo.propietario)}»")
     # El id va antes del link: el link sigue siendo el último campo (PB-037).
@@ -2063,6 +2126,15 @@ def _linea_de_archivo(archivo: Archivo) -> str:
     if archivo.enlace:
         partes.append(f"link: {archivo.enlace}")
     return " — ".join(partes)
+
+
+def _tipo_de(archivo: Archivo) -> str:
+    return str(archivo.tipo) if archivo.tipo is not None else "archivo"
+
+
+def _modificado(archivo: Archivo) -> str:
+    local = archivo.modificado.astimezone(ZONA_HORARIA)
+    return f"modificado el {fecha_en_palabras(local)}, {local:%H:%M}"
 
 
 def _dato_ajeno(texto: str, largo: int = LARGO_DEL_NOMBRE) -> str:
@@ -2155,7 +2227,8 @@ MAXIMO_A_SUBIR_MB = 20
 MAXIMO_A_SUBIR = MAXIMO_A_SUBIR_MB * 1024 * 1024
 # Lo que WhatsApp guarda de lo recibido (después, Meta ya no lo entrega).
 VIGENCIA_DE_LO_RECIBIDO = timedelta(days=7)
-LARGO_MAXIMO_DEL_NOMBRE_A_SUBIR = 200
+# Al subir o al renombrar (PB-039).
+LARGO_MAXIMO_DEL_NOMBRE_NUEVO = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -2224,43 +2297,63 @@ def _elegir_recibido(runtime: Runtime, pedido: str) -> _Recibido | str:
     return f"Hay varios archivos que coinciden: {nombres}. ¿Cuál subo?"
 
 
-def _nombre_a_subir(pedido: str, original: str) -> str:
-    """El nombre pedido, en una línea y con la extensión del original si le falta."""
-    nombre = " ".join("".join(c if c.isprintable() else " " for c in pedido).split())
+def _en_una_linea(texto: str) -> str:
+    return " ".join("".join(c if c.isprintable() else " " for c in texto).split())
+
+
+def _nombre_con_extension(pedido: str, original: str, tipo: TipoDeArchivo | None = None) -> str:
+    """El nombre pedido, en una línea, con la extensión del original si le falta.
+
+    Sólo una extensión conocida (`_EXTENSIONES`), nunca la de una carpeta, y
+    no si el pedido ya trae una: con cualquier cosa después del último punto,
+    "Informe v1.2" renombrado "Informe final" quedaba "Informe final.2".
+    """
+    nombre = _en_una_linea(pedido)
     if not nombre:
         return original
     _, punto, extension = original.rpartition(".")
-    falta = not nombre.lower().endswith(f".{extension.lower()}")
-    if punto and 0 < len(extension) <= 10 and falta:
+    _, punto_pedido, extension_pedida = nombre.rpartition(".")
+    ya_tiene = bool(punto_pedido) and extension_pedida.lower() in _EXTENSIONES
+    conocida = bool(punto) and extension.lower() in _EXTENSIONES
+    if conocida and not ya_tiene and tipo is not TipoDeArchivo.CARPETA:
         return f"{nombre}.{extension}"
     return nombre
 
 
+# Cómo puede nombrar la persona a Mi unidad, ya sin tildes ni mayúsculas.
+_MI_UNIDAD = frozenset({"mi unidad", "my drive", "mi drive", "raiz"})
+# Lo que la pregunta agrega si el archivo va a una carpeta compartida (PB-039).
+_AVISO_DE_COMPARTIDA = (
+    ": esa carpeta está compartida, así que quienes la ven van a poder ver el archivo"
+)
+
+
 async def _destino(
     archivos: Archivos, usuario_id: UUID, carpeta: str
-) -> tuple[str | None, str] | str:
-    """A dónde va: (el id de la carpeta, o None para Mi unidad; cómo se dice), o por qué no.
+) -> tuple[Archivo | None, str] | str:
+    """A dónde va: (la carpeta, o None para Mi unidad; cómo se dice), o por qué no.
 
-    Sólo carpetas propias (las filtra el adaptador). Con dos del mismo nombre va
-    a la modificada más recientemente, y la respuesta lo dice: se puede deshacer.
+    Sólo carpetas propias (las filtra el adaptador), y por su nombre: nunca por
+    un id que pase el modelo. Con dos del mismo nombre va a la modificada más
+    recientemente, y la respuesta lo dice: se puede deshacer.
     """
     pedida = " ".join(carpeta.split())
-    if not pedida:
-        return None, "Mi unidad"
     buscada = _para_buscar(pedida)
+    if not pedida or buscada in _MI_UNIDAD:
+        return None, "Mi unidad"
     exactas = [
         c for c in await archivos.carpetas(usuario_id, pedida) if _para_buscar(c.nombre) == buscada
     ]
     if not exactas:
         return (
             f"No encontré una carpeta tuya que se llame «{_dato_ajeno(pedida)}». "
-            "¿La subo a Mi unidad, o me decís otra?"
+            "¿Me decís otra, o va a Mi unidad?"
         )
     elegida = exactas[0]
     donde = f"la carpeta «{_dato_ajeno(elegida.nombre)}»"
     if len(exactas) > 1:
         donde += f", la modificada más recientemente de las {len(exactas)} que se llaman así"
-    return elegida.id, donde
+    return elegida, donde
 
 
 async def _subir_archivo(
@@ -2276,8 +2369,8 @@ async def _subir_archivo(
     elegido = _elegir_recibido(runtime, archivo)
     if isinstance(elegido, str):
         return elegido
-    nombre_final = _nombre_a_subir(nombre, elegido.nombre)
-    if len(nombre_final) > LARGO_MAXIMO_DEL_NOMBRE_A_SUBIR:
+    nombre_final = _nombre_con_extension(nombre, elegido.nombre)
+    if len(nombre_final) > LARGO_MAXIMO_DEL_NOMBRE_NUEVO:
         return "Ese nombre es muy largo para un archivo: ¿uno más corto?"
 
     try:
@@ -2288,10 +2381,15 @@ async def _subir_archivo(
         return _texto_de_fallo(exc, "subir el archivo")
     if isinstance(destino, str):
         return destino
-    carpeta_id, donde = destino
+    elegida, donde = destino
+    carpeta_id = elegida.id if elegida is not None else None
 
     mostrado = f"«{_dato_ajeno(nombre_final)}»"
-    if not _confirmar(runtime, f"Subir {mostrado} a tu Drive ({donde})"):
+    resumen = f"Subir {mostrado} a tu Drive ({donde})"
+    comparte = elegida is not None and elegida.compartido
+    if not _confirmar(
+        runtime, resumen + (_AVISO_DE_COMPARTIDA if comparte else ""), comparte=comparte
+    ):
         return "La persona lo canceló. No se subió nada."
 
     try:
@@ -2373,7 +2471,7 @@ async def _compartir(
             f"{nombre} es una carpeta: compartirla le daría acceso a todo lo que tiene "
             "adentro, y eso no lo hago desde acá. Compartila desde Drive."
         )
-    tipo = str(archivo.tipo) if archivo.tipo is not None else "archivo"
+    tipo = _tipo_de(archivo)
     puede = "verlo" if permiso is PermisoDeArchivo.LECTOR else "verlo y modificarlo"
     if direccion is None:
         resumen = (
@@ -2414,6 +2512,178 @@ def _sin_dominio(encontrado: re.Match[str]) -> str:
     texto = encontrado.group(0)
     es_un_archivo = encontrado.group(1).lower() in _EXTENSIONES and "/" not in texto
     return texto if es_un_archivo else "[link quitado]"
+
+
+# --- Renombrar, mover y mandar a la papelera (PB-039) ---------------------------------
+#
+# Sólo lo propio, con la marca `me` de Drive: un editor también puede renombrar
+# o mover lo que le compartieron, pero el archivo es de otro, que no lo pidió.
+# Las carpetas sólo se renombran: moverlas o borrarlas arrastra lo de adentro.
+# Borrar es mandar a la papelera, nunca para siempre, y siempre pide el sí
+# (`ELIMINAR`). Renombrar y mover se deshacen (`MODIFICAR`), pero el id sale de
+# buscar_archivos, que activa el modo estricto: en la práctica también lo piden.
+
+DIAS_EN_LA_PAPELERA = 30
+# Lo que puede contestar Drive a una escritura ya confirmada, salvo que no esté.
+_FALLOS_AL_MODIFICAR = (DriveRechazoError, DriveLlenoError, *_FALLOS_DE_GOOGLE)
+
+
+async def _archivo_propio(
+    archivos: Archivos, usuario_id: UUID, id_archivo: str, accion: str
+) -> Archivo | str:
+    """El archivo tal como está en Drive, si es de la persona; si no, por qué no se toca."""
+    try:
+        archivo = await archivos.obtener(usuario_id, id_archivo.strip())
+    except EntityNotFoundError:
+        return "No encontré ese archivo en tu Drive. Buscalo de nuevo para tener su id."
+    except _FALLOS_DE_GOOGLE as exc:
+        return _texto_de_fallo(exc, f"preparar el archivo para {accion}")
+    if archivo.propio:
+        return archivo
+    nombre = f"«{_dato_ajeno(archivo.nombre)}»"
+    if archivo.propietario:
+        return (
+            f"{nombre} es de «{_dato_ajeno(archivo.propietario)}», no tuyo: no puedo {accion}. "
+            "Eso lo puede hacer quien te lo compartió."
+        )
+    return (
+        f"Drive no confirma que {nombre} sea tuyo, y sólo toco archivos tuyos: no puedo {accion}."
+    )
+
+
+def _fallo_al_modificar(exc: Exception, accion: str) -> str:
+    """Por qué no se hizo algo que la persona ya confirmó (salvo que no esté)."""
+    if isinstance(exc, DriveLlenoError):
+        return f"Tu Google Drive está lleno y no dejó {accion}. Liberá espacio y pedímelo de nuevo."
+    if isinstance(exc, DriveRechazoError):
+        return exc.mensaje_usuario
+    return _texto_de_fallo(exc, accion)
+
+
+async def _renombrar(
+    archivos: Archivos, runtime: Runtime, id_archivo: str, nombre_nuevo: str
+) -> str:
+    """validar el nombre → leer el archivo real → (sí) → renombrar."""
+    usuario_id = runtime.context.usuario_id
+    pedido = _en_una_linea(nombre_nuevo)
+    if not pedido:
+        return "Falta el nombre nuevo: ¿cómo querés que se llame?"
+    if _dato_ajeno(pedido, len(pedido)) != pedido:
+        # Se mostraría distinto de como quedaría: la pregunta diría una cosa y
+        # Drive guardaría otra.
+        return "El nombre nuevo no puede tener links (tampoco algo como «sitio.com») ni « »."
+    if len(pedido) > LARGO_MAXIMO_DEL_NOMBRE_NUEVO:
+        return "Ese nombre es muy largo para un archivo: ¿uno más corto?"
+
+    archivo = await _archivo_propio(archivos, usuario_id, id_archivo, "renombrarlo")
+    if isinstance(archivo, str):
+        return archivo
+    nombre_final = _nombre_con_extension(pedido, archivo.nombre, archivo.tipo)
+    viejo = f"«{_dato_ajeno(archivo.nombre)}»"
+    nuevo = f"«{_dato_ajeno(nombre_final)}»"
+    if nombre_final == archivo.nombre:
+        return f"{viejo} ya se llama así: no cambié nada."
+    if not _confirmar(runtime, f"Renombrar {viejo} ({_tipo_de(archivo)}) a {nuevo}"):
+        return "La persona lo canceló. No se renombró nada."
+
+    try:
+        await archivos.renombrar(usuario_id, archivo.id, nombre_final)
+    except EntityNotFoundError:
+        return "Ese archivo ya no está en tu Drive, así que no lo renombré."
+    except _FALLOS_AL_MODIFICAR as exc:
+        return _fallo_al_modificar(exc, "renombrarlo")
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="renombrar_archivo",
+        usuario_id=str(usuario_id),
+        carpeta=archivo.tipo is TipoDeArchivo.CARPETA,
+    )
+    return _hecho(runtime, f"Renombré {viejo}: ahora se llama {nuevo}.")
+
+
+async def _mover(archivos: Archivos, runtime: Runtime, id_archivo: str, carpeta: str) -> str:
+    """leer el archivo real → elegir la carpeta por su nombre → (sí) → mover."""
+    usuario_id = runtime.context.usuario_id
+    if not carpeta.strip():
+        return (
+            "Falta adónde: ¿a qué carpeta lo muevo? (o a Mi unidad, para sacarlo de las carpetas)"
+        )
+    archivo = await _archivo_propio(archivos, usuario_id, id_archivo, "moverlo")
+    if isinstance(archivo, str):
+        return archivo
+    nombre = f"«{_dato_ajeno(archivo.nombre)}»"
+    if archivo.tipo is TipoDeArchivo.CARPETA:
+        return (
+            f"{nombre} es una carpeta: moverla arrastraría todo lo que tiene adentro, y eso no "
+            "lo hago desde acá. Movela desde Drive."
+        )
+    try:
+        destino = await _destino(archivos, usuario_id, carpeta)
+    except _FALLOS_DE_GOOGLE as exc:
+        return _texto_de_fallo(exc, "moverlo")
+    if isinstance(destino, str):
+        return destino
+    elegida, donde = destino
+
+    resumen = f"Mover {nombre} ({_tipo_de(archivo)}) a {donde}"
+    comparte = elegida is not None and elegida.compartido
+    if not _confirmar(
+        runtime, resumen + (_AVISO_DE_COMPARTIDA if comparte else ""), comparte=comparte
+    ):
+        return "La persona lo canceló. No se movió nada."
+
+    try:
+        await archivos.mover(usuario_id, archivo.id, elegida.id if elegida is not None else None)
+    except EntityNotFoundError:
+        return "Ese archivo o esa carpeta ya no están en tu Drive, así que no lo moví."
+    except _FALLOS_AL_MODIFICAR as exc:
+        return _fallo_al_modificar(exc, "moverlo")
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="mover_archivo",
+        usuario_id=str(usuario_id),
+        a_mi_unidad=elegida is None,
+    )
+    return _hecho(runtime, f"Listo: {nombre} quedó en {donde}.")
+
+
+async def _borrar(archivos: Archivos, runtime: Runtime, id_archivo: str) -> str:
+    """leer el archivo real → (sí, siempre) → a la papelera."""
+    usuario_id = runtime.context.usuario_id
+    archivo = await _archivo_propio(archivos, usuario_id, id_archivo, "mandarlo a la papelera")
+    if isinstance(archivo, str):
+        return archivo
+    nombre = f"«{_dato_ajeno(archivo.nombre)}»"
+    if archivo.tipo is TipoDeArchivo.CARPETA:
+        return (
+            f"{nombre} es una carpeta: borrarla se llevaría todo lo que tiene adentro, y eso no "
+            "lo hago desde acá. Borrala desde Drive."
+        )
+    # El tipo y la fecha distinguen dos archivos que se llaman igual.
+    resumen = (
+        f"Mandar a la papelera {nombre} ({_tipo_de(archivo)}, {_modificado(archivo)}). Se "
+        f"puede recuperar desde la papelera de Drive durante {DIAS_EN_LA_PAPELERA} días."
+    )
+    if not _confirmar(runtime, resumen):
+        return "La persona lo canceló. No se borró nada."
+
+    try:
+        await archivos.a_la_papelera(usuario_id, archivo.id)
+    except EntityNotFoundError:
+        return "Ese archivo ya no está en tu Drive: no hizo falta mandarlo a la papelera."
+    except _FALLOS_AL_MODIFICAR as exc:
+        return _fallo_al_modificar(exc, "mandarlo a la papelera")
+
+    logger.info(
+        "agente.herramienta.invocada", herramienta="borrar_archivo", usuario_id=str(usuario_id)
+    )
+    return _hecho(
+        runtime,
+        f"Mandé {nombre} a la papelera de tu Drive: se puede recuperar desde ahí durante "
+        f"{DIAS_EN_LA_PAPELERA} días.",
+    )
 
 
 # --- Recordatorios (PB-030) --------------------------------------------------

@@ -1,4 +1,4 @@
-"""Un archivo del Google Drive de la persona (PB-037).
+"""Un archivo del Google Drive de la persona (PB-037 · PB-039).
 
 Sólo lo que hace falta para encontrarlo y abrirlo: nombre, tipo, cuándo se
 modificó y el link. El contenido no se lee. El nombre y el dueño pueden venir
@@ -26,7 +26,12 @@ class Archivo:
         modificado: Cuándo se modificó por última vez, **con zona horaria**.
         enlace: El link para abrirlo; None si el proveedor no lo dio.
         propietario: Quién lo compartió, si NO es de la persona; None si es
-            suyo.
+            suyo o el proveedor no lo dijo.
+        propio: Si el proveedor confirma que es de la persona (PB-039). Es lo
+            que habilita moverlo, renombrarlo o borrarlo: sin la confirmación
+            (False por defecto) no se toca.
+        compartido: Si alguien más tiene acceso (PB-039). En una carpeta,
+            subir o mover algo ahí también se lo comparte a esa gente.
     """
 
     id: str
@@ -35,6 +40,8 @@ class Archivo:
     modificado: datetime
     enlace: str | None = None
     propietario: str | None = field(default=None, repr=False)
+    propio: bool = False
+    compartido: bool = False
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""

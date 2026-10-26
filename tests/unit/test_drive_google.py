@@ -1,4 +1,4 @@
-"""Tests del adaptador de Google Drive (PB-037). Sin red: MockTransport.
+"""Tests del adaptador de Google Drive (PB-037 · PB-038 · PB-039). Sin red: MockTransport.
 
 Los JSON respetan la forma real de `files.list`: sólo los campos pedidos en
 `fields`, `modifiedTime` en RFC 3339 con milisegundos y `owners` con la marca
@@ -8,7 +8,7 @@ Los JSON respetan la forma real de `files.list`: sólo los campos pedidos en
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -572,3 +572,231 @@ async def test_comprobar_acceso_no_le_pide_nada_a_drive() -> None:
     await drive.comprobar_acceso(USUARIO)
 
     assert pedidos == []
+
+
+# --- Renombrar, mover y mandar a la papelera (PB-039) ---------------------------------
+
+RAIZ = "0AraizRealDeMiUnidad"
+
+
+def _consulta_de(pedido: httpx.Request) -> dict[str, list[str]]:
+    return parse_qs(urlparse(str(pedido.url)).query)
+
+
+def _con_padres(*padres: str) -> Manejador:
+    """La raíz, los padres del archivo y el PATCH, como la API."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "GET" and pedido.url.path == "/drive/v3/files/root":
+            return httpx.Response(200, json={"id": RAIZ})
+        if pedido.method == "GET":
+            return httpx.Response(200, json={"parents": list(padres)})
+        return httpx.Response(200, json={"id": "f1"})
+
+    return responder
+
+
+async def test_los_campos_dicen_si_es_propio_y_si_esta_compartido() -> None:
+    campos = CAMPOS_DE_ARCHIVO.split(",")
+
+    assert "shared" in campos
+    assert "permissionIds" in campos
+
+
+@pytest.mark.parametrize(
+    ("duenos", "propio"),
+    [
+        ([{"displayName": "Vos", "me": True}], True),
+        ([{"displayName": "Ana", "me": False}], False),
+        ([{"displayName": "Sin marca"}], False),
+        (None, False),  # Drive no lo dijo: no se toca
+    ],
+)
+async def test_es_propio_solo_con_la_marca_de_drive(duenos: Any, propio: bool) -> None:
+    item = _item(owners=duenos)
+    drive = await _drive([], lambda _: httpx.Response(200, json=item))
+
+    archivo = await drive.obtener(USUARIO, "f1")
+
+    assert archivo.propio is propio
+
+
+@pytest.mark.parametrize(
+    ("cambios", "compartido"),
+    [
+        ({"shared": True, "permissionIds": ["yo"]}, True),
+        # Una subcarpeta de una compartida hereda el acceso sin la marca.
+        ({"shared": False, "permissionIds": ["yo", "ana"]}, True),
+        ({"shared": False, "permissionIds": ["yo"]}, False),
+        ({}, False),
+        ({"shared": "true", "permissionIds": "yo,ana"}, False),  # formas que no son
+    ],
+)
+async def test_esta_compartido_por_la_marca_o_por_los_permisos(
+    cambios: dict[str, Any], compartido: bool
+) -> None:
+    item = _item(**cambios)
+    drive = await _drive([], lambda _: httpx.Response(200, json=item))
+
+    archivo = await drive.obtener(USUARIO, "f1")
+
+    assert archivo.compartido is compartido
+
+
+async def test_renombrar_es_un_patch_con_el_nombre() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json={"id": "f1"}))
+
+    await drive.renombrar(USUARIO, "f1", "Presupuesto final.xlsx")
+
+    [pedido] = pedidos
+    assert pedido.method == "PATCH"
+    assert pedido.url.path == "/drive/v3/files/f1"
+    assert pedido.headers["Authorization"] == "Bearer access-vigente"
+    assert json.loads(pedido.content) == {"name": "Presupuesto final.xlsx"}
+
+
+async def test_a_la_papelera_es_un_patch_nunca_un_delete() -> None:
+    """DELETE lo borra para siempre; la papelera se recupera durante 30 días."""
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, lambda _: httpx.Response(200, json={"id": "f1"}))
+
+    await drive.a_la_papelera(USUARIO, "f1")
+
+    [pedido] = pedidos
+    assert pedido.method == "PATCH"
+    assert pedido.url.path == "/drive/v3/files/f1"
+    assert json.loads(pedido.content) == {"trashed": True}
+
+
+async def test_mover_a_una_carpeta_saca_al_padre_de_antes() -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _con_padres("vieja"))
+
+    await drive.mover(USUARIO, "f1", "c1")
+
+    leer, mover = pedidos
+    assert leer.method == "GET"
+    assert leer.url.path == "/drive/v3/files/f1"
+    assert _consulta_de(leer)["fields"] == ["parents"]
+    assert mover.method == "PATCH"
+    assert mover.url.path == "/drive/v3/files/f1"
+    assert _consulta_de(mover)["addParents"] == ["c1"]
+    assert _consulta_de(mover)["removeParents"] == ["vieja"]
+    assert json.loads(mover.content) == {}
+
+
+async def test_mover_a_mi_unidad_usa_el_id_real_de_la_raiz() -> None:
+    """`parents` trae el id real, nunca `root`: sin él no se sabe qué sacar."""
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _con_padres("c1"))
+
+    await drive.mover(USUARIO, "f1", None)
+
+    raiz, _, mover = pedidos
+    assert raiz.url.path == "/drive/v3/files/root"
+    assert _consulta_de(raiz)["fields"] == ["id"]
+    assert _consulta_de(mover)["addParents"] == [RAIZ]
+    assert _consulta_de(mover)["removeParents"] == ["c1"]
+
+
+@pytest.mark.parametrize(("destino", "padre"), [("c1", "c1"), (None, RAIZ)])
+async def test_mover_adonde_ya_esta_no_modifica_nada(destino: str | None, padre: str) -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _con_padres(padre))
+
+    await drive.mover(USUARIO, "f1", destino)
+
+    assert "PATCH" not in [p.method for p in pedidos]
+
+
+async def test_con_varios_padres_quedan_solo_en_el_destino() -> None:
+    """Los archivos viejos pueden tener más de un padre: quedan sólo en el destino."""
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _con_padres("c1", "otra", "tercera"))
+
+    await drive.mover(USUARIO, "f1", "c1")
+
+    parametros = _consulta_de(pedidos[-1])
+    assert "addParents" not in parametros  # ya estaba ahí
+    assert parametros["removeParents"] == ["otra,tercera"]
+
+
+@pytest.mark.parametrize(
+    "accion",
+    [
+        lambda d: d.renombrar(USUARIO, "../about", "x"),
+        lambda d: d.a_la_papelera(USUARIO, "f1/permissions"),
+        lambda d: d.mover(USUARIO, "f1?alt=media", "c1"),
+        lambda d: d.mover(USUARIO, "f1", "../c1"),  # también el destino
+    ],
+)
+async def test_un_id_que_no_es_de_drive_no_genera_pedido(
+    accion: Callable[[DriveGoogle], Awaitable[None]],
+) -> None:
+    pedidos: list[httpx.Request] = []
+    drive = await _drive(pedidos, _con_padres("vieja"))
+
+    with pytest.raises(EntityNotFoundError):
+        await accion(drive)
+
+    assert pedidos == []
+
+
+@pytest.mark.parametrize(
+    ("status", "motivo", "esperado"),
+    [
+        (403, "insufficientFilePermissions", DriveRechazoError),  # sin permiso sobre el archivo
+        (403, "insufficientPermissions", PermisoInsuficienteError),  # falta el scope
+        (404, "notFound", EntityNotFoundError),
+    ],
+)
+async def test_los_rechazos_al_modificar_tienen_su_remedio(
+    status: int, motivo: str, esperado: type[Exception]
+) -> None:
+    cuerpo = {"error": {"code": status, "errors": [{"reason": motivo}], "message": "x"}}
+    drive = await _drive([], lambda _: httpx.Response(status, json=cuerpo))
+
+    with pytest.raises(esperado):
+        await drive.renombrar(USUARIO, "f1", "Otro nombre")
+    with pytest.raises(esperado):
+        await drive.a_la_papelera(USUARIO, "f1")
+
+
+async def test_mover_a_una_carpeta_que_ya_no_existe() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "GET":
+            return httpx.Response(200, json={"parents": ["vieja"]})
+        return httpx.Response(
+            404, json={"error": {"code": 404, "errors": [{"reason": "notFound"}]}}
+        )
+
+    drive = await _drive([], responder)
+
+    with pytest.raises(EntityNotFoundError):
+        await drive.mover(USUARIO, "f1", "borrada")
+
+
+async def test_sin_red_al_modificar_es_servicio_no_disponible() -> None:
+    def caido(pedido: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sin red", request=pedido)
+
+    drive = await _drive([], caido)
+
+    with pytest.raises(ServiceUnavailableError):
+        await drive.renombrar(USUARIO, "f1", "Otro nombre")
+
+
+async def test_al_modificar_los_nombres_no_se_loguean() -> None:
+    """RF-18: qué se hizo y adónde (Mi unidad o no), nunca cómo se llama."""
+    drive = await _drive([], _con_padres("c1"))
+
+    with structlog.testing.capture_logs() as eventos:
+        await drive.renombrar(USUARIO, "f1", "Resultados de biopsia")
+        await drive.mover(USUARIO, "f1", None)
+        await drive.a_la_papelera(USUARIO, "f1")
+
+    hechos = [e["event"] for e in eventos]
+    assert hechos == ["drive.renombrado", "drive.movido", "drive.a_la_papelera"]
+    assert eventos[1]["a_mi_unidad"] is True
+    assert "biopsia" not in json.dumps(eventos, default=str)

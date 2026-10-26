@@ -459,10 +459,10 @@ class CorreosFalsos(Correos):
 
 
 class ArchivosFalsos(Archivos):
-    """Doble del puerto `Archivos` (PB-037 · PB-038): un Drive fijo, sin filtrar.
+    """Doble del puerto `Archivos` (PB-037 · PB-038 · PB-039): un Drive fijo, sin filtrar.
 
     `fallar_con` hace fallar todo (cuenta, lecturas y escrituras);
-    `fallar_al_escribir`, sólo subir y compartir: lo de antes del sí anduvo.
+    `fallar_al_escribir`, sólo las escrituras: lo de antes del sí anduvo.
     """
 
     def __init__(
@@ -481,6 +481,9 @@ class ArchivosFalsos(Archivos):
         self.busquedas: list[tuple[UUID, str, TipoDeArchivo | None, datetime | None, int]] = []
         self.subidos: list[tuple[UUID, str, str, bytes, str | None]] = []
         self.compartidos: list[tuple[UUID, str, PermisoDeArchivo, str | None]] = []
+        self.renombrados: list[tuple[UUID, str, str]] = []
+        self.movidos: list[tuple[UUID, str, str | None]] = []
+        self.en_la_papelera: list[tuple[UUID, str]] = []
         self.accesos_comprobados = 0
 
     def _fallar(self, *, escritura: bool = False) -> None:
@@ -521,6 +524,7 @@ class ArchivosFalsos(Archivos):
             tipo=None,
             modificado=datetime.now(UTC),
             enlace=f"https://drive.google.com/file/d/{nuevo}/view",
+            propio=True,
         )
         # Queda en el Drive: después se lo puede leer y compartir.
         self.archivos = (*self.archivos, subido)
@@ -535,6 +539,18 @@ class ArchivosFalsos(Archivos):
     ) -> None:
         self._fallar(escritura=True)
         self.compartidos.append((usuario_id, archivo_id, permiso, direccion))
+
+    async def renombrar(self, usuario_id: UUID, archivo_id: str, nombre: str) -> None:
+        self._fallar(escritura=True)
+        self.renombrados.append((usuario_id, archivo_id, nombre))
+
+    async def mover(self, usuario_id: UUID, archivo_id: str, carpeta_id: str | None) -> None:
+        self._fallar(escritura=True)
+        self.movidos.append((usuario_id, archivo_id, carpeta_id))
+
+    async def a_la_papelera(self, usuario_id: UUID, archivo_id: str) -> None:
+        self._fallar(escritura=True)
+        self.en_la_papelera.append((usuario_id, archivo_id))
 
     async def buscar(
         self,

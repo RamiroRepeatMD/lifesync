@@ -1,4 +1,5 @@
-"""Adaptador de Google Drive: buscar y listar (PB-037), subir y compartir (PB-038).
+"""Adaptador de Google Drive: buscar y listar (PB-037), subir y compartir (PB-038),
+renombrar, mover y mandar a la papelera (PB-039).
 
 Implementa el puerto `Archivos` contra la API REST de Drive v3, con el mismo
 trío que Calendar, Tasks y Gmail: el cliente httpx compartido de Google, las
@@ -24,12 +25,16 @@ Lo que conviene saber antes de tocarlo:
   no un inventario.
 - **El permiso es `drive`, el completo** (PB-038): es el único que deja
   compartir cualquier archivo y subir a una carpeta que ya existe. Lo que el
-  bot hace con él lo acota este código: buscar, subir y compartir. Nada lee el
-  contenido, ni mueve, ni borra.
-- **Los rechazos de una escritura no son los de una lectura.** Para subir y
-  compartir, sólo la falta de scope manda a /conectar: el resto de los 403 y
-  400 (sin permiso sobre el archivo, una cuenta de Workspace que no comparte
-  afuera, Drive lleno) es algo que reconectar no arregla.
+  bot hace con él lo acota este código: buscar, subir, compartir, renombrar,
+  mover y mandar a la papelera. Nada lee el contenido ni borra para siempre
+  (eso es DELETE, y no se usa).
+- **Los rechazos de una escritura no son los de una lectura.** Al escribir,
+  sólo la falta de scope manda a /conectar: el resto de los 403 y 400 (sin
+  permiso sobre el archivo, una cuenta de Workspace que no comparte afuera,
+  Drive lleno) es algo que reconectar no arregla.
+- **Mover pide antes el id real de Mi unidad.** `parents` trae ese id, nunca
+  el alias `root`: sin él no se sabe si el archivo ya está ahí ni qué padre
+  sacar.
 """
 
 from __future__ import annotations
@@ -68,10 +73,13 @@ BASE = "https://www.googleapis.com/drive/v3"
 SUBIDA = "https://www.googleapis.com/upload/drive/v3/files"
 HOST_DE_SUBIDA = "www.googleapis.com"
 CANTIDAD_MAXIMA = 10
-# Lo justo para mostrar y abrir cada archivo: ningún otro campo, y nada del contenido.
-# La forma `files(...)` sólo la acepta la búsqueda; un pedido de UN archivo
+# Lo justo para mostrar, abrir y decidir qué se puede tocar (PB-039: de quién
+# es y si alguien más lo ve): ningún otro campo, y nada del contenido. La
+# forma `files(...)` sólo la acepta la búsqueda; un pedido de UN archivo
 # (leerlo, subirlo) con eso da 400.
-CAMPOS_DE_ARCHIVO = "id,name,mimeType,modifiedTime,webViewLink,owners(displayName,me)"
+CAMPOS_DE_ARCHIVO = (
+    "id,name,mimeType,modifiedTime,webViewLink,owners(displayName,me),shared,permissionIds"
+)
 CAMPOS = f"files({CAMPOS_DE_ARCHIVO})"
 # La forma de un id de Drive. Lo pasa el modelo y termina en una URL: uno con
 # otra forma no puede existir, así que ni se pide (la lección de PB-036).
@@ -288,6 +296,41 @@ class DriveGoogle(Archivos):
             permiso=str(permiso),
         )
 
+    async def renombrar(self, usuario_id: UUID, archivo_id: str, nombre: str) -> None:
+        url = _url_del_archivo(archivo_id)
+        token = await self._credencial(usuario_id)
+        await self._modificar(url, token, {"name": nombre})
+        # Que se renombró, nunca cómo se llama (RF-18).
+        logger.info("drive.renombrado", usuario_id=str(usuario_id))
+
+    async def mover(self, usuario_id: UUID, archivo_id: str, carpeta_id: str | None) -> None:
+        url = _url_del_archivo(archivo_id)
+        pedido = _id_valido(carpeta_id) if carpeta_id is not None else None
+        token = await self._credencial(usuario_id)
+        destino = pedido if pedido is not None else await self._raiz(token)
+        datos = await self._pedir(
+            url,
+            token,
+            {"fields": "parents"},
+            error_404=EntityNotFoundError("Ese archivo no está en tu Drive."),
+        )
+        padres = [p for p in datos.get("parents") or [] if isinstance(p, str)]
+        # Queda sólo en el destino: un archivo viejo puede tener más de un padre.
+        quitar = [padre for padre in padres if padre != destino]
+        if destino in padres and not quitar:
+            return  # ya está ahí
+        parametros = {"removeParents": ",".join(quitar)} if quitar else {}
+        if destino not in padres:
+            parametros["addParents"] = destino
+        await self._modificar(url, token, {}, parametros)
+        logger.info("drive.movido", usuario_id=str(usuario_id), a_mi_unidad=pedido is None)
+
+    async def a_la_papelera(self, usuario_id: UUID, archivo_id: str) -> None:
+        url = _url_del_archivo(archivo_id)
+        token = await self._credencial(usuario_id)
+        await self._modificar(url, token, {"trashed": True})
+        logger.info("drive.a_la_papelera", usuario_id=str(usuario_id))
+
     # --- Plomería ---------------------------------------------------------
 
     async def _credencial(self, usuario_id: UUID) -> str:
@@ -295,6 +338,34 @@ class DriveGoogle(Archivos):
         if token is None:
             raise CuentaNoConectadaError
         return token.access_token
+
+    async def _raiz(self, token: str) -> str:
+        """El id real de Mi unidad: `root` es un alias que `parents` nunca trae."""
+        raiz = (await self._pedir(f"{BASE}/files/root", token, {"fields": "id"})).get("id")
+        if not isinstance(raiz, str) or not ID_DE_DRIVE.fullmatch(raiz):
+            logger.error("drive.raiz_inesperada")
+            raise ServiceUnavailableError("Drive no dijo cuál es Mi unidad.")
+        return raiz
+
+    async def _modificar(
+        self,
+        url: str,
+        token: str,
+        cuerpo: dict[str, Any],
+        parametros: dict[str, str] | None = None,
+    ) -> None:
+        """Un `files.update` (PATCH): renombrar, mover o mandar a la papelera."""
+        try:
+            respuesta = await self._cliente.patch(
+                url,
+                params={"fields": "id", **(parametros or {})},
+                json=cuerpo,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError as exc:
+            logger.error("drive.error_transporte", tipo=type(exc).__name__)
+            raise ServiceUnavailableError("No se pudo contactar a Google Drive.") from None
+        _revisar_escritura(respuesta)
 
     async def _pedir(
         self,
@@ -336,7 +407,7 @@ def _url_del_archivo(archivo_id: str) -> str:
 
 
 def _revisar_escritura(respuesta: httpx.Response) -> None:
-    """Los rechazos de subir o compartir, cada uno con su remedio.
+    """Los rechazos de una escritura, cada uno con su remedio.
 
     Sólo se loguean los códigos de los motivos, nunca el mensaje de Google: al
     compartir, ese texto puede repetir la dirección invitada (RF-18).
@@ -438,6 +509,8 @@ def _a_archivo(item: dict[str, Any]) -> Archivo | None:
         modificado=modificado,
         enlace=enlace if isinstance(enlace, str) and enlace else None,
         propietario=_propietario(item.get("owners")),
+        propio=_es_propio(item.get("owners")),
+        compartido=_compartido(item),
     )
 
 
@@ -458,6 +531,23 @@ def _propietario(duenos: Any) -> str | None:
     if not lista or any(d.get("me") is True for d in lista):
         return None
     return str(lista[0].get("displayName") or "otra persona")
+
+
+def _es_propio(duenos: Any) -> bool:
+    """Sólo con la marca `me` de Drive: un dueño que no se informa no es la persona."""
+    return isinstance(duenos, list) and any(
+        isinstance(d, dict) and d.get("me") is True for d in duenos
+    )
+
+
+def _compartido(item: dict[str, Any]) -> bool:
+    """Si alguien más lo ve: la marca `shared`, o más de un permiso.
+
+    La marca sola no alcanza: una subcarpeta de una carpeta compartida hereda
+    el acceso sin tenerla, pero sus permisos sí muestran a esa gente.
+    """
+    permisos = item.get("permissionIds")
+    return item.get("shared") is True or (isinstance(permisos, list) and len(permisos) > 1)
 
 
 def create_drive_google(cliente: httpx.AsyncClient, conectar: ConectarGoogle) -> DriveGoogle:

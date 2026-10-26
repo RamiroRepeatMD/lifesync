@@ -57,7 +57,8 @@ ESTADO_CON_GOOGLE = (
     "ver tus tareas pendientes, anotar nuevas, marcarlas como hechas, "
     "cambiarles la fecha o eliminarlas; buscar, leer, mandar, responder y "
     "reenviar correos de Gmail; buscar archivos en tu Drive, subir los que me "
-    "mandes por acá y compartirlos; y escribirte a una hora para recordarte "
+    "mandes por acá, compartirlos, renombrarlos, moverlos o mandarlos a la "
+    "papelera; y escribirte a una hora para recordarte "
     "algo. Antes de borrar algo, mandar un correo, compartir un archivo o hacer "
     "varias cosas juntas, te pido confirmación."
 )

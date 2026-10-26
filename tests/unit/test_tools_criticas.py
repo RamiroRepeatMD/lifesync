@@ -132,6 +132,15 @@ class Puertos:
                     tipo=TipoDeArchivo.PLANILLA,
                     modificado=AHORA,
                     enlace="https://docs.google.com/spreadsheets/d/f1/edit",
+                    propio=True,
+                ),
+                # Uno que le compartieron: no se renombra, ni se mueve, ni se borra.
+                Archivo(
+                    id="f2",
+                    nombre="Notas de Ana",
+                    tipo=TipoDeArchivo.DOCUMENTO,
+                    modificado=AHORA,
+                    propietario="Ana",
                 ),
             ),
             carpetas=(
@@ -140,6 +149,7 @@ class Puertos:
                     nombre="Facultad",
                     tipo=TipoDeArchivo.CARPETA,
                     modificado=AHORA,
+                    propio=True,
                 ),
             ),
         )
@@ -161,7 +171,7 @@ class Puertos:
         )
 
     def escrituras(self) -> int:
-        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 15 tools."""
+        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 18 tools."""
         c, t = self.calendario, self.tareas
         recordatorios = sum(
             1
@@ -179,6 +189,9 @@ class Puertos:
             + len(self.correos.enviados)
             + len(self.archivos.subidos)
             + len(self.archivos.compartidos)
+            + len(self.archivos.renombrados)
+            + len(self.archivos.movidos)
+            + len(self.archivos.en_la_papelera)
             + recordatorios
         )
 
@@ -212,6 +225,9 @@ CASOS: dict[str, dict[str, Any]] = {
     "subir_archivo": {},
     "compartir_archivo": {"id_archivo": "f1", "con": "beto@ejemplo.com"},
     "compartir_por_link": {"id_archivo": "f1"},
+    "renombrar_archivo": {"id_archivo": "f1", "nombre_nuevo": "Presupuesto final"},
+    "mover_archivo": {"id_archivo": "f1", "carpeta": "Facultad"},
+    "borrar_archivo": {"id_archivo": "f1"},
 }
 LECTURAS: dict[str, dict[str, Any]] = {
     "fecha_y_hora_actual": {},
@@ -486,6 +502,9 @@ async def test_si_la_base_se_cae_al_cancelar_el_recordatorio_sigue_programado() 
         ("posponer_tarea", "Esa tarea ya no está en la lista"),
         ("compartir_archivo", "Ese archivo ya no está en tu Drive"),
         ("compartir_por_link", "Ese archivo ya no está en tu Drive"),
+        ("renombrar_archivo", "Ese archivo ya no está en tu Drive"),
+        ("mover_archivo", "Ese archivo o esa carpeta ya no están en tu Drive"),
+        ("borrar_archivo", "Ese archivo ya no está en tu Drive"),
     ],
 )
 async def test_si_lo_borraron_entre_la_busqueda_y_la_escritura_lo_dice(
@@ -690,6 +709,29 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
             "No encontré ese archivo",
         ),
         ("compartir_por_link", {"id_archivo": "c1"}, "es una carpeta"),
+        ("renombrar_archivo", {"id_archivo": "f1", "nombre_nuevo": " "}, "Falta el nombre nuevo"),
+        (
+            "renombrar_archivo",
+            {"id_archivo": "f1", "nombre_nuevo": "Ver sitio-falso.com"},
+            "no puede tener links",
+        ),
+        (
+            "renombrar_archivo",
+            {"id_archivo": "f1", "nombre_nuevo": "Presupuesto 2026"},
+            "ya se llama así",
+        ),
+        ("renombrar_archivo", {"id_archivo": "f2", "nombre_nuevo": "Mías"}, "no tuyo"),
+        ("mover_archivo", {"id_archivo": "f1", "carpeta": " "}, "Falta adónde"),
+        (
+            "mover_archivo",
+            {"id_archivo": "f1", "carpeta": "Trabajo"},
+            "No encontré una carpeta tuya",
+        ),
+        ("mover_archivo", {"id_archivo": "c1", "carpeta": "Mi unidad"}, "es una carpeta"),
+        ("mover_archivo", {"id_archivo": "f2", "carpeta": "Facultad"}, "no tuyo"),
+        ("borrar_archivo", {"id_archivo": "c1"}, "es una carpeta"),
+        ("borrar_archivo", {"id_archivo": "f2"}, "no tuyo"),
+        ("borrar_archivo", {"id_archivo": "no-existe"}, "No encontré ese archivo"),
     ],
 )
 async def test_lo_invalido_se_explica_sin_pausa_y_sin_escribir(

@@ -51,10 +51,11 @@ SCOPES = (
     # cualquier archivo y subir a una carpeta existente (`drive.file` sólo
     # toca lo que creó la app; la carpeta se elige con el Picker, que en
     # WhatsApp no existe). Reemplaza a `drive.metadata.readonly`, que queda
-    # incluido. Lo que se hace con él lo acota el código: buscar, subir y
-    # compartir; nada lee el contenido, ni mueve, ni borra. Restringido para
-    # Google, como `gmail.readonly`. Una cuenta conectada antes recibe 403
-    # al subir o compartir → /conectar de nuevo.
+    # incluido. Lo que se hace con él lo acota el código: buscar, subir,
+    # compartir, renombrar, mover y mandar a la papelera (PB-039); nada lee
+    # el contenido ni borra para siempre. Restringido para Google, como
+    # `gmail.readonly`. Una cuenta conectada antes recibe 403 al escribir →
+    # /conectar de nuevo.
     "https://www.googleapis.com/auth/drive",
 )
 

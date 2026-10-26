@@ -1,9 +1,10 @@
-"""Puerto de acceso a los archivos de la persona (PB-037 · PB-038).
+"""Puerto de acceso a los archivos de la persona (PB-037 · PB-038 · PB-039).
 
 Capacidad externa, como `Calendario`, `Tareas` y `Correos`: los archivos viven
 en el proveedor, y esta interfaz describe sólo lo que el agente necesita de
-ellos: encontrarlos (PB-037), y subir y compartir (PB-038). Ni leer el
-contenido, ni mover, ni borrar.
+ellos: encontrarlos (PB-037), subir y compartir (PB-038), y renombrar, mover
+y mandar a la papelera (PB-039). Nunca leer el contenido ni borrar para
+siempre.
 """
 
 from __future__ import annotations
@@ -113,5 +114,37 @@ class Archivos(ABC):
             DriveRechazoError: Si Drive no lo deja (sin permiso sobre el archivo,
                 una cuenta que no comparte afuera, una dirección rechazada).
             EntityNotFoundError: Si el archivo ya no existe.
+            (y las de `buscar`)
+        """
+
+    @abstractmethod
+    async def renombrar(self, usuario_id: UUID, archivo_id: str, nombre: str) -> None:
+        """Le cambia el nombre a un archivo o a una carpeta.
+
+        Raises:
+            DriveRechazoError: Si Drive no lo deja.
+            EntityNotFoundError: Si ya no existe, o el id no tiene la forma de uno.
+            (y las de `buscar`)
+        """
+
+    @abstractmethod
+    async def mover(self, usuario_id: UUID, archivo_id: str, carpeta_id: str | None) -> None:
+        """Mueve un archivo a una carpeta, o a Mi unidad con `carpeta_id` None.
+
+        Si ya está ahí, no hace nada.
+
+        Raises:
+            DriveRechazoError: Si Drive no lo deja.
+            EntityNotFoundError: Si el archivo o la carpeta ya no existen.
+            (y las de `buscar`)
+        """
+
+    @abstractmethod
+    async def a_la_papelera(self, usuario_id: UUID, archivo_id: str) -> None:
+        """Manda un archivo a la papelera: se recupera desde Drive durante 30 días.
+
+        Raises:
+            DriveRechazoError: Si Drive no lo deja.
+            EntityNotFoundError: Si ya no existe.
             (y las de `buscar`)
         """
