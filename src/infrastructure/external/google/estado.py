@@ -39,9 +39,14 @@ _SEPARADOR = "."
 _PARTES_ESPERADAS = 2
 
 
-def derivar_clave(clave_maestra: str) -> bytes:
-    """Deriva la clave de firmado del `state` a partir de la clave de cifrado."""
-    return hmac.new(clave_maestra.encode("utf-8"), _ETIQUETA, hashlib.sha256).digest()
+def derivar_clave(clave_maestra: str, etiqueta: bytes = _ETIQUETA) -> bytes:
+    """Deriva la clave de firmado del `state` a partir de la clave de cifrado.
+
+    Cada proveedor firma con su `etiqueta` (PB-014): así un `state` firmado
+    para Google no vale en el callback de Notion, ni al revés. La de Google es
+    la de siempre, para que los enlaces ya enviados sigan valiendo.
+    """
+    return hmac.new(clave_maestra.encode("utf-8"), etiqueta, hashlib.sha256).digest()
 
 
 def firmar(usuario_id: UUID, clave: bytes, ahora: datetime) -> str:

@@ -35,9 +35,11 @@ from pydantic import BaseModel
 
 from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
+from src.application.ports.paginas import FilaDeBase
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
+from src.domain.entities.pagina import Pagina
 from src.domain.entities.recordatorio import (
     MAX_CARACTERES_DE_RECORDATORIO,
     EstadoDeRecordatorio,
@@ -50,11 +52,13 @@ from src.domain.exceptions import (
     CuentaNoConectadaError,
     EntityNotFoundError,
     EnvioInciertoError,
+    NotionNoConectadoError,
     PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
 )
 from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
+from src.domain.value_objects.tipo_de_pagina import TipoDePagina
 from src.infrastructure.config.zona import ZONA_HORARIA
 from src.infrastructure.llm.agente_gemini import CIERRE_DEL_LOTE, AgenteGemini
 from src.infrastructure.llm.contexto import ContextoDeAgente
@@ -70,6 +74,7 @@ from tests.dobles import (
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
+    PaginasFalsas,
     RecibidosFalsos,
     RecordatoriosEnMemoria,
     TareasFalsas,
@@ -79,6 +84,9 @@ AHORA = datetime.now(ZONA_HORARIA)
 MANANA = (AHORA + timedelta(days=1)).replace(hour=13, minute=0, second=0, microsecond=0)
 EN_DOS_HORAS = (AHORA + timedelta(hours=2)).replace(second=0, microsecond=0)
 CONFIRMAR = "¿Confirmás?"
+# Ids con la forma de los de Notion (UUID): el adaptador real rechaza otra cosa.
+PAGINA_DE_NOTION = "1f2e3d4c-5b6a-4789-8abc-def012345678"
+BASE_DE_NOTION = "9a8b7c6d-5e4f-4321-9fed-cba987654321"
 
 
 def _dia(momento: datetime) -> str:
@@ -154,6 +162,20 @@ class Puertos:
             ),
         )
         self.recibidos = RecibidosFalsos()
+        self.paginas = PaginasFalsas(
+            (
+                Pagina(
+                    id=PAGINA_DE_NOTION,
+                    titulo="Recetas",
+                    tipo=TipoDePagina.PAGINA,
+                    editada=AHORA,
+                    enlace=f"https://www.notion.so/Recetas-{PAGINA_DE_NOTION.replace('-', '')}",
+                ),
+                Pagina(id=BASE_DE_NOTION, titulo="Gastos", tipo=TipoDePagina.BASE, editada=AHORA),
+            ),
+            contenidos={PAGINA_DE_NOTION: "Milanesas con puré."},
+            filas={BASE_DE_NOTION: (FilaDeBase(titulo="Luz", propiedades=(("Monto", "12345"),)),)},
+        )
         self.recordatorios = RecordatoriosEnMemoria(
             Recordatorio(
                 usuario_id=self.usuario, texto="llamar al banco", momento=AHORA + timedelta(hours=3)
@@ -168,6 +190,7 @@ class Puertos:
             self.recordatorios,
             archivos=self.archivos,
             recibidos=self.recibidos,
+            paginas=self.paginas,
         )
 
     def escrituras(self) -> int:
@@ -237,6 +260,9 @@ LECTURAS: dict[str, dict[str, Any]] = {
     "leer_correo": {"id_correo": "m1"},
     "recordatorios_pendientes": {},
     "buscar_archivos": {"texto": "presupuesto"},
+    "buscar_en_notion": {"texto": "recetas"},
+    "leer_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION},
+    "consultar_base_de_notion": {"id_base": BASE_DE_NOTION},
 }
 SIN_GOOGLE = {
     "fecha_y_hora_actual",
@@ -244,7 +270,9 @@ SIN_GOOGLE = {
     "crear_recordatorio",
     "cancelar_recordatorio",
 }
-DE_GOOGLE = sorted((set(CASOS) | set(LECTURAS)) - SIN_GOOGLE)
+# Las de Notion fallan con sus propios remedios (/conectar notion): matriz aparte.
+DE_NOTION = {"buscar_en_notion", "leer_pagina_de_notion", "consultar_base_de_notion"}
+DE_GOOGLE = sorted((set(CASOS) | set(LECTURAS)) - SIN_GOOGLE - DE_NOTION)
 ESCRITURAS_DE_GOOGLE = sorted(set(CASOS) - SIN_GOOGLE)
 
 
@@ -435,6 +463,7 @@ async def test_una_falla_de_google_antes_de_confirmar_se_cuenta_con_su_remedio(
     texto = await _usar(puertos, nombre, {**CASOS, **LECTURAS}[nombre])
 
     assert remedio in texto
+    assert "notion" not in texto.lower()  # "/conectar" pasaría con "/conectar notion"
     assert puertos.escrituras() == 0
 
 
@@ -453,7 +482,34 @@ async def test_una_falla_de_google_al_escribir_se_cuenta_con_su_remedio(
     texto = await _usar(puertos, nombre, CASOS[nombre])
 
     assert remedio in texto
+    assert "notion" not in texto.lower()
     assert puertos.escrituras() == 0
+
+
+FALLAS_DE_NOTION: list[tuple[Exception, str]] = [
+    (NotionNoConectadoError(), "/conectar notion"),
+    (AutorizacionFallidaError("quitaron la conexión"), "/conectar notion"),
+    (ServiceUnavailableError("Notion no responde"), "Probá de nuevo"),
+]
+
+
+@pytest.mark.parametrize(
+    ("falla", "remedio"),
+    FALLAS_DE_NOTION,
+    ids=["sin_conectar", "permiso_vencido", "servicio_caido"],
+)
+@pytest.mark.parametrize("nombre", sorted(DE_NOTION))
+async def test_una_falla_de_notion_se_cuenta_con_su_remedio(
+    nombre: str, falla: Exception, remedio: str
+) -> None:
+    """El remedio de Notion es su propio comando: el de Google no le sirve."""
+    puertos = Puertos()
+    puertos.paginas.fallar_con = falla
+
+    texto = await _usar(puertos, nombre, LECTURAS[nombre])
+
+    assert remedio in texto
+    assert "google" not in texto.lower()
 
 
 class _RecordatoriosQueFallanAlCancelar(RecordatoriosEnMemoria):

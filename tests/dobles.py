@@ -8,7 +8,8 @@ cifrado y no en claro.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import Any
@@ -27,14 +28,17 @@ from src.application.ports.autorizador_google import (
     AutorizadorGoogle,
     CredencialesGoogle,
 )
+from src.application.ports.autorizador_notion import AutorizadorNotion, CredencialesNotion
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
+from src.application.ports.paginas import BaseConsultada, FilaDeBase, PaginaLeida, Paginas
 from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo, CorreoSaliente
 from src.domain.entities.evento import Evento
 from src.domain.entities.oauth_token import OAuthToken
+from src.domain.entities.pagina import Pagina
 from src.domain.entities.recordatorio import EstadoDeRecordatorio, Recordatorio
 from src.domain.entities.tarea import Tarea
 from src.domain.entities.usuario import Usuario
@@ -50,6 +54,7 @@ from src.domain.value_objects.numero_whatsapp import NumeroWhatsApp
 from src.domain.value_objects.permiso_de_archivo import PermisoDeArchivo
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 from src.domain.value_objects.tipo_de_archivo import TipoDeArchivo
+from src.domain.value_objects.tipo_de_pagina import TipoDePagina
 
 
 @dataclass
@@ -566,6 +571,58 @@ class ArchivosFalsos(Archivos):
         return self.archivos
 
 
+class PaginasFalsas(Paginas):
+    """Doble del puerto `Paginas` (PB-014): un Notion fijo, sin filtrar.
+
+    Los ids son UUID, como los de Notion. `fallar_con` hace fallar todo. Leer
+    algo que no está, o una base como página, da `EntityNotFoundError`, que es
+    lo que hace Notion con lo que no existe o no está compartido.
+    """
+
+    def __init__(
+        self,
+        paginas: Sequence[Pagina] = (),
+        *,
+        contenidos: dict[str, str] | None = None,
+        filas: dict[str, tuple[FilaDeBase, ...]] | None = None,
+        fallar_con: Exception | None = None,
+    ) -> None:
+        self.paginas = tuple(paginas)
+        self.contenidos = contenidos or {}
+        self.filas = filas or {}
+        self.fallar_con = fallar_con
+        self.busquedas: list[tuple[UUID, str, int]] = []
+        self.leidas: list[str] = []
+        self.consultadas: list[str] = []
+
+    async def buscar(self, usuario_id: UUID, texto: str, cantidad: int) -> tuple[Pagina, ...]:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.busquedas.append((usuario_id, texto, cantidad))
+        return self.paginas[: max(1, min(cantidad, 10))]
+
+    async def leer(self, usuario_id: UUID, pagina_id: str) -> PaginaLeida:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.leidas.append(pagina_id)
+        pagina = self._buscar_por_id(pagina_id, TipoDePagina.PAGINA)
+        return PaginaLeida(pagina=pagina, markdown=self.contenidos.get(pagina_id, ""))
+
+    async def consultar(self, usuario_id: UUID, base_id: str, cantidad: int) -> BaseConsultada:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.consultadas.append(base_id)
+        base = self._buscar_por_id(base_id, TipoDePagina.BASE)
+        filas = self.filas.get(base_id, ())
+        return BaseConsultada(base=base, filas=filas[:cantidad], hay_mas=len(filas) > cantidad)
+
+    def _buscar_por_id(self, identificador: str, tipo: TipoDePagina) -> Pagina:
+        for pagina in self.paginas:
+            if pagina.id == identificador and pagina.tipo is tipo:
+                return pagina
+        raise EntityNotFoundError("No está en el Notion de la persona, o no está compartido.")
+
+
 class RecibidosFalsos(ArchivosRecibidos):
     """Doble de `ArchivosRecibidos` (PB-038): siempre el mismo PDF.
 
@@ -639,6 +696,65 @@ class AutorizadorFalso(AutorizadorGoogle):
         if self.fallar_refresco is not None:
             raise self.fallar_refresco
         return self.credenciales
+
+
+class AutorizadorNotionFalso(AutorizadorNotion):
+    """Doble del autorizador de Notion (PB-014): no habla con Notion.
+
+    `refrescar` devuelve un par nuevo en cada llamada, como cuando Notion lo
+    rota. Con `esperar` cargado se queda esperando ese evento antes de contestar:
+    es lo que deja probar que dos renovaciones a la vez hacen un solo refresco
+    (sin la espera, el test pasaría aunque faltara el candado). `al_refrescar`
+    corre al empezar: simula lo que hace otro proceso mientras tanto.
+    """
+
+    def __init__(self, usuario_fijo: UUID | None = None) -> None:
+        self.usuario_fijo = usuario_fijo or uuid4()
+        self.credenciales = CredencialesNotion(
+            access_token="notion-access-1", refresh_token="notion-refresh-1"
+        )
+        self.estado_invalido: Exception | None = None
+        self.fallar_canje: Exception | None = None
+        self.fallar_refresco: Exception | None = None
+        self.refresh_nulo = False
+        self.esperar: asyncio.Event | None = None
+        self.al_refrescar: Callable[[], Awaitable[None]] | None = None
+        self.codigos_canjeados: list[str] = []
+        self.refresh_usados: list[str] = []
+        self.revocados: list[str] = []
+        self.revocacion_exitosa = True
+
+    def url_de_autorizacion(self, usuario_id: UUID, ahora: datetime) -> str:
+        return f"https://api.notion.com/v1/oauth/authorize?state=firmado-{usuario_id}"
+
+    def usuario_del_estado(self, estado: str, ahora: datetime) -> UUID:
+        if self.estado_invalido is not None:
+            raise self.estado_invalido
+        return self.usuario_fijo
+
+    async def canjear_codigo(self, codigo: str) -> CredencialesNotion:
+        self.codigos_canjeados.append(codigo)
+        if self.fallar_canje is not None:
+            raise self.fallar_canje
+        return self.credenciales
+
+    async def refrescar(self, refresh_token: str) -> CredencialesNotion:
+        self.refresh_usados.append(refresh_token)
+        if self.al_refrescar is not None:
+            await self.al_refrescar()
+        if self.esperar is not None:
+            await self.esperar.wait()
+        if self.fallar_refresco is not None:
+            raise self.fallar_refresco
+        numero = len(self.refresh_usados) + 1
+        return CredencialesNotion(
+            access_token=f"notion-access-{numero}",
+            refresh_token=None if self.refresh_nulo else f"notion-refresh-{numero}",
+        )
+
+    async def revocar(self, token: str) -> bool:
+        self.revocados.append(token)
+        return self.revocacion_exitosa
 
 
 class RepositorioOAuthTokenEnMemoria(OAuthTokenRepository):

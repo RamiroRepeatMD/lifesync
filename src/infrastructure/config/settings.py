@@ -125,6 +125,15 @@ class Settings(BaseSettings):
     # diferencia devuelve `redirect_uri_mismatch`.
     google_redirect_uri: str | None = None
 
+    # --- Notion OAuth2 (PB-014) ---
+    # Credenciales de la conexión pública de Notion. Opcionales también en
+    # producción, como las de Google: sin ellas, /conectar notion lo avisa y el
+    # resto anda igual.
+    notion_client_id: str | None = None
+    notion_client_secret: SecretStr | None = None
+    # Igual que en Google: idéntica a la registrada en la conexión.
+    notion_redirect_uri: str | None = None
+
     @field_validator(
         "supabase_url",
         "supabase_key",
@@ -139,6 +148,9 @@ class Settings(BaseSettings):
         "google_client_id",
         "google_client_secret",
         "google_redirect_uri",
+        "notion_client_id",
+        "notion_client_secret",
+        "notion_redirect_uri",
         mode="before",
     )
     @classmethod
@@ -211,6 +223,21 @@ class Settings(BaseSettings):
                 self.google_client_id,
                 self.google_client_secret,
                 self.google_redirect_uri,
+            )
+        )
+
+    @property
+    def notion_oauth_configurado(self) -> bool:
+        """True si se puede ofrecer conectar Notion (PB-014).
+
+        Las tres van juntas, por lo mismo que las de Google: con una de menos el
+        flujo fallaría recién en el callback, con el consentimiento ya dado.
+        """
+        return all(
+            (
+                self.notion_client_id,
+                self.notion_client_secret,
+                self.notion_redirect_uri,
             )
         )
 

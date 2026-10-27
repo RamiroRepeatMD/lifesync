@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · Notion API (pendiente) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases: sólo lectura) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 1522 tests (cobertura con ramas 92,4%, piso de 90% en CI) + 30 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 1758 tests (cobertura con ramas 92,7%, piso de 90% en CI) + 32 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -262,6 +262,15 @@ compartieron otros, no), las carpetas sólo se renombran (moverlas o borrarlas a
 de adentro), y mover o subir algo a una carpeta compartida pide el "sí": es darle acceso a
 quienes la ven.
 
+También en el Sprint 6 se conecta **Notion** (`/conectar notion`), por ahora para **leer**:
+"¿qué páginas tengo en Notion?", "¿qué dice mi página de Recetas?" o "¿qué hay en mi base de
+Gastos?". Busca por el título (la API de Notion no busca adentro), lee una página entera y lista
+las filas de una base con sus datos. Ve sólo lo que la persona eligió compartir al conectar.
+Como en un espacio compartido lo escribe cualquiera, el contenido recibe el trato de un correo:
+va enmarcado como dato de un tercero, y con una página de Notion a la vista toda escritura pide
+el "sí". Escribir en Notion (crear, editar, mover, borrar) y subirle archivos quedan para
+después.
+
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
 "Recordame en 20 minutos que saque la pizza" → confirmación → a esa hora llega
 "⏰ Recordatorio: sacar la pizza". Se pueden listar y cancelar, y no necesitan la cuenta de
@@ -272,7 +281,8 @@ lo pendiente vive en la base, así que un redeploy no pierde ninguno, y un *comp
 evita mandarlo dos veces si dos contenedores conviven durante un deploy.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
-`/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google).
+`/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google), y sus
+versiones para Notion, `/conectar notion` y `/desconectar notion`.
 
 Que la ayuda no dependa del LLM es a propósito: RF-11 pide un sistema de ayuda, y uno que cambia
 de texto en cada invocación —o que inventa funciones que no existen— no lo cumple. Además es lo
@@ -349,6 +359,31 @@ copia local.
 En Supabase, la fila de `oauth_tokens` tiene que existir con
 `access_token_cifrado` empezando en `gA` y **`refresh_token_cifrado` distinto de
 NULL**. Si el refresh es NULL, faltó `access_type=offline` en la autorización.
+
+---
+
+## Conectar Notion (PB-014)
+
+Igual que con Google, desde WhatsApp: `/conectar notion` manda un enlace firmado que vence en 10
+minutos. En la pantalla de Notion, la persona **elige qué páginas y bases compartir**: el bot ve
+sólo eso (y lo que tienen adentro), nunca el resto del espacio. Para desvincular,
+`/desconectar notion`, en dos pasos y con revocación real del permiso.
+
+### Configurar la conexión en Notion
+
+1. Crear una **conexión pública** en https://app.notion.com/developers/connections.
+2. **Redirect URI**, exactamente:
+
+   ```
+   https://<tu-servicio>.up.railway.app/oauth/notion/callback
+   ```
+
+3. **Capacidades**: sólo *Read content*, y *No user information*. Es todo lo que usa el bot.
+4. Copiar el *client ID* y el *client secret* al `.env` y a Railway (`NOTION_CLIENT_ID`,
+   `NOTION_CLIENT_SECRET` y `NOTION_REDIRECT_URI`).
+
+Notion no informa cuándo vence el token: cuando la API contesta 401, el bot lo renueva una vez
+con el refresh token y reintenta. Si eso también falla, pide volver a hacer `/conectar notion`.
 
 ---
 
@@ -469,9 +504,9 @@ uv run mypy tests            # ... y de los tests (CI corre ambos)
 ```
 
 `tests/integration/` prueba caminos completos sin red: del agente a los adaptadores de Google
-Calendar, Tasks, Gmail y Drive, asertando el pedido exacto que recibiría Google (en Gmail, hasta
-los encabezados del correo que sale y el texto entero de un reenvío; en Drive, los padres que
-se agregan y se sacan al mover). Y
+Calendar, Tasks, Gmail, Drive y Notion, asertando el pedido exacto que recibiría el proveedor (en
+Gmail, hasta los encabezados del correo que sale y el texto entero de un reenvío; en Drive, los
+padres que se agregan y se sacan al mover; en Notion, la renovación del token ante un 401). Y
 `tests/unit/test_tools_criticas.py` fija las promesas que valen para todas las tools a la vez:
 ninguna escribe fuera del control de la confirmación, ninguna deja escapar una falla de Google,
 y dos acciones juntas se confirman en una sola lista y corren una vez. Si mañana se suma una
@@ -484,7 +519,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 30 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 32 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -494,7 +529,9 @@ correo (un correo que ordena borrar, reenviarse o agendar algo no lo logra), y r
 un correo dentro de su hilo; y si un envío falla, que cuente bien si el correo salió (ante la
 duda manda a revisar Enviados y no lo repite). En Drive: pasa el link tal cual (y un nombre
 de archivo con un link falso no lo cuela), sube lo que le mandan y lo comparte con el sí, y
-mandar a la papelera o renombrar lo que encontró también pide el sí. Si Gemini no responde o
+mandar a la papelera o renombrar lo que encontró también pide el sí. En Notion: busca la página,
+la lee y cuenta lo que dice, y una página que ordena mandar un correo no lo logra. Si Gemini no
+responde o
 se agota la cuota por minuto, el caso espera y reintenta, y si
 persiste se marca como salteado: una caída del proveedor no es un fallo de
 comportamiento.
@@ -529,6 +566,9 @@ Toda la configuración se lee de variables de entorno mediante `pydantic-setting
 | `GOOGLE_CLIENT_ID` | — | ID de cliente OAuth2 (PB-009). Opcional: sin él sólo se deshabilita /conectar |
 | `GOOGLE_CLIENT_SECRET` | — | Secreto del cliente OAuth2 |
 | `GOOGLE_REDIRECT_URI` | — | Debe coincidir **exactamente** con la registrada en Google |
+| `NOTION_CLIENT_ID` | — | Client ID de la conexión pública de Notion (PB-014). Opcional: sin él sólo se deshabilita /conectar notion |
+| `NOTION_CLIENT_SECRET` | — | Client secret de esa conexión |
+| `NOTION_REDIRECT_URI` | — | Debe coincidir **exactamente** con la registrada en la conexión |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Modelo a usar. La cuota gratuita es **por modelo y por día** (lite: 500/día; flash: 20/día) |
 
 Las tres de Supabase son opcionales fuera de producción (modo degradado) y **obligatorias** con
@@ -624,7 +664,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-042 | Mantenimiento del documento de Sprint Planning | ⏳ |
 | PB-043 | Preparación de demos y evidencia | ⏳ |
 | PB-044 | Refinamiento final del backlog y replanificación documentada | ⏳ |
-| PB-014 | OAuth2 de Notion básico (si hay capacidad) | ⏳ |
+| PB-014 | Notion: OAuth2 básico (sumó leer: buscar, leer páginas y consultar bases) | ✅ (de punta a punta contra un Notion simulado; sólo lectura) |
 
 Además: corrección de defectos y pulido, y la documentación técnica final con un manual de
 usuario básico.

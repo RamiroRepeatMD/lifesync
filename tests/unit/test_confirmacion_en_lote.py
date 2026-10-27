@@ -37,6 +37,7 @@ from tests.dobles import (
     CalendarioFalso,
     CorreosFalsos,
     ModeloFalso,
+    PaginasFalsas,
     RecibidosFalsos,
     RecordatoriosEnMemoria,
     TareasFalsas,
@@ -327,6 +328,7 @@ def test_toda_herramienta_esta_clasificada_una_sola_vez() -> None:
             RecordatoriosEnMemoria(),
             archivos=ArchivosFalsos(),
             recibidos=RecibidosFalsos(),
+            paginas=PaginasFalsas(),
         )
     }
 

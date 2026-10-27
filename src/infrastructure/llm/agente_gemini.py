@@ -28,6 +28,7 @@ from src.application.ports.archivos import Archivos
 from src.application.ports.archivos_recibidos import ArchivosRecibidos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
+from src.application.ports.paginas import Paginas
 from src.application.ports.tareas import Tareas
 from src.domain.exceptions import (
     AgenteNoDisponibleError,
@@ -480,6 +481,7 @@ def crear_agente_gemini(
     recordatorios: RecordatorioRepository | None = None,
     archivos: Archivos | None = None,
     recibidos: ArchivosRecibidos | None = None,
+    paginas: Paginas | None = None,
 ) -> AgenteGemini:
     """Construye el agente completo: modelo, herramientas, memoria y grafo.
 
@@ -499,6 +501,8 @@ def crear_agente_gemini(
             no ofrece buscar archivos.
         recibidos: De dónde se bajan los archivos que manda la persona
             (PB-038). Sin esto, no se ofrece subirlos a Drive.
+        paginas: Lectura de Notion (PB-014). Con `None` el agente no ofrece
+            buscar ni leer páginas.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.
@@ -521,7 +525,13 @@ def crear_agente_gemini(
     )
 
     herramientas = construir_herramientas(
-        calendario, tareas, correos, recordatorios, archivos=archivos, recibidos=recibidos
+        calendario,
+        tareas,
+        correos,
+        recordatorios,
+        archivos=archivos,
+        recibidos=recibidos,
+        paginas=paginas,
     )
     grafo = construir_grafo(
         modelo, herramientas, checkpointer if checkpointer is not None else InMemorySaver()
@@ -535,6 +545,7 @@ def crear_agente_gemini(
         con_recordatorios=recordatorios is not None,
         con_drive=archivos is not None,
         con_subida=archivos is not None and recibidos is not None,
+        con_notion=paginas is not None,
         memoria_persistida=checkpointer is not None,
     )
     return AgenteGemini(grafo)

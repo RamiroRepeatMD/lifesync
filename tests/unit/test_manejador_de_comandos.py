@@ -13,16 +13,29 @@ import pytest
 
 from src.application.services.manejador_de_comandos import (
     AYUDA,
+    AYUDA_CON_NOTION,
     CONECTAR_ERROR,
     CONECTAR_NO_DISPONIBLE,
+    CONECTAR_NOTION_NO_DISPONIBLE,
+    DESCONECTAR_GOOGLE_SIN_CUENTA,
+    DESCONECTAR_NOTION_LISTO,
+    DESCONECTAR_NOTION_PIDE_CONFIRMACION,
+    DESCONECTAR_NOTION_SIN_CUENTA,
+    DESCONECTAR_NOTION_SIN_REVOCAR,
+    DESCONECTAR_PIDE_CONFIRMACION,
     DESCONECTAR_SIN_CUENTA,
     ESTADO_CON_GOOGLE,
     ESTADO_SIN_CUENTAS,
+    GOOGLE_SIN_CONECTAR,
+    NOTION_CONECTADO,
+    NOTION_SIN_CONECTAR,
+    PISTA_DE_NOTION,
     ManejadorDeComandos,
 )
 from src.application.use_cases.conectar_google import ConectarGoogle
+from src.application.use_cases.conectar_notion import ConectarNotion
 from src.domain.entities.usuario import Usuario
-from tests.dobles import AutorizadorFalso, RepositorioOAuthTokenEnMemoria
+from tests.dobles import AutorizadorFalso, AutorizadorNotionFalso, RepositorioOAuthTokenEnMemoria
 
 AHORA = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 ID_USUARIO = uuid4()
@@ -250,3 +263,163 @@ async def test_un_sufijo_que_no_es_confirmar_no_ejecuta() -> None:
 
 async def test_la_ayuda_lista_desconectar() -> None:
     assert "/desconectar" in AYUDA
+
+
+# --- Notion (PB-014) -----------------------------------------------------------
+
+
+async def _con_notion(
+    *, google: bool = False, notion: bool = False
+) -> tuple[ManejadorDeComandos, ConectarNotion, AutorizadorNotionFalso]:
+    """Google y Notion configurados; `google` y `notion` dicen cuáles están conectados."""
+    caso_google = ConectarGoogle(
+        RepositorioOAuthTokenEnMemoria(), AutorizadorFalso(usuario_fijo=ID_USUARIO)
+    )
+    autorizador = AutorizadorNotionFalso(usuario_fijo=ID_USUARIO)
+    caso_notion = ConectarNotion(RepositorioOAuthTokenEnMemoria(), autorizador)
+    if google:
+        await caso_google.completar("4/codigo", "state", AHORA)
+    if notion:
+        await caso_notion.completar("codigo", "state", AHORA)
+    return ManejadorDeComandos(caso_google, caso_notion), caso_notion, autorizador
+
+
+async def test_con_notion_la_ayuda_suma_sus_comandos() -> None:
+    manejador, _, _ = await _con_notion()
+
+    respuesta = await manejador.responder("/ayuda", USUARIO, AHORA)
+
+    assert respuesta == AYUDA_CON_NOTION
+    assert "/conectar notion" in AYUDA_CON_NOTION
+    assert "/desconectar notion" in AYUDA_CON_NOTION
+
+
+async def test_conectar_notion_manda_el_enlace_y_explica_que_elegir() -> None:
+    manejador, _, _ = await _con_notion()
+
+    respuesta = await manejador.responder("/conectar Notion", USUARIO, AHORA)
+
+    assert respuesta is not None
+    assert f"https://api.notion.com/v1/oauth/authorize?state=firmado-{ID_USUARIO}" in respuesta
+    assert "qué páginas compartir conmigo" in respuesta
+    assert "Sólo leo: no edito ni borro nada." in respuesta
+
+
+async def test_conectar_notion_sin_configurar_lo_avisa() -> None:
+    manejador, _ = _con_google()
+
+    respuesta = await manejador.responder("/conectar notion", USUARIO, AHORA)
+
+    assert respuesta == CONECTAR_NOTION_NO_DISPONIBLE
+
+
+async def test_conectar_a_secas_sigue_siendo_google_y_suma_la_pista_de_notion() -> None:
+    manejador, _, _ = await _con_notion()
+
+    respuesta = await manejador.responder("/conectar", USUARIO, AHORA)
+
+    assert respuesta is not None
+    assert "https://accounts.google.com" in respuesta
+    assert respuesta.endswith(PISTA_DE_NOTION)
+
+
+async def test_sin_notion_configurado_conectar_no_suma_la_pista() -> None:
+    manejador, _ = _con_google()
+
+    respuesta = await manejador.responder("/conectar", USUARIO, AHORA)
+
+    assert respuesta is not None
+    assert PISTA_DE_NOTION not in respuesta
+
+
+@pytest.mark.parametrize(
+    ("google", "notion", "esperado"),
+    [
+        (False, False, f"{ESTADO_SIN_CUENTAS}\n\n{PISTA_DE_NOTION}"),
+        (True, False, f"{ESTADO_CON_GOOGLE}\n\n{NOTION_SIN_CONECTAR}"),
+        (False, True, f"{GOOGLE_SIN_CONECTAR}\n\n{NOTION_CONECTADO}"),
+        (True, True, f"{ESTADO_CON_GOOGLE}\n\n{NOTION_CONECTADO}"),
+    ],
+    ids=["ninguna", "solo_google", "solo_notion", "las_dos"],
+)
+async def test_el_estado_dice_cada_conexion_por_separado(
+    google: bool, notion: bool, esperado: str
+) -> None:
+    """Con Notion conectado, "ninguna cuenta" sería falso."""
+    manejador, _, _ = await _con_notion(google=google, notion=notion)
+
+    assert await manejador.responder("/estado", USUARIO, AHORA) == esperado
+
+
+async def test_desconectar_notion_sin_conexion() -> None:
+    manejador, _, _ = await _con_notion()
+
+    respuesta = await manejador.responder("/desconectar notion", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_SIN_CUENTA
+
+
+async def test_desconectar_notion_primero_pide_confirmacion() -> None:
+    manejador, caso, autorizador = await _con_notion(notion=True)
+
+    respuesta = await manejador.responder("/desconectar notion", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_PIDE_CONFIRMACION
+    assert await caso.esta_conectado(ID_USUARIO) is True
+    assert autorizador.revocados == []
+
+
+async def test_desconectar_notion_confirmado_revoca_y_borra() -> None:
+    manejador, caso, autorizador = await _con_notion(notion=True)
+
+    respuesta = await manejador.responder("/desconectar notion confirmar", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_LISTO
+    assert await caso.esta_conectado(ID_USUARIO) is False
+    assert autorizador.revocados == ["notion-access-1", "notion-refresh-1"]
+
+
+async def test_si_notion_no_confirma_la_revocacion_se_dice_como_cerrarla() -> None:
+    manejador, caso, autorizador = await _con_notion(notion=True)
+    autorizador.revocacion_exitosa = False
+
+    respuesta = await manejador.responder("/desconectar notion confirmar", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_SIN_REVOCAR
+    assert "Notion" in respuesta and "google" not in respuesta.lower()
+    assert await caso.esta_conectado(ID_USUARIO) is False
+
+
+async def test_una_confirmacion_con_algo_de_mas_no_confirma() -> None:
+    manejador, caso, _ = await _con_notion(notion=True)
+
+    respuesta = await manejador.responder("/desconectar notion confirmar ya", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_PIDE_CONFIRMACION
+    assert await caso.esta_conectado(ID_USUARIO) is True
+
+
+async def test_desconectar_ya_sigue_siendo_google() -> None:
+    """Sólo "notion" elige Notion: lo demás se comporta como antes de PB-014."""
+    manejador, caso, _ = await _con_notion(google=True, notion=True)
+
+    respuesta = await manejador.responder("/desconectar ya", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_PIDE_CONFIRMACION
+    assert await caso.esta_conectado(ID_USUARIO) is True
+
+
+async def test_desconectar_google_con_solo_notion_dice_cual_falta() -> None:
+    manejador, caso, _ = await _con_notion(notion=True)
+
+    for texto in ("/desconectar", "/desconectar confirmar"):
+        assert await manejador.responder(texto, USUARIO, AHORA) == DESCONECTAR_GOOGLE_SIN_CUENTA
+    assert await caso.esta_conectado(ID_USUARIO) is True
+
+
+async def test_sin_notion_configurado_desconectar_notion_no_rompe() -> None:
+    manejador, _ = _con_google()
+
+    respuesta = await manejador.responder("/desconectar notion", USUARIO, AHORA)
+
+    assert respuesta == DESCONECTAR_NOTION_SIN_CUENTA

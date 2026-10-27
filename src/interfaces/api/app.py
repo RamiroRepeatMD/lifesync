@@ -21,8 +21,10 @@ from src.application.ports.archivos import Archivos
 from src.application.ports.archivos_recibidos import ArchivosRecibidos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
+from src.application.ports.paginas import Paginas
 from src.application.ports.tareas import Tareas
 from src.application.use_cases.conectar_google import ConectarGoogle
+from src.application.use_cases.conectar_notion import ConectarNotion
 from src.application.use_cases.enviar_recordatorios_vencidos import EnviarRecordatoriosVencidos
 from src.domain.repositories.recordatorio_repository import RecordatorioRepository
 from src.infrastructure.config.logging import configure_logging
@@ -52,7 +54,7 @@ from src.infrastructure.persistence.supabase_recordatorio_repository import (
 from src.infrastructure.persistence.supabase_usuario_repository import SupabaseUsuarioRepository
 from src.interfaces.api.errors import register_exception_handlers
 from src.interfaces.api.middleware.request_context import RequestContextMiddleware
-from src.interfaces.api.routers import health, oauth_google
+from src.interfaces.api.routers import health, oauth_google, oauth_notion
 from src.interfaces.jobs.recordatorios import despachar_recordatorios
 from src.interfaces.webhooks import whatsapp as webhook_whatsapp
 
@@ -89,6 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # El orden importa: el agente recibe el calendario y el checkpointer, así
     # que sus proveedores arrancan antes.
     _iniciar_google_oauth(app, settings)
+    _iniciar_notion(app, settings)
     await _iniciar_memoria_del_agente(app, settings)
     _iniciar_agente(app, settings)
     _iniciar_despachador(app, settings)
@@ -114,6 +117,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_google_oauth_client(app.state.google_oauth)
         except Exception as exc:  # el shutdown no puede romperse
             logger.warning("app.shutdown.error", recurso="google_oauth", tipo=type(exc).__name__)
+        try:
+            from src.infrastructure.external.notion.oauth import close_notion_client
+
+            await close_notion_client(app.state.notion)
+        except Exception as exc:  # el shutdown no puede romperse
+            logger.warning("app.shutdown.error", recurso="notion", tipo=type(exc).__name__)
         try:
             from src.infrastructure.llm.checkpointer import cerrar_pool
 
@@ -216,6 +225,7 @@ def _iniciar_agente(app: FastAPI, settings: Settings) -> None:
         recordatorios=_recordatorios_de(app),
         archivos=_archivos_de(app),
         recibidos=_recibidos_de(app),
+        paginas=_paginas_de(app),
     )
 
 
@@ -337,6 +347,25 @@ def _archivos_de(app: FastAPI) -> Archivos | None:
     return create_drive_google(*piezas)
 
 
+def _paginas_de(app: FastAPI) -> Paginas | None:
+    """La lectura de Notion (PB-014), si están la base, el cifrador y el cliente de Notion."""
+    supabase = app.state.supabase
+    cipher = app.state.token_cipher
+    http = app.state.notion
+    if supabase is None or cipher is None or http is None:
+        logger.info("notion.no_disponible", motivo="falta Supabase o la conexión con Notion")
+        return None
+
+    from src.infrastructure.external.notion.oauth import create_autorizador_notion
+    from src.infrastructure.external.notion.paginas import create_notion_api
+
+    conectar = ConectarNotion(
+        SupabaseOAuthTokenRepository(supabase, cipher),
+        create_autorizador_notion(http, app.state.settings),
+    )
+    return create_notion_api(http, conectar)
+
+
 def _recibidos_de(app: FastAPI) -> ArchivosRecibidos | None:
     """Quien baja de Meta los archivos que manda la persona (PB-038), si hay WhatsApp.
 
@@ -366,6 +395,27 @@ def _iniciar_google_oauth(app: FastAPI, settings: Settings) -> None:
 
     app.state.google_oauth = create_google_oauth_client()
     logger.info("google_oauth.listo")
+
+
+def _iniciar_notion(app: FastAPI, settings: Settings) -> None:
+    """Abre el cliente HTTP hacia Notion, si está su OAuth (PB-014).
+
+    Uno solo, para el OAuth y para la API. Opcional como Google: sin él,
+    /conectar notion lo avisa y el resto anda igual. Va antes que el agente,
+    que recibe de acá lo que necesita para leer Notion.
+    """
+    if not settings.notion_oauth_configurado:
+        logger.warning(
+            "notion_oauth.no_configurado",
+            motivo="faltan NOTION_CLIENT_ID, NOTION_CLIENT_SECRET o NOTION_REDIRECT_URI",
+            consecuencia="no se puede conectar Notion; el resto anda igual",
+        )
+        return
+
+    from src.infrastructure.external.notion.oauth import create_notion_client
+
+    app.state.notion = create_notion_client()
+    logger.info("notion_oauth.listo")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -401,6 +451,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.whatsapp = None
     app.state.agente = None
     app.state.google_oauth = None
+    app.state.notion = None
     app.state.checkpointer = None
     app.state.checkpointer_pool = None
     app.state.despachador = None
@@ -419,5 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Fuera del prefijo /api/v1: la URL queda registrada en Google Cloud
     # Console y moverla obliga a reconfigurarla allá (PB-009).
     app.include_router(oauth_google.router)
+    # Igual que la de Google: la URL queda registrada en la conexión de Notion.
+    app.include_router(oauth_notion.router)
 
     return app

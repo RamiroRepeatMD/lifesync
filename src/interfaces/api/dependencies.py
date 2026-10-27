@@ -24,12 +24,14 @@ from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.application.services.agente_degradado import AgenteDegradado
 from src.application.services.manejador_de_comandos import ManejadorDeComandos
 from src.application.use_cases.conectar_google import ConectarGoogle
+from src.application.use_cases.conectar_notion import ConectarNotion
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
 from src.domain.exceptions import ServiceUnavailableError
 from src.domain.repositories.oauth_token_repository import OAuthTokenRepository
 from src.domain.repositories.usuario_repository import UsuarioRepository
 from src.infrastructure.config.settings import Settings
 from src.infrastructure.external.google.oauth import create_autorizador_google
+from src.infrastructure.external.notion.oauth import create_autorizador_notion
 from src.infrastructure.external.whatsapp.cliente import ClienteWhatsApp
 from src.infrastructure.external.whatsapp.deduplicador import DeduplicadorDeMensajes
 from src.infrastructure.persistence.encryption import TokenCipher
@@ -136,9 +138,27 @@ def get_conectar_google(request: Request) -> ConectarGoogle | None:
     return ConectarGoogle(SupabaseOAuthTokenRepository(supabase, cipher), autorizador)
 
 
+def get_conectar_notion(request: Request) -> ConectarNotion | None:
+    """Caso de uso de conexión con Notion, o None si no se puede ofrecer (PB-014).
+
+    Mismo criterio que el de Google: sin la base, el cifrador o el cliente de
+    Notion (que sólo existe con su OAuth configurado), no se ofrece.
+    """
+    supabase: AsyncClient | None = request.app.state.supabase
+    cipher: TokenCipher | None = request.app.state.token_cipher
+    http: httpx.AsyncClient | None = request.app.state.notion
+    if supabase is None or cipher is None or http is None:
+        return None
+
+    settings: Settings = request.app.state.settings
+    return ConectarNotion(
+        SupabaseOAuthTokenRepository(supabase, cipher), create_autorizador_notion(http, settings)
+    )
+
+
 def get_manejador_de_comandos(request: Request) -> ManejadorDeComandos:
     """Manejador de los comandos que no pasan por el modelo (RF-11, RF-12)."""
-    return ManejadorDeComandos(get_conectar_google(request))
+    return ManejadorDeComandos(get_conectar_google(request), get_conectar_notion(request))
 
 
 def get_procesador_de_mensajes(request: Request) -> ProcesarMensajeEntrante | None:
@@ -176,6 +196,7 @@ UsuarioRepositoryDep = Annotated[UsuarioRepository, Depends(get_usuario_reposito
 MensajeroWhatsAppDep = Annotated[MensajeroWhatsApp | None, Depends(get_mensajero_whatsapp)]
 AgenteDep = Annotated[AgenteConversacional, Depends(get_agente)]
 ConectarGoogleDep = Annotated[ConectarGoogle | None, Depends(get_conectar_google)]
+ConectarNotionDep = Annotated[ConectarNotion | None, Depends(get_conectar_notion)]
 ProcesadorDeMensajesDep = Annotated[
     ProcesarMensajeEntrante | None, Depends(get_procesador_de_mensajes)
 ]

@@ -36,6 +36,7 @@ from src.domain.exceptions import (
     InvalidValueError,
     LifeSyncError,
     MensajeRechazadoError,
+    NotionNoConectadoError,
     PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
@@ -59,6 +60,7 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     ConfirmationRequiredError: status.HTTP_409_CONFLICT,
     # Falta un paso previo, no está mal el pedido: 409 y no 400 (PB-015).
     CuentaNoConectadaError: status.HTTP_409_CONFLICT,
+    NotionNoConectadoError: status.HTTP_409_CONFLICT,
     DomainError: status.HTTP_400_BAD_REQUEST,
     # Infraestructura (PB-003). Registrarlas no es opcional: son hermanas de
     # DomainError, así que sin entrada propia el recorrido del MRO las dejaría

@@ -23,37 +23,16 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Query, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from starlette.responses import Response
 
 from src.domain.exceptions import AutorizacionFallidaError, InvalidValueError
 from src.interfaces.api.dependencies import ConectarGoogleDep
+from src.interfaces.api.routers.html import pagina
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/oauth/google", tags=["oauth"])
-
-_ESTILO = (
-    "font-family:system-ui,-apple-system,sans-serif;max-width:32rem;margin:15vh auto;"
-    "padding:0 1.5rem;text-align:center;line-height:1.6;color:#1a1a1a"
-)
-
-
-def _pagina(titulo: str, detalle: str, *, icono: str, codigo: int = 200) -> HTMLResponse:
-    """Arma una página mínima y autocontenida para el navegador."""
-    return HTMLResponse(
-        status_code=codigo,
-        content=(
-            f'<!doctype html><html lang="es"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f"<title>LifeSync</title></head>"
-            f'<body style="{_ESTILO}">'
-            f'<p style="font-size:3rem;margin:0">{icono}</p>'
-            f"<h1>{titulo}</h1><p>{detalle}</p>"
-            f"</body></html>"
-        ),
-    )
-
 
 _NO_DISPONIBLE = (
     "Conexión no disponible",
@@ -78,16 +57,16 @@ async def iniciar(
     verificar antes de redirigir.
     """
     if conectar is None:
-        return _pagina(*_NO_DISPONIBLE, icono="🔌", codigo=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return pagina(*_NO_DISPONIBLE, icono="🔌", codigo=status.HTTP_503_SERVICE_UNAVAILABLE)
     if state is None:
-        return _pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
+        return pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
 
     ahora = datetime.now(UTC)
     try:
         usuario_id = conectar.usuario_del_estado(state, ahora)
     except InvalidValueError:
         logger.warning("google.iniciar.state_invalido")
-        return _pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
+        return pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
 
     logger.info("google.iniciar.redirigiendo", usuario_id=str(usuario_id))
     return RedirectResponse(
@@ -109,13 +88,13 @@ async def callback(
     página entendible en vez de un 422 con el detalle de qué campos faltan.
     """
     if conectar is None:
-        return _pagina(*_NO_DISPONIBLE, icono="🔌", codigo=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return pagina(*_NO_DISPONIBLE, icono="🔌", codigo=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     if error is not None:
         # El caso más común es access_denied: la persona apretó "Cancelar".
         # No es un fallo del sistema, así que se responde 200.
         logger.info("google.callback.rechazado_por_el_usuario", motivo=error)
-        return _pagina(
+        return pagina(
             "No se conectó tu cuenta",
             "Cancelaste la autorización. Si fue sin querer, escribí "
             "<b>/conectar</b> en WhatsApp para volver a intentarlo.",
@@ -124,7 +103,7 @@ async def callback(
 
     if code is None or state is None:
         logger.warning("google.callback.incompleto", trajo_code=code is not None)
-        return _pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
+        return pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
 
     try:
         usuario_id = await conectar.completar(code, state, datetime.now(UTC))
@@ -132,9 +111,9 @@ async def callback(
         # State deformado, mal firmado o vencido. Sin detalle: quien lo manda
         # es un atacante o alguien con un enlace viejo.
         logger.warning("google.callback.state_invalido")
-        return _pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
+        return pagina(*_ENLACE_INVALIDO, icono="⏳", codigo=status.HTTP_400_BAD_REQUEST)
     except AutorizacionFallidaError:
-        return _pagina(
+        return pagina(
             "No pude completar la conexión",
             "Google rechazó la autorización. Probá de nuevo en un minuto con <b>/conectar</b>.",
             icono="⚠️",
@@ -142,7 +121,7 @@ async def callback(
         )
 
     logger.info("google.callback.completado", usuario_id=str(usuario_id))
-    return _pagina(
+    return pagina(
         "¡Listo!",
         "Tu cuenta de Google quedó conectada. Volvé a WhatsApp y preguntame por tu agenda.",
         icono="✅",

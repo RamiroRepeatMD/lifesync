@@ -1,4 +1,4 @@
-"""Tests de integración de los endpoints OAuth2 con Google (PB-009).
+"""Tests de integración de los endpoints OAuth2 con Google (PB-009) y Notion (PB-014).
 
 Estos endpoints los abre una persona en el navegador, así que devuelven HTML.
 Las aserciones van sobre lo que se guardó y sobre lo que se le muestra, nunca
@@ -14,12 +14,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.application.use_cases.conectar_google import ConectarGoogle
+from src.application.use_cases.conectar_notion import ConectarNotion
 from src.domain.exceptions import AutorizacionFallidaError, InvalidValueError
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
 from src.infrastructure.config.settings import Environment, Settings
 from src.interfaces.api.app import create_app
-from src.interfaces.api.dependencies import get_conectar_google
-from tests.dobles import AutorizadorFalso, RepositorioOAuthTokenEnMemoria
+from src.interfaces.api.dependencies import get_conectar_google, get_conectar_notion
+from tests.dobles import AutorizadorFalso, AutorizadorNotionFalso, RepositorioOAuthTokenEnMemoria
 
 INICIAR = "/oauth/google/iniciar"
 CALLBACK = "/oauth/google/callback"
@@ -186,3 +187,98 @@ def test_el_codigo_de_autorizacion_no_queda_en_los_logs(
 
     salida = capsys.readouterr().out
     assert "4/codigo-super-secreto" not in salida
+
+
+# --- Notion (PB-014) ---------------------------------------------------------------
+
+CALLBACK_DE_NOTION = "/oauth/notion/callback"
+
+
+@pytest.fixture
+def autorizador_de_notion() -> AutorizadorNotionFalso:
+    return AutorizadorNotionFalso(usuario_fijo=USUARIO)
+
+
+@pytest.fixture
+def client_notion(
+    tokens: RepositorioOAuthTokenEnMemoria, autorizador_de_notion: AutorizadorNotionFalso
+) -> Iterator[TestClient]:
+    """App con el OAuth de Notion operativo y sin red."""
+    app = create_app(Settings(_env_file=None, environment=Environment.TESTING, log_level="WARNING"))
+    app.dependency_overrides[get_conectar_notion] = lambda: ConectarNotion(
+        tokens, autorizador_de_notion
+    )
+    with TestClient(app) as cliente:
+        yield cliente
+    app.dependency_overrides.clear()
+
+
+async def test_el_callback_de_notion_guarda_las_credenciales(
+    client_notion: TestClient, tokens: RepositorioOAuthTokenEnMemoria
+) -> None:
+    respuesta = client_notion.get(CALLBACK_DE_NOTION, params={"code": "c", "state": "firmado"})
+
+    assert respuesta.status_code == 200
+    assert respuesta.headers["content-type"].startswith("text/html")
+    assert "Tu Notion quedó conectado" in respuesta.text
+    assert await tokens.obtener(USUARIO, ProveedorOAuth.NOTION) is not None
+    assert await tokens.obtener(USUARIO, ProveedorOAuth.GOOGLE) is None
+
+
+def test_si_la_persona_cancela_en_notion_se_le_explica(client_notion: TestClient) -> None:
+    respuesta = client_notion.get(CALLBACK_DE_NOTION, params={"error": "access_denied"})
+
+    assert respuesta.status_code == 200
+    assert "/conectar notion" in respuesta.text
+
+
+async def test_un_state_invalido_en_notion_no_guarda_nada(
+    client_notion: TestClient,
+    tokens: RepositorioOAuthTokenEnMemoria,
+    autorizador_de_notion: AutorizadorNotionFalso,
+) -> None:
+    autorizador_de_notion.estado_invalido = InvalidValueError("firmado para Google")
+
+    respuesta = client_notion.get(CALLBACK_DE_NOTION, params={"code": "c", "state": "falso"})
+
+    assert respuesta.status_code == 400
+    assert "/conectar notion" in respuesta.text
+    assert await tokens.obtener(USUARIO, ProveedorOAuth.NOTION) is None
+
+
+def test_un_callback_de_notion_vacio_no_rompe(client_notion: TestClient) -> None:
+    assert client_notion.get(CALLBACK_DE_NOTION).status_code == 400
+
+
+def test_si_notion_rechaza_el_canje_se_avisa(
+    client_notion: TestClient, autorizador_de_notion: AutorizadorNotionFalso
+) -> None:
+    autorizador_de_notion.fallar_canje = AutorizacionFallidaError()
+
+    respuesta = client_notion.get(CALLBACK_DE_NOTION, params={"code": "c", "state": "firmado"})
+
+    assert respuesta.status_code == 503
+    assert "/conectar notion" in respuesta.text
+
+
+def test_sin_configuracion_el_callback_de_notion_explica(client_sin_oauth: TestClient) -> None:
+    respuesta = client_sin_oauth.get(CALLBACK_DE_NOTION, params={"code": "c", "state": "x"})
+
+    assert respuesta.status_code == 503
+    assert "Notion" in respuesta.text
+
+
+def test_notion_no_tiene_iniciar(client_notion: TestClient) -> None:
+    """`/conectar notion` manda la URL de Notion directo: un /iniciar no lo usaría nadie."""
+    assert client_notion.get("/oauth/notion/iniciar", params={"state": "x"}).status_code == 404
+
+
+def test_el_codigo_de_notion_no_queda_en_los_logs(
+    client_notion: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    capsys.readouterr()  # descarta lo emitido durante el arranque
+
+    client_notion.get(CALLBACK_DE_NOTION, params={"code": "codigo-super-secreto", "state": "s"})
+
+    salida = capsys.readouterr().out
+    assert "codigo-super-secreto" not in salida

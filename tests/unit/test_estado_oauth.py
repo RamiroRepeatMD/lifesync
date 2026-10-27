@@ -8,6 +8,8 @@ usuario de LifeSync que elija. Por eso las aserciones que importan acá son las
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -116,3 +118,23 @@ def test_el_estado_no_lleva_el_usuario_en_claro() -> None:
     firmado = estado.firmar(usuario_id, CLAVE, AHORA)
 
     assert str(usuario_id) not in firmado
+
+
+# --- Una etiqueta por proveedor (PB-014) -----------------------------------------
+
+
+def test_la_clave_por_defecto_es_la_de_siempre() -> None:
+    """Los enlaces de Google ya enviados tienen que seguir valiendo."""
+    esperada = hmac.new(b"clave-fernet-de-prueba", b"lifesync.oauth.state.v1", hashlib.sha256)
+
+    assert CLAVE == esperada.digest()
+
+
+def test_otra_etiqueta_da_otra_clave() -> None:
+    """Es lo que hace que un state firmado para Google no valga en Notion."""
+    de_notion = estado.derivar_clave("clave-fernet-de-prueba", b"lifesync.oauth.state.notion.v1")
+    firmado = estado.firmar(uuid4(), de_notion, AHORA)
+
+    assert de_notion != CLAVE
+    with pytest.raises(InvalidValueError):
+        estado.verificar(firmado, CLAVE, AHORA)

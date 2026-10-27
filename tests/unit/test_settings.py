@@ -274,3 +274,36 @@ def test_las_credenciales_de_whatsapp_no_aparecen_en_el_repr() -> None:
     assert "token-de-graph-de-prueba" not in representacion
     assert "app-secret-de-prueba" not in representacion
     assert "verify-de-prueba" not in representacion
+
+
+# --- Notion (PB-014) ------------------------------------------------------------
+
+CREDENCIALES_NOTION: dict[str, object] = {
+    "notion_client_id": "cliente-de-notion",
+    "notion_client_secret": "secret-de-notion",
+    "notion_redirect_uri": "https://lifesync.up.railway.app/oauth/notion/callback",
+}
+
+
+def test_con_las_tres_de_notion_se_puede_conectar() -> None:
+    assert _settings(**CREDENCIALES_NOTION).notion_oauth_configurado is True
+
+
+@pytest.mark.parametrize("faltante", sorted(CREDENCIALES_NOTION))
+def test_sin_una_de_notion_no_se_ofrece(faltante: str) -> None:
+    """Con una de menos, el flujo fallaría en el callback, ya con el consentimiento dado."""
+    assert _settings(**{**CREDENCIALES_NOTION, faltante: None}).notion_oauth_configurado is False
+
+
+@pytest.mark.parametrize("faltante", sorted(CREDENCIALES_NOTION))
+def test_una_de_notion_vacia_cuenta_como_ausente(faltante: str) -> None:
+    assert _settings(**{**CREDENCIALES_NOTION, faltante: " "}).notion_oauth_configurado is False
+
+
+def test_produccion_arranca_sin_notion() -> None:
+    """Es una integración, como Google: sin ella, /conectar notion lo avisa."""
+    assert _settings_produccion().notion_oauth_configurado is False
+
+
+def test_el_secret_de_notion_no_aparece_en_el_repr() -> None:
+    assert "secret-de-notion" not in repr(_settings(**CREDENCIALES_NOTION))

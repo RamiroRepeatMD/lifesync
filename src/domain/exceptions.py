@@ -66,6 +66,18 @@ class CuentaNoConectadaError(DomainError):
     )
 
 
+class NotionNoConectadoError(CuentaNoConectadaError):
+    """Se pidió algo de Notion y la persona no lo conectó (PB-014).
+
+    Hija de la de Google para que todo lo que ya atrapa "falta una cuenta" la
+    atrape también; el remedio es otro comando, así que el mensaje es propio.
+    """
+
+    mensaje_usuario = (
+        "Todavía no conectaste tu Notion. Escribí /conectar notion y te paso el enlace."
+    )
+
+
 class ArchivoNoDisponibleError(EntityNotFoundError):
     """El archivo que mandó la persona ya no se puede bajar del canal (PB-038).
 
