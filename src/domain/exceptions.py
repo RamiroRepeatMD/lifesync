@@ -125,6 +125,35 @@ class DriveLlenoError(DomainError):
     )
 
 
+class NotionRechazoError(DomainError):
+    """Notion no aceptó una escritura (RF-07): un 400, un dato que no le sirve.
+
+    Seguro que no se hizo nada, y reconectar no lo arregla: por eso no manda a
+    /conectar notion, a diferencia de su hija.
+    """
+
+    mensaje_usuario = (
+        "Notion no aceptó el cambio: puede que algún dato no le sirva para esa página. "
+        "No se hizo nada."
+    )
+
+
+class NotionSinPermisoError(NotionRechazoError):
+    """Notion no dejó escribir (RF-07): un 403 `restricted_resource`.
+
+    Puede ser un token de antes de que la conexión pudiera escribir (se arregla
+    reconectando), una página que no deja editarla, o el límite de bloques del
+    plan del espacio. El mensaje dice las tres cosas, en ese orden.
+    """
+
+    mensaje_usuario = (
+        "Notion no me dejó escribir ahí. Si conectaste Notion antes de que pudiera "
+        "escribir, volvé a hacer /conectar notion para darme ese permiso; si no, puede "
+        "que esa página no te deje editarla o que tu espacio haya llegado al límite de "
+        "bloques de su plan."
+    )
+
+
 class InfrastructureError(LifeSyncError):
     """Falla técnica al hablar con un sistema externo (base de datos, APIs).
 
@@ -182,6 +211,18 @@ class EnvioInciertoError(ServiceUnavailableError):
     mensaje_usuario = (
         "No sé si el correo salió. Revisá tu carpeta Enviados antes de volver a pedirlo."
     )
+
+
+class EscrituraEnDudaError(ServiceUnavailableError):
+    """El proveedor no confirmó una escritura que pudo haberse hecho (RF-07).
+
+    El pariente de `EnvioInciertoError` para Notion: la respuesta se perdió o
+    llegó un 5xx, y la doc de Notion avisa que un cambio puede guardarse aunque
+    la respuesta sea un error. Crear o agregar dos veces dejaría repetido algo
+    que el bot no puede borrar: antes de repetirlo, hay que mirar.
+    """
+
+    mensaje_usuario = "No sé si quedó hecho. Fijate antes de pedírmelo de nuevo."
 
 
 class EnvioRechazadoError(ServiceUnavailableError):

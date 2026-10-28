@@ -24,6 +24,8 @@ class Pagina:
         tipo: Página o base de datos.
         editada: Cuándo se editó por última vez, **con zona horaria**.
         enlace: El link para abrirla; None si el proveedor no lo dio.
+        en_base: Si es una fila de una base (RF-07): su padre es una base. Una
+            fila tiene datos propios y no se mueve fuera de su base.
     """
 
     id: str
@@ -31,6 +33,7 @@ class Pagina:
     tipo: TipoDePagina
     editada: datetime
     enlace: str | None = None
+    en_base: bool = False
 
     def __post_init__(self) -> None:
         """Valida las invariantes de la entidad al construirla."""

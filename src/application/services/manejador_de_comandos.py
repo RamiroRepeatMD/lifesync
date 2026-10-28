@@ -116,7 +116,8 @@ DESCONECTAR_SIN_REVOCAR = (
 PISTA_DE_NOTION = "También podés conectar tu Notion: /conectar notion"
 GOOGLE_SIN_CONECTAR = "Tu cuenta de Google no está conectada: escribí /conectar para vincularla."
 NOTION_CONECTADO = (
-    "Tu Notion está conectado. ✅ Puedo buscar y leer las páginas y bases que compartiste conmigo."
+    "Tu Notion está conectado. ✅ Puedo buscar y leer las páginas y bases que compartiste "
+    "conmigo, y escribir en ellas."
 )
 NOTION_SIN_CONECTAR = "Tu Notion no está conectado: escribí /conectar notion para vincularlo."
 
@@ -130,7 +131,8 @@ DESCONECTAR_GOOGLE_SIN_CUENTA = (
 )
 DESCONECTAR_NOTION_SIN_CUENTA = "No tenés Notion conectado, así que no hay nada que desconectar."
 DESCONECTAR_NOTION_PIDE_CONFIRMACION = (
-    "Vas a desconectar tu Notion: dejo de poder ver las páginas que compartiste conmigo.\n\n"
+    "Vas a desconectar tu Notion: dejo de poder ver y escribir las páginas que compartiste "
+    "conmigo.\n\n"
     "Para confirmar, escribí: /desconectar notion confirmar"
 )
 DESCONECTAR_NOTION_LISTO = (
@@ -149,8 +151,8 @@ def _texto_del_enlace_de_notion(enlace: str) -> str:
         "Para conectar tu Notion, entrá acá y autorizá el acceso:\n\n"
         f"{enlace}\n\n"
         "El enlace vence en 10 minutos. Notion te va a preguntar qué páginas compartir "
-        "conmigo: elegí las que quieras que lea (las de adentro vienen incluidas). Sólo "
-        "leo: no edito ni borro nada."
+        "conmigo: elegí las que quieras que use (las de adentro vienen incluidas). Nunca "
+        "escribo, muevo ni borro nada sin confirmarte antes."
     )
 
 

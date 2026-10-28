@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases: sólo lectura) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas y filas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 1758 tests (cobertura con ramas 92,7%, piso de 90% en CI) + 32 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2055 tests (cobertura con ramas 93,1%, piso de 90% en CI) + 35 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -223,8 +223,8 @@ confirmación (RF-08) va **según la criticidad**: lo reversible y suelto —age
 anotar, completar— sale directo y el bot cuenta qué hizo y cuándo; lo irreversible
 —borrar, mandar un correo— pide el "sí"; y si se piden **varias cosas juntas**, el bot
 muestra la lista completa y confirma una sola vez. Con texto de un tercero a la vista (un
-correo, un listado de Drive), todo vuelve a confirmar: un tercero no puede escribir por la
-persona. La decisión no es del
+correo, un listado de Drive, una página de Notion), todo vuelve a confirmar: un tercero no
+puede escribir por la persona. La decisión no es del
 modelo: es una política del dominio que aplica el grafo antes de ejecutar. Y si el modelo falla justo
 después de ejecutar una acción, el bot igual cuenta lo que hizo: así nadie repite —y duplica—
 algo que ya quedó hecho. Desde el Sprint 3 también
@@ -262,14 +262,25 @@ compartieron otros, no), las carpetas sólo se renombran (moverlas o borrarlas a
 de adentro), y mover o subir algo a una carpeta compartida pide el "sí": es darle acceso a
 quienes la ven.
 
-También en el Sprint 6 se conecta **Notion** (`/conectar notion`), por ahora para **leer**:
-"¿qué páginas tengo en Notion?", "¿qué dice mi página de Recetas?" o "¿qué hay en mi base de
+También en el Sprint 6 se conecta **Notion** (`/conectar notion`). Para **leer**: "¿qué
+páginas tengo en Notion?", "¿qué dice mi página de Recetas?" o "¿qué hay en mi base de
 Gastos?". Busca por el título (la API de Notion no busca adentro), lee una página entera y lista
 las filas de una base con sus datos. Ve sólo lo que la persona eligió compartir al conectar.
 Como en un espacio compartido lo escribe cualquiera, el contenido recibe el trato de un correo:
 va enmarcado como dato de un tercero, y con una página de Notion a la vista toda escritura pide
-el "sí". Escribir en Notion (crear, editar, mover, borrar) y subirle archivos quedan para
-después.
+el "sí".
+
+Y para **escribir** (RF-07): crear una página adentro de otra o una fila nueva en una base,
+agregar texto al final de una página ("agregá flan a mis recetas"), cambiar un dato de una fila
+("marcá la luz como pagada", "poné 1500 en el monto") o el título de una página, moverla
+adentro de otra, mandarla a la papelera de Notion y subirle un archivo que llegó por WhatsApp
+(una foto se ve como imagen, un PDF como PDF). Todo lo que escribe en Notion pide el "sí": lo
+que queda en una página lo ve quien la ve, y la API no dice si está compartida. La pregunta
+muestra entero lo que se va a escribir. El texto lo arma el bot en bloques propios (títulos,
+viñetas, listas numeradas y tareas), sólo agrega al final —no cambia ni borra lo que ya hay— y
+los datos de una fila sólo toman opciones que la base ya tiene. Las bases enteras no se mueven
+ni se borran, y una fila no sale de su base. Si Notion no confirma una escritura, el bot no dice
+que se hizo ni invita a repetirla: avisa que puede haber quedado y pide revisarlo antes.
 
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
 "Recordame en 20 minutos que saque la pizza" → confirmación → a esa hora llega
@@ -378,9 +389,14 @@ sólo eso (y lo que tienen adentro), nunca el resto del espacio. Para desvincula
    https://<tu-servicio>.up.railway.app/oauth/notion/callback
    ```
 
-3. **Capacidades**: sólo *Read content*, y *No user information*. Es todo lo que usa el bot.
+3. **Capacidades**: *Read content*, *Insert content* y *Update content*, y *No user
+   information*. Es todo lo que usa el bot: leer, crear y agregar, y cambiar datos, mover y
+   mandar a la papelera.
 4. Copiar el *client ID* y el *client secret* al `.env` y a Railway (`NOTION_CLIENT_ID`,
    `NOTION_CLIENT_SECRET` y `NOTION_REDIRECT_URI`).
+
+Sumarle una capacidad a una conexión ya creada obliga a volver a autorizar: hasta que la persona
+haga `/conectar notion` de nuevo, Notion rechaza las escrituras y el bot se lo explica.
 
 Notion no informa cuándo vence el token: cuando la API contesta 401, el bot lo renueva una vez
 con el refresh token y reintenta. Si eso también falla, pide volver a hacer `/conectar notion`.
@@ -506,7 +522,8 @@ uv run mypy tests            # ... y de los tests (CI corre ambos)
 `tests/integration/` prueba caminos completos sin red: del agente a los adaptadores de Google
 Calendar, Tasks, Gmail, Drive y Notion, asertando el pedido exacto que recibiría el proveedor (en
 Gmail, hasta los encabezados del correo que sale y el texto entero de un reenvío; en Drive, los
-padres que se agregan y se sacan al mover; en Notion, la renovación del token ante un 401). Y
+padres que se agregan y se sacan al mover; en Notion, la renovación del token ante un 401, cada
+escritura y la subida de un archivo en sus tres pasos). Y
 `tests/unit/test_tools_criticas.py` fija las promesas que valen para todas las tools a la vez:
 ninguna escribe fuera del control de la confirmación, ninguna deja escapar una falla de Google,
 y dos acciones juntas se confirman en una sola lista y corren una vez. Si mañana se suma una
@@ -519,7 +536,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 32 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 35 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -530,11 +547,11 @@ un correo dentro de su hilo; y si un envío falla, que cuente bien si el correo 
 duda manda a revisar Enviados y no lo repite). En Drive: pasa el link tal cual (y un nombre
 de archivo con un link falso no lo cuela), sube lo que le mandan y lo comparte con el sí, y
 mandar a la papelera o renombrar lo que encontró también pide el sí. En Notion: busca la página,
-la lee y cuenta lo que dice, y una página que ordena mandar un correo no lo logra. Si Gemini no
-responde o
-se agota la cuota por minuto, el caso espera y reintenta, y si
-persiste se marca como salteado: una caída del proveedor no es un fallo de
-comportamiento.
+la lee y cuenta lo que dice, una página que ordena mandar un correo no lo logra, agregarle algo
+a una página o mandarla a la papelera pide el sí, y un "subilo" a secas, con Drive y Notion
+conectados, pregunta adónde. Si Gemini no responde o se agota la cuota por minuto, el caso
+espera y reintenta, y si persiste se marca como salteado: una caída del proveedor no es un
+fallo de comportamiento.
 
 Los mismos checks corren en CI en cada push
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), más un build del `Dockerfile` para que no
@@ -664,7 +681,8 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-042 | Mantenimiento del documento de Sprint Planning | ⏳ |
 | PB-043 | Preparación de demos y evidencia | ⏳ |
 | PB-044 | Refinamiento final del backlog y replanificación documentada | ⏳ |
-| PB-014 | Notion: OAuth2 básico (sumó leer: buscar, leer páginas y consultar bases) | ✅ (de punta a punta contra un Notion simulado; sólo lectura) |
+| PB-014 | Notion: OAuth2 básico (sumó leer: buscar, leer páginas y consultar bases) | ✅ (de punta a punta contra un Notion simulado) |
+| RF-07 | Notion: escribir (crear páginas y filas, agregar texto, cambiar datos), mover, mandar a la papelera y subir archivos — sin PB propio, lo documenta PB-044 | ✅ (de punta a punta contra un Notion simulado; todo pide el "sí") |
 
 Además: corrección de defectos y pulido, y la documentación técnica final con un manual de
 usuario básico.

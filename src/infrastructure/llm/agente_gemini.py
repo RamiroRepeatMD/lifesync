@@ -500,9 +500,9 @@ def crear_agente_gemini(
         archivos: Adaptador de Google Drive (PB-037). Con `None` el agente
             no ofrece buscar archivos.
         recibidos: De dónde se bajan los archivos que manda la persona
-            (PB-038). Sin esto, no se ofrece subirlos a Drive.
-        paginas: Lectura de Notion (PB-014). Con `None` el agente no ofrece
-            buscar ni leer páginas.
+            (PB-038). Sin esto, no se ofrece subirlos a Drive ni a Notion.
+        paginas: El Notion de la persona (PB-014 · RF-07). Con `None` el
+            agente no ofrece buscar, leer ni escribir páginas.
 
     Raises:
         ServiceUnavailableError: Si falta `GOOGLE_API_KEY`.

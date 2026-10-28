@@ -9,7 +9,8 @@ para todas a la vez, y fallan si mañana se suma una tool que no las cumple:
   escritura pide el sí (modo estricto, RF-08 v2);
 - dos escrituras juntas son una lista, y cada una corre una sola vez;
 - un archivo recibido no se baja antes del sí (PB-038);
-- ninguna falla de Google se escapa como excepción, y cada una trae su remedio;
+- ninguna falla de Google ni de Notion se escapa como excepción, y cada una
+  trae su remedio;
 - lo que se borra a medias se cuenta tal cual, y una falla no prevista no se
   reintenta sola.
 
@@ -35,7 +36,7 @@ from pydantic import BaseModel
 
 from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
-from src.application.ports.paginas import FilaDeBase
+from src.application.ports.paginas import FilaDeBase, Propiedad, TipoDePropiedad
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
@@ -53,6 +54,8 @@ from src.domain.exceptions import (
     EntityNotFoundError,
     EnvioInciertoError,
     NotionNoConectadoError,
+    NotionRechazoError,
+    NotionSinPermisoError,
     PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
@@ -87,6 +90,8 @@ CONFIRMAR = "¿Confirmás?"
 # Ids con la forma de los de Notion (UUID): el adaptador real rechaza otra cosa.
 PAGINA_DE_NOTION = "1f2e3d4c-5b6a-4789-8abc-def012345678"
 BASE_DE_NOTION = "9a8b7c6d-5e4f-4321-9fed-cba987654321"
+DESTINO_DE_NOTION = "0a1b2c3d-4e5f-4607-8899-aabbccddeeff"
+FILA_DE_NOTION = "2b3c4d5e-6f70-4812-93a4-b5c6d7e8f901"
 
 
 def _dia(momento: datetime) -> str:
@@ -108,7 +113,7 @@ def _correo(id_: str, remitente: str, asunto: str) -> Correo:
 
 
 class Puertos:
-    """Los seis dobles, con datos que encajan con los argumentos de `CASOS`."""
+    """Los dobles, con datos que encajan con los argumentos de `CASOS`."""
 
     def __init__(self) -> None:
         self.usuario: UUID = uuid4()
@@ -172,9 +177,37 @@ class Puertos:
                     enlace=f"https://www.notion.so/Recetas-{PAGINA_DE_NOTION.replace('-', '')}",
                 ),
                 Pagina(id=BASE_DE_NOTION, titulo="Gastos", tipo=TipoDePagina.BASE, editada=AHORA),
+                # Adonde se mueve, y una fila con un estado para cambiar (RF-07).
+                Pagina(
+                    id=DESTINO_DE_NOTION, titulo="Archivo", tipo=TipoDePagina.PAGINA, editada=AHORA
+                ),
+                Pagina(
+                    id=FILA_DE_NOTION,
+                    titulo="Luz",
+                    tipo=TipoDePagina.PAGINA,
+                    editada=AHORA,
+                    en_base=True,
+                ),
             ),
             contenidos={PAGINA_DE_NOTION: "Milanesas con puré."},
-            filas={BASE_DE_NOTION: (FilaDeBase(titulo="Luz", propiedades=(("Monto", "12345"),)),)},
+            filas={
+                BASE_DE_NOTION: (
+                    FilaDeBase(titulo="Luz", propiedades=(("Monto", "12345"),), id=FILA_DE_NOTION),
+                )
+            },
+            propiedades={
+                FILA_DE_NOTION: (
+                    Propiedad(id="title", nombre="Concepto", tipo=TipoDePropiedad.TITULO),
+                    Propiedad(id="m1", nombre="Monto", tipo=TipoDePropiedad.NUMERO),
+                    Propiedad(
+                        id="e1",
+                        nombre="Estado",
+                        tipo=TipoDePropiedad.ESTADO,
+                        valor="Pendiente",
+                        opciones=("Pendiente", "Pagado"),
+                    ),
+                )
+            },
         )
         self.recordatorios = RecordatoriosEnMemoria(
             Recordatorio(
@@ -194,7 +227,7 @@ class Puertos:
         )
 
     def escrituras(self) -> int:
-        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 18 tools."""
+        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 24 tools."""
         c, t = self.calendario, self.tareas
         recordatorios = sum(
             1
@@ -215,6 +248,7 @@ class Puertos:
             + len(self.archivos.renombrados)
             + len(self.archivos.movidos)
             + len(self.archivos.en_la_papelera)
+            + self.paginas.escrituras()
             + recordatorios
         )
 
@@ -251,6 +285,12 @@ CASOS: dict[str, dict[str, Any]] = {
     "renombrar_archivo": {"id_archivo": "f1", "nombre_nuevo": "Presupuesto final"},
     "mover_archivo": {"id_archivo": "f1", "carpeta": "Facultad"},
     "borrar_archivo": {"id_archivo": "f1"},
+    "crear_pagina_en_notion": {"id_padre": PAGINA_DE_NOTION, "titulo": "Torta"},
+    "agregar_a_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "texto": "- Leche"},
+    "cambiar_dato_en_notion": {"id_pagina": FILA_DE_NOTION, "dato": "Estado", "valor": "Pagado"},
+    "mover_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "id_destino": DESTINO_DE_NOTION},
+    "borrar_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION},
+    "subir_a_notion": {"id_pagina": PAGINA_DE_NOTION},
 }
 LECTURAS: dict[str, dict[str, Any]] = {
     "fecha_y_hora_actual": {},
@@ -271,9 +311,10 @@ SIN_GOOGLE = {
     "cancelar_recordatorio",
 }
 # Las de Notion fallan con sus propios remedios (/conectar notion): matriz aparte.
-DE_NOTION = {"buscar_en_notion", "leer_pagina_de_notion", "consultar_base_de_notion"}
+DE_NOTION = {nombre for nombre in {*CASOS, *LECTURAS} if "notion" in nombre}
 DE_GOOGLE = sorted((set(CASOS) | set(LECTURAS)) - SIN_GOOGLE - DE_NOTION)
-ESCRITURAS_DE_GOOGLE = sorted(set(CASOS) - SIN_GOOGLE)
+ESCRITURAS_DE_GOOGLE = sorted(set(CASOS) - SIN_GOOGLE - DE_NOTION)
+ESCRITURAS_DE_NOTION = sorted(set(CASOS) & DE_NOTION)
 
 
 ARCHIVO = ArchivoAdjunto(
@@ -506,10 +547,36 @@ async def test_una_falla_de_notion_se_cuenta_con_su_remedio(
     puertos = Puertos()
     puertos.paginas.fallar_con = falla
 
-    texto = await _usar(puertos, nombre, LECTURAS[nombre])
+    texto = await _usar(puertos, nombre, {**CASOS, **LECTURAS}[nombre])
 
     assert remedio in texto
     assert "google" not in texto.lower()
+    assert puertos.escrituras() == 0
+
+
+@pytest.mark.parametrize(
+    ("falla", "remedio"),
+    [
+        *FALLAS_DE_NOTION,
+        # Un token de antes de que la conexión pudiera escribir (RF-07).
+        (NotionSinPermisoError("restricted_resource"), "/conectar notion"),
+        (NotionRechazoError("validation_error"), "Notion no aceptó"),
+    ],
+    ids=["sin_conectar", "permiso_vencido", "servicio_caido", "sin_permiso", "rechazo"],
+)
+@pytest.mark.parametrize("nombre", ESCRITURAS_DE_NOTION)
+async def test_una_falla_de_notion_al_escribir_se_cuenta_con_su_remedio(
+    nombre: str, falla: Exception, remedio: str
+) -> None:
+    """La lectura anduvo y la persona ya dijo que sí: falla recién la escritura."""
+    puertos = Puertos()
+    puertos.paginas.fallar_al_escribir = falla
+
+    texto = await _usar(puertos, nombre, CASOS[nombre])
+
+    assert remedio in texto
+    assert "google" not in texto.lower()
+    assert puertos.escrituras() == 0
 
 
 class _RecordatoriosQueFallanAlCancelar(RecordatoriosEnMemoria):
@@ -561,6 +628,12 @@ async def test_si_la_base_se_cae_al_cancelar_el_recordatorio_sigue_programado() 
         ("renombrar_archivo", "Ese archivo ya no está en tu Drive"),
         ("mover_archivo", "Ese archivo o esa carpeta ya no están en tu Drive"),
         ("borrar_archivo", "Ese archivo ya no está en tu Drive"),
+        ("crear_pagina_en_notion", "Eso ya no está en tu Notion"),
+        ("agregar_a_pagina_de_notion", "Esa página ya no está en tu Notion"),
+        ("cambiar_dato_en_notion", "Esa página ya no está en tu Notion"),
+        ("mover_pagina_de_notion", "Esa página o la de destino ya no están en tu Notion"),
+        ("borrar_pagina_de_notion", "no hizo falta mandarla a la papelera"),
+        ("subir_a_notion", "Esa página ya no está en tu Notion"),
     ],
 )
 async def test_si_lo_borraron_entre_la_busqueda_y_la_escritura_lo_dice(
@@ -570,6 +643,7 @@ async def test_si_lo_borraron_entre_la_busqueda_y_la_escritura_lo_dice(
     puertos.calendario.fallar_al_escribir = EntityNotFoundError("404")
     puertos.tareas.fallar_al_escribir = EntityNotFoundError("404")
     puertos.archivos.fallar_al_escribir = EntityNotFoundError("404")
+    puertos.paginas.fallar_al_escribir = EntityNotFoundError("404")
 
     texto = await _usar(puertos, nombre, CASOS[nombre])
 
@@ -788,6 +862,44 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
         ("borrar_archivo", {"id_archivo": "c1"}, "es una carpeta"),
         ("borrar_archivo", {"id_archivo": "f2"}, "no tuyo"),
         ("borrar_archivo", {"id_archivo": "no-existe"}, "No encontré ese archivo"),
+        (
+            "crear_pagina_en_notion",
+            {"id_padre": PAGINA_DE_NOTION, "titulo": " "},
+            "Falta el título",
+        ),
+        (
+            "crear_pagina_en_notion",
+            {"id_padre": "no-existe", "titulo": "Torta"},
+            "compartilo con LifeSync",
+        ),
+        (
+            "agregar_a_pagina_de_notion",
+            {"id_pagina": PAGINA_DE_NOTION, "texto": " "},
+            "Falta el texto",
+        ),
+        ("agregar_a_pagina_de_notion", {"id_pagina": BASE_DE_NOTION, "texto": "x"}, "es una base"),
+        (
+            "cambiar_dato_en_notion",
+            {"id_pagina": FILA_DE_NOTION, "dato": "Estado", "valor": "Archivado"},
+            "no tiene la opción",
+        ),
+        (
+            "cambiar_dato_en_notion",
+            {"id_pagina": FILA_DE_NOTION, "dato": "Monto", "valor": "1.500"},
+            "se puede leer de dos maneras",
+        ),
+        (
+            "mover_pagina_de_notion",
+            {"id_pagina": BASE_DE_NOTION, "id_destino": DESTINO_DE_NOTION},
+            "es una base",
+        ),
+        (
+            "mover_pagina_de_notion",
+            {"id_pagina": FILA_DE_NOTION, "id_destino": DESTINO_DE_NOTION},
+            "es una fila de una base",
+        ),
+        ("borrar_pagina_de_notion", {"id_pagina": BASE_DE_NOTION}, "es una base"),
+        ("subir_a_notion", {"id_pagina": BASE_DE_NOTION}, "es una base"),
     ],
 )
 async def test_lo_invalido_se_explica_sin_pausa_y_sin_escribir(

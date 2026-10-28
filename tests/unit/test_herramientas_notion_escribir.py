@@ -1,0 +1,724 @@
+"""Tests de las escrituras en Notion (RF-07): grafo real + dobles.
+
+Lo que se cuida, además de que anden:
+- toda escritura pide el sí, también sola y sin texto de terceros a la vista:
+  lo que se escribe lo ve quien ve la página (`comparte=True`);
+- la pregunta muestra entero lo que se va a escribir, y lo que viene de Notion
+  (títulos, nombres, opciones) llega saneado;
+- el texto pasa a bloques propios sin lanzar nunca, y los datos de una fila
+  sólo toman valores que se entienden sin dudas y opciones que ya existen;
+- las bases no se mueven ni se borran, y las filas no salen de su base;
+- si Notion no confirmó, no se dice que se hizo, ni se invita a duplicarlo.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from typing import Any
+from uuid import uuid4
+
+import pytest
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+from src.application.dto.archivo_adjunto import ArchivoAdjunto
+from src.application.ports.paginas import FilaDeBase, Propiedad, TipoDeBloque, TipoDePropiedad
+from src.domain.entities.pagina import Pagina
+from src.domain.exceptions import (
+    ArchivoNoDisponibleError,
+    AutorizacionFallidaError,
+    EntityNotFoundError,
+    EscrituraEnDudaError,
+    NotionRechazoError,
+    NotionSinPermisoError,
+    ServiceUnavailableError,
+)
+from src.domain.value_objects.tipo_de_pagina import TipoDePagina
+from src.infrastructure.llm.agente_gemini import _aprobacion_de
+from src.infrastructure.llm.contexto import ContextoDeAgente
+from src.infrastructure.llm.grafo import LOTE_DEMASIADO_LARGO, construir_grafo
+from src.infrastructure.llm.herramientas import (
+    _bloques,
+    _como_queda,
+    construir_herramientas,
+    mensaje_de_la_persona,
+)
+from tests.dobles import ModeloFalso, PaginasFalsas, RecibidosFalsos
+
+USUARIO = uuid4()
+PAGINA_ID = "1f2e3d4c-5b6a-4789-8abc-def012345678"
+DESTINO_ID = "0a1b2c3d-4e5f-4607-8899-aabbccddeeff"
+BASE_ID = "9a8b7c6d-5e4f-4321-9fed-cba987654321"
+FILA_ID = "2b3c4d5e-6f70-4812-93a4-b5c6d7e8f901"
+# Lunes 12 de octubre de 2026, 18:30 en Buenos Aires.
+EDITADA = datetime(2026, 10, 12, 21, 30, tzinfo=UTC)
+LINK = f"https://www.notion.so/Recetas-{PAGINA_ID.replace('-', '')}"
+INFORME = ArchivoAdjunto(
+    referencia="1037543291543636", tipo_mime="application/pdf", nombre="informe.pdf"
+)
+DATOS_DE_LA_FILA = (
+    Propiedad(id="title", nombre="Concepto", tipo=TipoDePropiedad.TITULO, valor="Luz"),
+    Propiedad(id="m1", nombre="Monto", tipo=TipoDePropiedad.NUMERO, valor="1500"),
+    Propiedad(id="p1", nombre="Pagado", tipo=TipoDePropiedad.CASILLA, valor="no"),
+    Propiedad(id="v1", nombre="Vence", tipo=TipoDePropiedad.FECHA, valor="2026-11-10"),
+    Propiedad(
+        id="e1",
+        nombre="Estado",
+        tipo=TipoDePropiedad.ESTADO,
+        valor="Pendiente",
+        opciones=("Pendiente", "Pagado"),
+    ),
+    Propiedad(
+        id="r1", nombre="Rubro", tipo=TipoDePropiedad.SELECCION, opciones=("Servicios", "Comida")
+    ),
+    Propiedad(id="n1", nombre="Notas", tipo=TipoDePropiedad.TEXTO),
+)
+
+
+def _pagina(**cambios: Any) -> Pagina:
+    datos: dict[str, Any] = {
+        "id": PAGINA_ID,
+        "titulo": "Recetas",
+        "tipo": TipoDePagina.PAGINA,
+        "editada": EDITADA,
+        "enlace": LINK,
+    }
+    datos.update(cambios)
+    return Pagina(**datos)
+
+
+def _notion(**opciones: Any) -> PaginasFalsas:
+    """Una página, otra de destino, una base y una fila con datos."""
+    return PaginasFalsas(
+        (
+            _pagina(),
+            _pagina(id=DESTINO_ID, titulo="Archivo"),
+            _pagina(id=BASE_ID, titulo="Gastos", tipo=TipoDePagina.BASE),
+            _pagina(id=FILA_ID, titulo="Luz", en_base=True),
+        ),
+        **{"propiedades": {FILA_ID: DATOS_DE_LA_FILA}, **opciones},
+    )
+
+
+def _recibido(adjunto: ArchivoAdjunto = INFORME) -> HumanMessage:
+    return mensaje_de_la_persona("", adjunto, datetime.now(UTC))
+
+
+class Escena:
+    """El grafo real con los dobles: pide tools y contesta las confirmaciones."""
+
+    def __init__(
+        self, paginas: PaginasFalsas | None = None, recibidos: RecibidosFalsos | None = None
+    ) -> None:
+        self.paginas = paginas or _notion()
+        self.recibidos = recibidos or RecibidosFalsos()
+        self.contexto = ContextoDeAgente(usuario_id=USUARIO)
+        self.configuracion: Any = {"configurable": {"thread_id": "hilo"}}
+        self.grafo: Any = None
+
+    async def pedir(
+        self, *llamadas: tuple[str, dict[str, Any]], historial: list[BaseMessage] | None = None
+    ) -> dict[str, Any]:
+        pedido = AIMessage(
+            "",
+            tool_calls=[
+                {"name": nombre, "args": args, "id": f"c{i}"}
+                for i, (nombre, args) in enumerate(llamadas)
+            ],
+        )
+        herramientas = construir_herramientas(None, paginas=self.paginas, recibidos=self.recibidos)
+        self.grafo = construir_grafo(
+            ModeloFalso(guion=[pedido, AIMessage("ok")]), herramientas, InMemorySaver()
+        )
+        estado: dict[str, Any] = await self.grafo.ainvoke(
+            {"messages": historial or [HumanMessage("pedido")]},
+            config=self.configuracion,
+            context=self.contexto,
+        )
+        return estado
+
+    async def decidir(self, aprobado: bool) -> dict[str, Any]:
+        """Contesta la confirmación pendiente, como lo hace el agente."""
+        self.contexto = ContextoDeAgente(usuario_id=USUARIO)  # cada turno trae el suyo
+        pendiente = self.grafo.get_state(self.configuracion).interrupts[0].value
+        estado: dict[str, Any] = await self.grafo.ainvoke(
+            Command(resume=_aprobacion_de(pendiente) if aprobado else {"aprobado": False}),
+            config=self.configuracion,
+            context=self.contexto,
+        )
+        return estado
+
+
+def _respuesta(estado: dict[str, Any]) -> str:
+    """Lo que contestó la última tool."""
+    return str([m for m in estado["messages"] if isinstance(m, ToolMessage)][-1].content)
+
+
+def _pregunta(estado: dict[str, Any]) -> str:
+    """El resumen de la confirmación pendiente."""
+    return str(estado["__interrupt__"][0].value["resumen"])
+
+
+# --- El texto, en bloques ---------------------------------------------------------------
+
+
+def test_cada_marca_es_su_bloque() -> None:
+    texto = (
+        "# Compras\n## Súper\n### Verdulería\n- [ ] Harina\n- [x] Huevos\n- Leche\n"
+        "* Pan\n• Queso\n1. Paso uno\n12. Paso doce\nUn párrafo"
+    )
+
+    assert [(b.tipo, b.texto, b.hecho) for b in _bloques(texto)] == [
+        (TipoDeBloque.TITULO_1, "Compras", False),
+        (TipoDeBloque.TITULO_2, "Súper", False),
+        (TipoDeBloque.TITULO_3, "Verdulería", False),
+        (TipoDeBloque.TAREA, "Harina", False),
+        (TipoDeBloque.TAREA, "Huevos", True),
+        (TipoDeBloque.VINETA, "Leche", False),
+        (TipoDeBloque.VINETA, "Pan", False),
+        (TipoDeBloque.VINETA, "Queso", False),
+        (TipoDeBloque.NUMERADO, "Paso uno", False),
+        (TipoDeBloque.NUMERADO, "Paso doce", False),
+        (TipoDeBloque.PARRAFO, "Un párrafo", False),
+    ]
+
+
+@pytest.mark.parametrize(
+    "linea", ["#hashtag", "####  cuatro", "². no numera", "1.5 kg", "-sin espacio", "**negrita**"]
+)
+def test_lo_que_no_es_una_marca_va_como_parrafo(linea: str) -> None:
+    [bloque] = _bloques(linea)
+
+    assert (bloque.tipo, bloque.texto) == (TipoDeBloque.PARRAFO, " ".join(linea.split()))
+
+
+def test_las_lineas_vacias_se_omiten_y_los_espacios_se_juntan() -> None:
+    assert [b.texto for b in _bloques("\n\n  uno   dos \n\t\n tres")] == ["uno dos", "tres"]
+
+
+def test_la_pregunta_muestra_cada_linea_como_queda() -> None:
+    bloques = _bloques("# Título\n- [ ] a\n- [x] b\n- c\n1. d\n7. e\nf\n1. g")
+
+    assert _como_queda(bloques) == "# Título\n☐ a\n☑ b\n• c\n1. d\n2. e\nf\n1. g"
+
+
+# --- Crear ----------------------------------------------------------------------------------
+
+
+async def test_crear_pide_el_si_aunque_sea_una_sola_y_muestra_el_texto() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        (
+            "crear_pagina_en_notion",
+            {
+                "id_padre": PAGINA_ID,
+                "titulo": "Torta",
+                "texto": "## Ingredientes\n- [ ] Harina\nPara el domingo",
+            },
+        )
+    )
+
+    assert _pregunta(estado) == (
+        "Crear en tu Notion la página «Torta» adentro de «Recetas», con este texto:\n\n"
+        "## Ingredientes\n☐ Harina\nPara el domingo"
+    )
+    assert escena.paginas.escrituras() == 0
+    estado = await escena.decidir(True)
+    [(usuario, padre, titulo, bloques)] = escena.paginas.creadas
+    assert (usuario, padre, titulo) == (USUARIO, PAGINA_ID, "Torta")
+    assert [b.tipo for b in bloques] == [
+        TipoDeBloque.TITULO_2,
+        TipoDeBloque.TAREA,
+        TipoDeBloque.PARRAFO,
+    ]
+    texto = _respuesta(estado)
+    assert texto.startswith("Creé la página «Torta» adentro de «Recetas» (id: ")
+    assert texto.endswith(" — link: https://www.notion.so/nueva")
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_crear_en_una_base_es_una_fila_nueva() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_pagina_en_notion", {"id_padre": BASE_ID, "titulo": "Gas"}))
+
+    assert _pregunta(estado) == (
+        "Crear en tu Notion la página «Gas» como fila nueva de la base «Gastos»"
+    )
+    await escena.decidir(True)
+    [(_, padre, _, bloques)] = escena.paginas.creadas
+    assert (padre, bloques) == (BASE_ID, ())
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        ({"titulo": ""}, "Falta el título"),
+        ({"titulo": "Ver https://sitio.example"}, "no puede tener links"),
+        ({"titulo": "Mirá sitio-falso.com"}, "no puede tener links"),
+        ({"titulo": "«Torta»"}, "ni « »"),
+        ({"titulo": "x" * 201}, "muy largo"),
+        ({"titulo": "Torta", "texto": "x" * 3001}, "el máximo es 3000"),
+        ({"titulo": "Torta", "texto": "\n".join(["- a"] * 101)}, "hasta 100"),
+        ({"titulo": "Torta", "id_padre": str(uuid4())}, "compartilo con LifeSync"),
+    ],
+)
+async def test_crear_lo_invalido_se_explica_sin_pausa(args: dict[str, Any], esperado: str) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_pagina_en_notion", {"id_padre": PAGINA_ID, **args}))
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+# --- Agregar ----------------------------------------------------------------------------
+
+
+async def test_agregar_muestra_lo_que_suma_y_va_al_final() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("agregar_a_pagina_de_notion", {"id_pagina": PAGINA_ID, "texto": "- Leche\n- Pan"})
+    )
+
+    assert _pregunta(estado) == "Agregar al final de «Recetas», en tu Notion:\n\n• Leche\n• Pan"
+    assert escena.paginas.escrituras() == 0
+    estado = await escena.decidir(True)
+    [(_, pagina, bloques)] = escena.paginas.agregados
+    assert (pagina, [b.texto for b in bloques]) == (PAGINA_ID, ["Leche", "Pan"])
+    assert _respuesta(estado) == "Agregué el texto al final de «Recetas», en tu Notion."
+
+
+async def test_con_un_no_no_se_agrega_nada() -> None:
+    escena = Escena()
+    await escena.pedir(("agregar_a_pagina_de_notion", {"id_pagina": PAGINA_ID, "texto": "x"}))
+
+    estado = await escena.decidir(False)
+
+    assert _respuesta(estado) == "La persona lo canceló. No se agregó nada."
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_a_una_base_no_se_le_agrega_texto() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("agregar_a_pagina_de_notion", {"id_pagina": BASE_ID, "texto": "x"})
+    )
+
+    assert "es una base, no una página" in _respuesta(estado)
+    assert "__interrupt__" not in estado
+
+
+# --- Cambiar un dato --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("dato", "valor", "enviado", "como_se_ve"),
+    [
+        ("Estado", "pagado", "Pagado", "a «Pagado» (ahora: «Pendiente»)"),
+        ("estado", "PAGADO", "Pagado", "a «Pagado» (ahora: «Pendiente»)"),
+        ("Monto", "1.500,50", 1500.5, "a 1.500,5 (ahora: «1500»)"),
+        ("Monto", "$2000", 2000.0, "a 2.000 (ahora: «1500»)"),
+        ("Monto", "0.500", 0.5, "a 0,5 (ahora: «1500»)"),
+        ("Pagado", "sí", True, "a marcada (ahora: «no»)"),
+        ("Vence", "2026-12-01", date(2026, 12, 1), "a martes 1 de diciembre de 2026"),
+        ("Rubro", "servicios", "Servicios", "a «Servicios» (ahora está vacío)"),
+        ("Notas", "Pagar online", "Pagar online", "a «Pagar online» (ahora está vacío)"),
+    ],
+)
+async def test_cambiar_un_dato_muestra_el_valor_nuevo_y_el_actual(
+    dato: str, valor: str, enviado: object, como_se_ve: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": dato, "valor": valor})
+    )
+
+    pregunta = _pregunta(estado)
+    assert pregunta.startswith("Cambiar «") and "» de «Luz» en tu Notion " in pregunta
+    assert como_se_ve in pregunta
+    await escena.decidir(True)
+    [(_, pagina, _, nuevo)] = escena.paginas.cambios
+    assert (pagina, nuevo) == (FILA_ID, enviado)
+
+
+async def test_se_escribe_por_el_id_del_dato() -> None:
+    escena = Escena()
+    await escena.pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": "Estado", "valor": "Pagado"})
+    )
+
+    estado = await escena.decidir(True)
+
+    [(_, _, propiedad, _)] = escena.paginas.cambios
+    assert propiedad == "e1"
+    assert _respuesta(estado) == "Cambié «Estado» de «Luz» a «Pagado», en tu Notion."
+
+
+async def test_titulo_elige_el_titulo_se_llame_como_se_llame_la_columna() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        (
+            "cambiar_dato_en_notion",
+            {"id_pagina": FILA_ID, "dato": "título", "valor": "Luz de octubre"},
+        )
+    )
+
+    assert _pregunta(estado) == (
+        "Cambiarle el título a «Luz» en tu Notion: pasa a llamarse «Luz de octubre»"
+    )
+    estado = await escena.decidir(True)
+    [(_, _, propiedad, nuevo)] = escena.paginas.cambios
+    assert (propiedad, nuevo) == ("title", "Luz de octubre")
+    assert _respuesta(estado) == "Le cambié el título a «Luz»: ahora se llama «Luz de octubre»."
+
+
+async def test_un_nombre_exacto_gana_sobre_titulo() -> None:
+    datos = (
+        Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO, valor="Luz"),
+        Propiedad(id="t2", nombre="Título", tipo=TipoDePropiedad.TEXTO),
+    )
+    escena = Escena(_notion(propiedades={FILA_ID: datos}))
+    await escena.pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": "titulo", "valor": "Factura"})
+    )
+
+    await escena.decidir(True)
+
+    [(_, _, propiedad, _)] = escena.paginas.cambios
+    assert propiedad == "t2"
+
+
+async def test_renombrar_una_pagina_suelta() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        (
+            "cambiar_dato_en_notion",
+            {"id_pagina": PAGINA_ID, "dato": "título", "valor": "Recetas de la abuela"},
+        )
+    )
+
+    assert _pregunta(estado).endswith("pasa a llamarse «Recetas de la abuela»")
+
+
+@pytest.mark.parametrize(
+    ("dato", "valor", "esperado"),
+    [
+        ("Monto", "1.500", "se puede leer de dos maneras"),
+        ("Monto", "12,345", "se puede leer de dos maneras"),
+        ("Monto", "mil", "no es un número"),
+        ("Monto", "1e5", "no es un número"),
+        ("Monto", "nan", "no es un número"),
+        ("Monto", "١٢", "no es un número"),
+        ("Monto", "9" * 400, "demasiado grande"),
+        ("Pagado", "tal vez", "«sí» o «no»"),
+        ("Vence", "10/11/2026", "AAAA-MM-DD"),
+        ("Vence", "2026-02-30", "AAAA-MM-DD"),
+        ("Vence", "20261110", "AAAA-MM-DD"),
+        ("Estado", "Archivado", "Las que tiene: «Pendiente», «Pagado»."),
+        ("Rubro", "Viajes", "Una nueva se suma desde Notion"),
+        ("Notas", "en https://sitio.example", "no puede tener links"),
+        ("Notas", "x" * 2001, "el máximo es 2000"),
+        ("Concepto", "", "Falta el valor nuevo"),
+        ("Etiquetas", "a", "Los que puedo cambiar: «Concepto», «Monto»"),
+        ("", "a", "Falta qué dato cambiar"),
+        ("Estado", "pendiente", "ya tiene ese valor"),
+    ],
+)
+async def test_un_valor_que_no_sirve_se_explica_sin_pausa(
+    dato: str, valor: str, esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": dato, "valor": valor})
+    )
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_una_base_no_tiene_datos_propios() -> None:
+    estado = await Escena().pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": BASE_ID, "dato": "Estado", "valor": "x"})
+    )
+
+    assert "es una base: los datos son de cada fila" in _respuesta(estado)
+
+
+async def test_los_nombres_y_las_opciones_de_la_base_llegan_saneados() -> None:
+    datos = (
+        Propiedad(
+            id="e1",
+            nombre="Estado",
+            tipo=TipoDePropiedad.ESTADO,
+            opciones=("Pagá en https://banco-falso.example",),
+        ),
+    )
+    escena = Escena(_notion(propiedades={FILA_ID: datos}))
+
+    estado = await escena.pedir(
+        ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": "Estado", "valor": "otra"})
+    )
+
+    texto = _respuesta(estado)
+    assert "banco-falso" not in texto
+    assert "[link quitado]" in texto
+
+
+async def test_cada_fila_de_una_base_muestra_su_id() -> None:
+    """Sin el id, el modelo no tiene cómo cambiarle un dato: cada mes tiene su «Luz»."""
+    fila = FilaDeBase(titulo="Luz", propiedades=(("Monto", "1500"),), id=FILA_ID)
+    escena = Escena(_notion(filas={BASE_ID: (fila,)}))
+
+    estado = await escena.pedir(("consultar_base_de_notion", {"id_base": BASE_ID}))
+
+    assert f"1. «Luz» — «Monto: 1500» — id: {FILA_ID}" in _respuesta(estado)
+
+
+# --- Mover y mandar a la papelera ---------------------------------------------------------
+
+
+async def test_mover_pide_el_si_y_avisa_que_se_lleva_lo_de_adentro() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("mover_pagina_de_notion", {"id_pagina": PAGINA_ID, "id_destino": DESTINO_ID})
+    )
+
+    assert _pregunta(estado) == (
+        "Mover «Recetas» adentro de «Archivo», en tu Notion. Se lleva todo lo que tiene adentro."
+    )
+    estado = await escena.decidir(True)
+    assert escena.paginas.movidas == [(USUARIO, PAGINA_ID, DESTINO_ID)]
+    assert _respuesta(estado) == "Moví «Recetas» adentro de «Archivo», en tu Notion."
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        ({"id_pagina": BASE_ID, "id_destino": DESTINO_ID}, "moverla se llevaría todas sus filas"),
+        ({"id_pagina": FILA_ID, "id_destino": DESTINO_ID}, "es una fila de una base"),
+        ({"id_pagina": PAGINA_ID, "id_destino": BASE_ID}, "no de una base"),
+        ({"id_pagina": PAGINA_ID, "id_destino": PAGINA_ID}, "adentro de sí misma"),
+        ({"id_pagina": PAGINA_ID, "id_destino": str(uuid4())}, "compartilo con LifeSync"),
+    ],
+)
+async def test_lo_que_no_se_mueve_se_explica_sin_pausa(args: dict[str, Any], esperado: str) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("mover_pagina_de_notion", args))
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_borrar_pide_el_si_y_dice_que_se_recupera() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("borrar_pagina_de_notion", {"id_pagina": PAGINA_ID}))
+
+    assert _pregunta(estado) == (
+        "Mandar a la papelera de tu Notion la página «Recetas» (editada el lunes 12 de "
+        "octubre, 18:30), con todo lo que tiene adentro. Se puede recuperar desde la "
+        "papelera de Notion."
+    )
+    estado = await escena.decidir(True)
+    assert escena.paginas.en_la_papelera == [(USUARIO, PAGINA_ID)]
+    assert _respuesta(estado) == (
+        "Mandé la página «Recetas» a la papelera de tu Notion: se puede recuperar desde ahí."
+    )
+
+
+async def test_una_fila_va_a_la_papelera_como_fila() -> None:
+    estado = await Escena().pedir(("borrar_pagina_de_notion", {"id_pagina": FILA_ID}))
+
+    assert _pregunta(estado).startswith("Mandar a la papelera de tu Notion la fila «Luz»")
+
+
+async def test_con_un_no_no_se_borra_nada() -> None:
+    escena = Escena()
+    await escena.pedir(("borrar_pagina_de_notion", {"id_pagina": PAGINA_ID}))
+
+    estado = await escena.decidir(False)
+
+    assert _respuesta(estado) == "La persona lo canceló. No se borró nada."
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_una_base_no_se_borra() -> None:
+    estado = await Escena().pedir(("borrar_pagina_de_notion", {"id_pagina": BASE_ID}))
+
+    assert "borrarla se llevaría todas sus filas" in _respuesta(estado)
+    assert "__interrupt__" not in estado
+
+
+# --- Subir un archivo ---------------------------------------------------------------------
+
+
+async def test_subir_no_baja_nada_antes_del_si() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("subir_a_notion", {"id_pagina": PAGINA_ID}), historial=[_recibido()]
+    )
+
+    assert _pregunta(estado) == "Subir «informe.pdf» al final de «Recetas», en tu Notion"
+    assert escena.recibidos.descargas == []
+    estado = await escena.decidir(True)
+    [(usuario, pagina, nombre, tipo, contenido)] = escena.paginas.subidos
+    assert (usuario, pagina, nombre, tipo) == (
+        USUARIO,
+        PAGINA_ID,
+        "informe.pdf",
+        "application/pdf",
+    )
+    assert contenido == escena.recibidos.contenido
+    assert _respuesta(estado) == (
+        f"Subí «informe.pdf» al final de «Recetas», en tu Notion — link: {LINK}"
+    )
+
+
+async def test_mas_grande_que_lo_que_acepta_el_espacio_lo_explica() -> None:
+    """En el plan gratis de Notion, 5 MB por archivo."""
+    escena = Escena(recibidos=RecibidosFalsos(contenido=b"x" * (5 * 1024 * 1024 + 1)))
+    await escena.pedir(("subir_a_notion", {"id_pagina": PAGINA_ID}), historial=[_recibido()])
+
+    estado = await escena.decidir(True)
+
+    assert "pesa más de 5 MB, que es lo máximo que tu espacio de Notion acepta" in (
+        _respuesta(estado)
+    )
+    assert escena.paginas.subidos == []
+
+
+async def test_si_notion_no_dice_su_limite_vale_el_de_siempre() -> None:
+    escena = Escena(_notion(limite=None), RecibidosFalsos(contenido=b"x" * (6 * 1024 * 1024)))
+    await escena.pedir(("subir_a_notion", {"id_pagina": PAGINA_ID}), historial=[_recibido()])
+
+    await escena.decidir(True)
+
+    assert len(escena.paginas.subidos) == 1
+
+
+async def test_sin_un_archivo_en_la_conversacion_pide_que_lo_mande() -> None:
+    estado = await Escena().pedir(("subir_a_notion", {"id_pagina": PAGINA_ID}))
+
+    assert _respuesta(estado).startswith("No tengo ningún archivo tuyo para subir")
+
+
+@pytest.mark.parametrize(
+    ("falla", "esperado"),
+    [
+        # Es un EntityNotFoundError: no es "la página ya no está".
+        (ArchivoNoDisponibleError(), "mandámelo de nuevo"),
+        (ServiceUnavailableError("caído"), "No pude traer el archivo de WhatsApp"),
+    ],
+)
+async def test_si_no_se_puede_bajar_de_whatsapp_lo_dice(falla: Exception, esperado: str) -> None:
+    escena = Escena(recibidos=RecibidosFalsos(fallar_con=falla))
+    await escena.pedir(("subir_a_notion", {"id_pagina": PAGINA_ID}), historial=[_recibido()])
+
+    estado = await escena.decidir(True)
+
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.subidos == []
+
+
+@pytest.mark.parametrize(
+    ("falla", "esperado"),
+    [
+        (NotionSinPermisoError(), "/conectar notion"),
+        (NotionRechazoError(), "el tipo o el tamaño del archivo"),
+        (EscrituraEnDudaError(), "así no queda repetido"),
+        (EntityNotFoundError(), "Esa página ya no está en tu Notion"),
+    ],
+)
+async def test_si_notion_falla_al_subir_lo_dice(falla: Exception, esperado: str) -> None:
+    escena = Escena(_notion(fallar_al_escribir=falla))
+    await escena.pedir(("subir_a_notion", {"id_pagina": PAGINA_ID}), historial=[_recibido()])
+
+    estado = await escena.decidir(True)
+
+    assert esperado in _respuesta(estado)
+    assert escena.contexto.acciones_realizadas == []
+
+
+# --- Las fallas después del sí --------------------------------------------------------------
+
+CREAR = ("crear_pagina_en_notion", {"id_padre": PAGINA_ID, "titulo": "Torta"})
+AGREGAR = ("agregar_a_pagina_de_notion", {"id_pagina": PAGINA_ID, "texto": "x"})
+CAMBIAR = ("cambiar_dato_en_notion", {"id_pagina": FILA_ID, "dato": "Estado", "valor": "Pagado"})
+MOVER = ("mover_pagina_de_notion", {"id_pagina": PAGINA_ID, "id_destino": DESTINO_ID})
+BORRAR = ("borrar_pagina_de_notion", {"id_pagina": PAGINA_ID})
+
+
+@pytest.mark.parametrize(
+    ("llamada", "falla", "esperado"),
+    [
+        (CREAR, NotionSinPermisoError(), "volvé a hacer /conectar notion"),
+        (CAMBIAR, NotionRechazoError(), "No se hizo nada"),
+        (
+            CREAR,
+            EscrituraEnDudaError(),
+            "No sé si se pudo crear la página: Notion no me lo confirmó. Fijate en Notion "
+            "antes de pedírmelo de nuevo, así no queda repetido.",
+        ),
+        (AGREGAR, EscrituraEnDudaError(), "así no queda repetido"),
+        (CAMBIAR, EscrituraEnDudaError(), "y, si no quedó, pedímelo de nuevo"),
+        (BORRAR, EscrituraEnDudaError(), "y, si no quedó, pedímelo de nuevo"),
+        (MOVER, ServiceUnavailableError("caído"), "No pude mover la página ahora mismo"),
+        (BORRAR, AutorizacionFallidaError("revocada"), "Escribí /conectar notion"),
+        (AGREGAR, EntityNotFoundError(), "Esa página ya no está en tu Notion"),
+        (BORRAR, EntityNotFoundError(), "no hizo falta mandarla a la papelera"),
+    ],
+)
+async def test_si_falla_despues_del_si_lo_dice_y_no_lo_anota(
+    llamada: tuple[str, dict[str, Any]], falla: Exception, esperado: str
+) -> None:
+    escena = Escena(_notion(fallar_al_escribir=falla))
+    await escena.pedir(llamada)
+
+    estado = await escena.decidir(True)
+
+    assert esperado in _respuesta(estado)
+    assert escena.contexto.acciones_realizadas == []
+
+
+# --- Varias juntas ------------------------------------------------------------------------
+
+
+async def test_crear_y_agregar_juntos_se_confirman_en_una_lista() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(CREAR, AGREGAR)
+
+    assert _pregunta(estado).startswith("Perfecto, hago esto:\n• Crear en tu Notion")
+    assert escena.paginas.escrituras() == 0
+    await escena.decidir(True)
+    assert escena.paginas.escrituras() == 2
+
+
+async def test_un_lote_que_no_entra_en_un_mensaje_no_pausa_ni_escribe() -> None:
+    """Meta rechaza más de 4096 caracteres: la persona no recibiría la pregunta."""
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("agregar_a_pagina_de_notion", {"id_pagina": PAGINA_ID, "texto": "a" * 2000}),
+        ("agregar_a_pagina_de_notion", {"id_pagina": DESTINO_ID, "texto": "b" * 2000}),
+    )
+
+    assert "__interrupt__" not in estado
+    respuestas = [m.content for m in estado["messages"] if isinstance(m, ToolMessage)]
+    assert respuestas == [LOTE_DEMASIADO_LARGO, LOTE_DEMASIADO_LARGO]
+    assert escena.paginas.escrituras() == 0

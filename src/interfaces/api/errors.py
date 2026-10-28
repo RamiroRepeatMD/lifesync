@@ -32,11 +32,14 @@ from src.domain.exceptions import (
     EntityNotFoundError,
     EnvioInciertoError,
     EnvioRechazadoError,
+    EscrituraEnDudaError,
     InfrastructureError,
     InvalidValueError,
     LifeSyncError,
     MensajeRechazadoError,
     NotionNoConectadoError,
+    NotionRechazoError,
+    NotionSinPermisoError,
     PermisoInsuficienteError,
     RepositoryError,
     ServiceUnavailableError,
@@ -55,6 +58,10 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     ArchivoDemasiadoGrandeError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     DriveRechazoError: status.HTTP_409_CONFLICT,
     DriveLlenoError: status.HTTP_409_CONFLICT,
+    # Lo que Notion no deja escribir (RF-07) choca con el estado de la cuenta,
+    # como lo de Drive: 409.
+    NotionRechazoError: status.HTTP_409_CONFLICT,
+    NotionSinPermisoError: status.HTTP_409_CONFLICT,
     EntityNotFoundError: status.HTTP_404_NOT_FOUND,
     InvalidValueError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     ConfirmationRequiredError: status.HTTP_409_CONFLICT,
@@ -69,6 +76,7 @@ _STATUS_POR_ERROR: dict[type[LifeSyncError], int] = {
     # Un envío de correo que Gmail no confirmó o rechazó (PB-035): falla del
     # proveedor, como su madre. Explícitas por la regla de la casa.
     EnvioInciertoError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    EscrituraEnDudaError: status.HTTP_503_SERVICE_UNAVAILABLE,
     EnvioRechazadoError: status.HTTP_503_SERVICE_UNAVAILABLE,
     # El modelo no contestó: es una dependencia externa caída o lenta, no un
     # bug nuestro, así que 503 y no 500 (PB-005). La falta de cuota va también

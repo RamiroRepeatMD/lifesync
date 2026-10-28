@@ -91,6 +91,16 @@ LOTE_CANCELADO = "La persona canceló el pedido completo. No se hizo nada."
 # no se ejecuta, aunque ahora sí valide. Lo que se confirma es lo que se hace.
 NO_ESTABA_EN_LA_LISTA = "No se hizo: no estaba en la lista que la persona confirmó."
 
+# La lista de un lote viaja en UN mensaje de WhatsApp, y Meta rechaza los de más
+# de 4096 caracteres: la persona no recibiría nada. El margen es para el cierre
+# («Confirmá con "sí"…») y para lo que ya se hizo en el turno («Listo — …»).
+# Con textos para Notion (RF-07), dos o tres escrituras ya pueden pasarlo.
+MAX_CARACTERES_DEL_LOTE = 3500
+LOTE_DEMASIADO_LARGO = (
+    "No se hizo nada: juntas, estas acciones no entran en un mensaje para que la "
+    "persona las confirme. Pedíselas de a una."
+)
+
 
 def construir_grafo(
     modelo: BaseChatModel,
@@ -220,18 +230,21 @@ def construir_grafo(
             leidas = await correr(pedido, previos, lecturas, modo, Fase.NORMAL, config)
             return {"messages": [*definitivas, *leidas]}
 
-        # 2. Una sola pausa, con la lista completa.
+        # 2. Una sola pausa, con la lista completa, si entra en un mensaje.
         todas_crean = all(
             tipos[llamada["name"]] is TipoDeEscritura.CREAR for llamada in ejecutables
         )
+        lista = _lista_del_lote(
+            [resumenes[llamada["id"] or ""] for llamada in ejecutables], todas_crean
+        )
+        ya_hechas = get_runtime(ContextoDeAgente).context.acciones_realizadas
+        if len(lista) + sum(len(accion) + 4 for accion in ya_hechas) > MAX_CARACTERES_DEL_LOTE:
+            leidas = await correr(pedido, previos, lecturas, modo, Fase.NORMAL, config)
+            largas = [_respuesta(llamada, LOTE_DEMASIADO_LARGO) for llamada in ejecutables]
+            logger.info("agente.lote_demasiado_largo", acciones=len(ejecutables))
+            return {"messages": [*definitivas, *leidas, *largas]}
         decision = interrupt(
-            {
-                "resumen": _lista_del_lote(
-                    [resumenes[llamada["id"] or ""] for llamada in ejecutables], todas_crean
-                ),
-                "lote": True,
-                "ids": [llamada["id"] for llamada in ejecutables],
-            }
+            {"resumen": lista, "lote": True, "ids": [llamada["id"] for llamada in ejecutables]}
         )
 
         # 3. Con el sí: lo que la persona VIO, ni una más. Sin el sí: nada.

@@ -302,7 +302,7 @@ async def test_conectar_notion_manda_el_enlace_y_explica_que_elegir() -> None:
     assert respuesta is not None
     assert f"https://api.notion.com/v1/oauth/authorize?state=firmado-{ID_USUARIO}" in respuesta
     assert "qué páginas compartir conmigo" in respuesta
-    assert "Sólo leo: no edito ni borro nada." in respuesta
+    assert "Nunca escribo, muevo ni borro nada sin confirmarte antes." in respuesta
 
 
 async def test_conectar_notion_sin_configurar_lo_avisa() -> None:

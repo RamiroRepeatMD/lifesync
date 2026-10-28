@@ -1,16 +1,19 @@
-"""Tests del adaptador de lectura de Notion (PB-014). Sin red: MockTransport.
+"""Tests del adaptador de Notion: leer (PB-014) y escribir (RF-07). Sin red: MockTransport.
 
 Los JSON respetan la referencia (versión 2026-03-11, verificada el 27/10/2026):
 el título de una página es la propiedad de tipo `title` y se arma con sus
 partes; el de un data source, su `title`; un data source puede no traer `url`, y
-las personas vienen sin nombre si la conexión no pide datos de usuarios.
+las personas vienen sin nombre si la conexión no pide datos de usuarios. Al
+escribir: el padre es `page_id` o `data_source_id`, las propiedades van por id,
+y un archivo se sube en tres pasos (crear, mandar y adjuntar como bloque).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from datetime import UTC, datetime
+import math
+from collections.abc import Awaitable, Callable
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -18,12 +21,17 @@ import httpx
 import pytest
 import structlog
 
+from src.application.ports.paginas import Bloque, Propiedad, TipoDeBloque, TipoDePropiedad
 from src.application.use_cases.conectar_notion import ConectarNotion
 from src.domain.entities.oauth_token import OAuthToken
+from src.domain.entities.pagina import Pagina
 from src.domain.exceptions import (
     AutorizacionFallidaError,
     EntityNotFoundError,
+    EscrituraEnDudaError,
     NotionNoConectadoError,
+    NotionRechazoError,
+    NotionSinPermisoError,
     ServiceUnavailableError,
 )
 from src.domain.value_objects.proveedor_oauth import ProveedorOAuth
@@ -544,3 +552,601 @@ async def test_el_mensaje_de_error_de_notion_no_se_loguea() -> None:
     rechazo = next(e for e in eventos if e["event"] == "notion.rechazado")
     assert rechazo["codigo"] == "validation_error"
     assert "biopsia" not in json.dumps(eventos, default=str)
+
+
+# --- Lo que el bot no ve (RF-07) -------------------------------------------------------
+
+
+async def test_lo_que_esta_en_la_papelera_no_aparece_al_buscar() -> None:
+    api, _ = await _api(
+        [], lambda _: httpx.Response(200, json=_lista(_pagina(in_trash=True), _base()))
+    )
+
+    [encontrada] = await api.buscar(USUARIO, "", 5)
+
+    assert encontrada.tipo is TipoDePagina.BASE
+
+
+async def test_cada_fila_trae_su_id() -> None:
+    """Sin el id, el modelo no tiene cómo cambiarle un dato: cada mes tiene su «Luz»."""
+    fila = _fila()
+    api, _ = await _api([], _base_y_filas(fila))
+
+    [leida] = (await api.consultar(USUARIO, BASE_ID, 5)).filas
+
+    assert leida.id == fila["id"]
+
+
+# --- Obtener y leer los datos -------------------------------------------------------
+
+
+async def test_obtener_trae_la_pagina_por_su_id_canonico() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=_pagina()))
+
+    pagina = await api.obtener(USUARIO, PAGINA_ID.replace("-", "").upper())
+
+    assert (pagina.id, pagina.tipo, pagina.en_base) == (PAGINA_ID, TipoDePagina.PAGINA, False)
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("GET", f"/v1/pages/{PAGINA_ID}")
+
+
+@pytest.mark.parametrize("status", [404, 400])
+async def test_obtener_una_base_la_busca_como_data_source(status: int) -> None:
+    """La doc no dice si pedir un data source como página da 404 o 400: valen los dos."""
+    pedidos: list[httpx.Request] = []
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path.startswith("/v1/pages/"):
+            return httpx.Response(status, json={"object": "error", "code": "x"})
+        return httpx.Response(200, json=_base())
+
+    api, _ = await _api(pedidos, responder)
+
+    base = await api.obtener(USUARIO, BASE_ID)
+
+    assert base.tipo is TipoDePagina.BASE
+    assert [p.url.path for p in pedidos] == [
+        f"/v1/pages/{BASE_ID}",
+        f"/v1/data_sources/{BASE_ID}",
+    ]
+
+
+async def test_obtener_lo_que_no_existe() -> None:
+    api, _ = await _api([], lambda _: httpx.Response(404, json={"code": "object_not_found"}))
+
+    with pytest.raises(EntityNotFoundError):
+        await api.obtener(USUARIO, PAGINA_ID)
+
+
+@pytest.mark.parametrize("clave", ["in_trash", "archived", "is_archived"])
+async def test_lo_que_esta_en_la_papelera_no_esta(clave: str) -> None:
+    api, _ = await _api([], lambda _: httpx.Response(200, json=_pagina(**{clave: True})))
+
+    with pytest.raises(EntityNotFoundError):
+        await api.obtener(USUARIO, PAGINA_ID)
+
+
+async def test_una_fila_sabe_que_esta_en_una_base() -> None:
+    fila = _pagina(parent={"type": "data_source_id", "data_source_id": BASE_ID})
+    api, _ = await _api([], lambda _: httpx.Response(200, json=fila))
+
+    assert (await api.obtener(USUARIO, PAGINA_ID)).en_base
+
+
+def _fila_con_datos() -> dict[str, Any]:
+    return _pagina(
+        parent={"type": "data_source_id", "data_source_id": BASE_ID},
+        properties={
+            "Concepto": {"id": "title", "type": "title", "title": _texto("Luz")},
+            "Monto": {"id": "a%3Fb", "type": "number", "number": 1500},
+            "Pagado": {"id": "c1", "type": "checkbox", "checkbox": False},
+            "Vence": {"id": "d1", "type": "date", "date": {"start": "2026-11-10"}},
+            "Estado": {"id": "e1", "type": "status", "status": {"name": "Pendiente"}},
+            "Rubro": {"id": "f1", "type": "select", "select": None},
+            "Notas": {"id": "g1", "type": "rich_text", "rich_text": _texto("débito")},
+            # Las que no se cambian: etiquetas, automáticas y sin id.
+            "Etiquetas": {"id": "h1", "type": "multi_select", "multi_select": []},
+            "Creada": {"id": "i1", "type": "created_time", "created_time": EDITADA},
+            "Rara": {"type": "number", "number": 1},
+        },
+    )
+
+
+def _esquema() -> dict[str, Any]:
+    opciones = [{"name": "Pendiente"}, {"name": "Pagado"}]
+    return _base(
+        properties={
+            "Estado": {"id": "e1", "type": "status", "status": {"options": opciones}},
+            "Rubro": {
+                "id": "f1",
+                "type": "select",
+                "select": {"options": [{"name": "Servicios"}, {"id": "sin-nombre"}]},
+            },
+            "Monto": {"id": "a%3Fb", "type": "number", "number": {"format": "number"}},
+        }
+    )
+
+
+async def test_los_datos_de_una_fila_traen_las_opciones_de_su_base() -> None:
+    pedidos: list[httpx.Request] = []
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path.startswith("/v1/data_sources/"):
+            return httpx.Response(200, json=_esquema())
+        return httpx.Response(200, json=_fila_con_datos())
+
+    api, _ = await _api(pedidos, responder)
+
+    pagina, propiedades = await api.propiedades(USUARIO, PAGINA_ID)
+
+    assert pagina.en_base
+    assert [p.url.path for p in pedidos] == [
+        f"/v1/pages/{PAGINA_ID}",
+        f"/v1/data_sources/{BASE_ID}",
+    ]
+    datos = {p.nombre: p for p in propiedades}
+    assert list(datos) == ["Concepto", "Monto", "Pagado", "Vence", "Estado", "Rubro", "Notas"]
+    assert (datos["Concepto"].tipo, datos["Concepto"].valor) == (TipoDePropiedad.TITULO, "Luz")
+    assert (datos["Monto"].id, datos["Monto"].valor) == ("a%3Fb", "1500")
+    assert datos["Pagado"].valor == "no"
+    assert datos["Vence"].valor == "2026-11-10"
+    assert datos["Estado"].opciones == ("Pendiente", "Pagado")
+    assert (datos["Rubro"].valor, datos["Rubro"].opciones) == ("", ("Servicios",))
+    assert datos["Notas"].tipo is TipoDePropiedad.TEXTO
+
+
+async def test_una_pagina_suelta_solo_tiene_el_titulo() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=_pagina()))
+
+    _, propiedades = await api.propiedades(USUARIO, PAGINA_ID)
+
+    assert [(p.id, p.tipo, p.valor) for p in propiedades] == [
+        ("title", TipoDePropiedad.TITULO, "Recetas")
+    ]
+    assert len(pedidos) == 1  # sin base, no hay esquema que pedir
+
+
+async def test_los_datos_de_una_base_no_sirven() -> None:
+    api, _ = await _api([], lambda _: httpx.Response(200, json=_base()))
+
+    with pytest.raises(EntityNotFoundError):
+        await api.propiedades(USUARIO, BASE_ID)
+
+
+# --- Escribir -------------------------------------------------------------------------
+
+DESTINO_ID = "0a1b2c3d-4e5f-4607-8899-aabbccddeeff"
+SUBIDA_ID = "7e6d5c4b-3a29-4180-9f6e-5d4c3b2a1908"
+
+
+def _rico(texto: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": {"content": texto}}]
+
+
+def _padre(tipo: TipoDePagina = TipoDePagina.PAGINA) -> Pagina:
+    identificador = BASE_ID if tipo is TipoDePagina.BASE else PAGINA_ID
+    return Pagina(id=identificador, titulo="Padre", tipo=tipo, editada=datetime.now(UTC))
+
+
+def _acepta(pedido: httpx.Request) -> httpx.Response:
+    """Un Notion que acepta todo: las subidas con su id, lo demás con una página."""
+    if pedido.url.path.startswith("/v1/file_uploads"):
+        return httpx.Response(200, json={"object": "file_upload", "id": SUBIDA_ID})
+    return httpx.Response(200, json=_pagina())
+
+
+async def test_crear_una_pagina_adentro_de_otra() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+    bloques = (
+        Bloque(TipoDeBloque.TITULO_2, "Compras"),
+        Bloque(TipoDeBloque.TAREA, "Harina", hecho=True),
+        Bloque(TipoDeBloque.PARRAFO, "Para el domingo"),
+    )
+
+    creada = await api.crear(USUARIO, _padre(), "Torta", bloques)
+
+    assert creada.id == PAGINA_ID
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("POST", "/v1/pages")
+    assert _cuerpo(pedido) == {
+        "parent": {"type": "page_id", "page_id": PAGINA_ID},
+        "properties": {"title": {"title": _rico("Torta")}},
+        "children": [
+            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": _rico("Compras")}},
+            {
+                "object": "block",
+                "type": "to_do",
+                "to_do": {"rich_text": _rico("Harina"), "checked": True},
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": _rico("Para el domingo")},
+            },
+        ],
+    }
+
+
+async def test_crear_en_una_base_es_una_fila_nueva() -> None:
+    pedidos: list[httpx.Request] = []
+    fila = _pagina(parent={"type": "data_source_id", "data_source_id": BASE_ID})
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=fila))
+
+    creada = await api.crear(USUARIO, _padre(TipoDePagina.BASE), "Gas", ())
+
+    assert creada.en_base
+    [pedido] = pedidos
+    assert _cuerpo(pedido) == {
+        "parent": {"type": "data_source_id", "data_source_id": BASE_ID},
+        "properties": {"title": {"title": _rico("Gas")}},
+    }
+
+
+async def test_si_notion_no_devuelve_la_creada_queda_en_duda() -> None:
+    api, _ = await _api([], lambda _: httpx.Response(200, json={"object": "page"}))
+
+    with pytest.raises(EscrituraEnDudaError):
+        await api.crear(USUARIO, _padre(), "Torta", ())
+
+
+async def test_agregar_va_al_final_de_la_pagina() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+    bloques = tuple(
+        Bloque(tipo, "x")
+        for tipo in (
+            TipoDeBloque.TITULO_1,
+            TipoDeBloque.TITULO_3,
+            TipoDeBloque.VINETA,
+            TipoDeBloque.NUMERADO,
+            TipoDeBloque.TAREA,
+        )
+    )
+
+    await api.agregar(USUARIO, PAGINA_ID, bloques)
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("PATCH", f"/v1/blocks/{PAGINA_ID}/children")
+    cuerpo = _cuerpo(pedido)
+    assert list(cuerpo) == ["children"]  # sin `position`: siempre al final
+    assert [b["type"] for b in cuerpo["children"]] == [
+        "heading_1",
+        "heading_3",
+        "bulleted_list_item",
+        "numbered_list_item",
+        "to_do",
+    ]
+    assert cuerpo["children"][-1]["to_do"]["checked"] is False
+
+
+async def test_un_texto_largo_va_en_trozos() -> None:
+    """Notion corta cada parte en 2000 caracteres: se mandan de a 1900."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.agregar(USUARIO, PAGINA_ID, (Bloque(TipoDeBloque.PARRAFO, "a" * 4000),))
+
+    [bloque] = _cuerpo(pedidos[0])["children"]
+    partes = bloque["paragraph"]["rich_text"]
+    assert [len(p["text"]["content"]) for p in partes] == [1900, 1900, 200]
+
+
+@pytest.mark.parametrize(
+    ("tipo", "valor", "esperado"),
+    [
+        (TipoDePropiedad.TITULO, "Gas", {"title": _rico("Gas")}),
+        (TipoDePropiedad.TEXTO, "Pagar online", {"rich_text": _rico("Pagar online")}),
+        (TipoDePropiedad.NUMERO, 1500.0, {"number": 1500}),
+        (TipoDePropiedad.NUMERO, 12.5, {"number": 12.5}),
+        (TipoDePropiedad.CASILLA, True, {"checkbox": True}),
+        (TipoDePropiedad.FECHA, date(2026, 11, 10), {"date": {"start": "2026-11-10"}}),
+        (TipoDePropiedad.SELECCION, "Servicios", {"select": {"name": "Servicios"}}),
+        (TipoDePropiedad.ESTADO, "Pagado", {"status": {"name": "Pagado"}}),
+    ],
+)
+async def test_cambiar_cada_tipo_de_dato_por_el_id(
+    tipo: TipoDePropiedad, valor: str | float | bool | date, esperado: dict[str, Any]
+) -> None:
+    """Por el id: no cambia si alguien renombra la columna."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.cambiar(USUARIO, PAGINA_ID, Propiedad(id="a%3Fb", nombre="Dato", tipo=tipo), valor)
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("PATCH", f"/v1/pages/{PAGINA_ID}")
+    assert _cuerpo(pedido) == {"properties": {"a%3Fb": esperado}}
+
+
+@pytest.mark.parametrize(
+    ("tipo", "valor"),
+    [
+        (TipoDePropiedad.NUMERO, math.nan),
+        (TipoDePropiedad.NUMERO, math.inf),
+        (TipoDePropiedad.NUMERO, True),
+        (TipoDePropiedad.CASILLA, "sí"),
+        (TipoDePropiedad.FECHA, "2026-11-10"),
+        (TipoDePropiedad.TITULO, 3.0),
+    ],
+)
+async def test_un_valor_que_no_corresponde_no_se_manda(
+    tipo: TipoDePropiedad, valor: str | float | bool
+) -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    with pytest.raises(NotionRechazoError):
+        await api.cambiar(USUARIO, PAGINA_ID, Propiedad(id="x", nombre="x", tipo=tipo), valor)
+
+    assert pedidos == []
+
+
+async def test_mover_adentro_de_otra_pagina() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.mover(USUARIO, PAGINA_ID, DESTINO_ID.replace("-", ""))
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("POST", f"/v1/pages/{PAGINA_ID}/move")
+    assert _cuerpo(pedido) == {"parent": {"type": "page_id", "page_id": DESTINO_ID}}
+
+
+async def test_a_la_papelera_y_nada_mas() -> None:
+    """A la papelera, de donde se recupera: nunca un borrado definitivo."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.a_la_papelera(USUARIO, PAGINA_ID)
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("PATCH", f"/v1/pages/{PAGINA_ID}")
+    assert _cuerpo(pedido) == {"in_trash": True}
+
+
+_INVALIDO = "../users"
+_TITULO = Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO)
+
+
+@pytest.mark.parametrize(
+    "operacion",
+    [
+        lambda api: api.obtener(USUARIO, _INVALIDO),
+        lambda api: api.propiedades(USUARIO, _INVALIDO),
+        lambda api: api.agregar(USUARIO, _INVALIDO, (Bloque(TipoDeBloque.PARRAFO, "x"),)),
+        lambda api: api.cambiar(USUARIO, _INVALIDO, _TITULO, "x"),
+        lambda api: api.mover(USUARIO, _INVALIDO, DESTINO_ID),
+        lambda api: api.mover(USUARIO, PAGINA_ID, _INVALIDO),
+        lambda api: api.a_la_papelera(USUARIO, _INVALIDO),
+        lambda api: api.subir(USUARIO, _INVALIDO, "a.pdf", "application/pdf", b"x"),
+    ],
+)
+async def test_un_id_invalido_no_genera_ningun_pedido(
+    operacion: Callable[[NotionApi], Awaitable[object]],
+) -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    with pytest.raises(EntityNotFoundError):
+        await operacion(api)
+
+    assert pedidos == []
+
+
+# --- Subir un archivo ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tipo_mime", "enviado", "bloque"),
+    [
+        ("application/pdf", "application/pdf", "pdf"),
+        ("image/jpeg", "image/jpeg", "image"),
+        ("IMAGE/PNG", "image/png", "image"),
+        ("text/plain; charset=utf-8", "text/plain", "file"),
+        ("application/vnd.ms-excel", "application/vnd.ms-excel", "file"),
+    ],
+)
+async def test_subir_crea_manda_y_adjunta_al_final(
+    tipo_mime: str, enviado: str, bloque: str
+) -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.subir(USUARIO, PAGINA_ID, "recibo.pdf", tipo_mime, b"%PDF-1.7 contenido")
+
+    crear, mandar, adjuntar = pedidos
+    assert (crear.method, crear.url.path) == ("POST", "/v1/file_uploads")
+    assert _cuerpo(crear) == {
+        "mode": "single_part",
+        "filename": "recibo.pdf",
+        "content_type": enviado,
+    }
+    assert (mandar.method, mandar.url.path) == ("POST", f"/v1/file_uploads/{SUBIDA_ID}/send")
+    assert mandar.headers["Content-Type"].startswith("multipart/form-data")
+    assert b'name="file"; filename="recibo.pdf"' in mandar.content
+    assert b"%PDF-1.7 contenido" in mandar.content
+    assert mandar.extensions["timeout"]["read"] == 60.0  # más que una consulta
+    assert (adjuntar.method, adjuntar.url.path) == ("PATCH", f"/v1/blocks/{PAGINA_ID}/children")
+    assert _cuerpo(adjuntar) == {
+        "children": [
+            {"type": bloque, bloque: {"type": "file_upload", "file_upload": {"id": SUBIDA_ID}}}
+        ]
+    }
+
+
+@pytest.mark.parametrize("id_de_subida", ["../../pages/x", None, 7])
+async def test_una_subida_sin_un_id_de_notion_no_sigue(id_de_subida: object) -> None:
+    """La URL del segundo paso se arma con el id: nunca con uno que no sea de Notion."""
+    pedidos: list[httpx.Request] = []
+    respuesta = {"object": "file_upload", "id": id_de_subida}
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=respuesta))
+
+    with pytest.raises(ServiceUnavailableError) as error:
+        await api.subir(USUARIO, PAGINA_ID, "recibo.pdf", "application/pdf", b"x")
+
+    assert type(error.value) is ServiceUnavailableError
+    assert len(pedidos) == 1
+
+
+@pytest.mark.parametrize("falla", ["crear", "mandar"])
+async def test_un_corte_antes_de_adjuntar_no_deja_nada_en_duda(falla: str) -> None:
+    """Una subida que no se adjunta vence sola: la página no cambió."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        paso = "mandar" if pedido.url.path.endswith("/send") else "crear"
+        if paso == falla:
+            raise httpx.ReadTimeout("sin respuesta", request=pedido)
+        return _acepta(pedido)
+
+    api, _ = await _api([], responder)
+
+    with pytest.raises(ServiceUnavailableError) as error:
+        await api.subir(USUARIO, PAGINA_ID, "recibo.pdf", "application/pdf", b"x")
+
+    assert type(error.value) is ServiceUnavailableError
+
+
+async def test_un_corte_al_adjuntar_queda_en_duda() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path.startswith("/v1/blocks/"):
+            return httpx.Response(502, json={"code": "bad_gateway"})
+        return _acepta(pedido)
+
+    api, _ = await _api([], responder)
+
+    with pytest.raises(EscrituraEnDudaError):
+        await api.subir(USUARIO, PAGINA_ID, "recibo.pdf", "application/pdf", b"x")
+
+
+async def test_si_notion_no_acepta_el_archivo_es_un_rechazo() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path.endswith("/send"):
+            return httpx.Response(400, json={"code": "validation_error"})
+        return _acepta(pedido)
+
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, responder)
+
+    with pytest.raises(NotionRechazoError) as error:
+        await api.subir(USUARIO, PAGINA_ID, "recibo.pdf", "application/pdf", b"x")
+
+    assert type(error.value) is NotionRechazoError
+    assert len(pedidos) == 2  # no se adjuntó nada
+
+
+def _yo(limites: Any) -> dict[str, Any]:
+    dueno = {"type": "user", "user": {"name": "Ana", "person": {"email": "ana@ejemplo.com"}}}
+    bot: dict[str, Any] = {"owner": dueno, "workspace_name": "Espacio de Ana"}
+    if limites is not None:
+        bot["workspace_limits"] = limites
+    return {"object": "user", "type": "bot", "bot": bot}
+
+
+async def test_el_limite_de_subida_es_el_del_espacio_y_el_dueno_no_se_loguea() -> None:
+    pedidos: list[httpx.Request] = []
+    yo = _yo({"max_file_upload_size_in_bytes": 5_242_880})
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=yo))
+
+    with structlog.testing.capture_logs() as eventos:
+        limite = await api.limite_de_subida(USUARIO)
+
+    assert limite == 5_242_880
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("GET", "/v1/users/me")
+    assert "Ana" not in json.dumps(eventos, default=str)
+
+
+@pytest.mark.parametrize(
+    "limites",
+    [
+        None,
+        {},
+        {"max_file_upload_size_in_bytes": "5MB"},
+        {"max_file_upload_size_in_bytes": 0},
+        {"max_file_upload_size_in_bytes": True},
+    ],
+)
+async def test_sin_un_limite_claro_no_hay_limite(limites: Any) -> None:
+    api, _ = await _api([], lambda _: httpx.Response(200, json=_yo(limites)))
+
+    assert await api.limite_de_subida(USUARIO) is None
+
+
+# --- Los rechazos al escribir --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "codigo", "esperado"),
+    [
+        (403, "restricted_resource", NotionSinPermisoError),  # token viejo o página ajena
+        (400, "validation_error", NotionRechazoError),
+        (409, "conflict_error", ServiceUnavailableError),  # se puede repetir
+        (500, "internal_server_error", EscrituraEnDudaError),
+        (503, "service_unavailable", EscrituraEnDudaError),
+        (404, "object_not_found", EntityNotFoundError),
+        (429, "rate_limited", ServiceUnavailableError),
+    ],
+)
+async def test_cada_rechazo_al_escribir_dice_si_se_hizo_algo(
+    status: int, codigo: str, esperado: type[Exception]
+) -> None:
+    cuerpo = {"object": "error", "status": status, "code": codigo, "message": "x"}
+    api, _ = await _api([], lambda _: httpx.Response(status, json=cuerpo))
+
+    with pytest.raises(esperado) as error:
+        await api.agregar(USUARIO, PAGINA_ID, (Bloque(TipoDeBloque.PARRAFO, "x"),))
+
+    assert type(error.value) is esperado  # la clase exacta: hay herencia entre ellas
+
+
+async def test_una_respuesta_perdida_al_escribir_queda_en_duda() -> None:
+    def cortado(pedido: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("sin respuesta", request=pedido)
+
+    api, _ = await _api([], cortado)
+
+    with pytest.raises(EscrituraEnDudaError):
+        await api.crear(USUARIO, _padre(), "Torta", ())
+
+
+async def test_si_no_se_pudo_conectar_seguro_que_no_se_escribio() -> None:
+    def caido(pedido: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sin red", request=pedido)
+
+    api, _ = await _api([], caido)
+
+    with pytest.raises(ServiceUnavailableError) as error:
+        await api.crear(USUARIO, _padre(), "Torta", ())
+
+    assert type(error.value) is ServiceUnavailableError
+
+
+async def test_al_leer_una_respuesta_perdida_no_queda_en_duda() -> None:
+    def cortado(pedido: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("sin respuesta", request=pedido)
+
+    api, _ = await _api([], cortado)
+
+    with pytest.raises(ServiceUnavailableError) as error:
+        await api.buscar(USUARIO, "", 5)
+
+    assert type(error.value) is ServiceUnavailableError
+
+
+async def test_al_escribir_no_se_loguea_lo_escrito() -> None:
+    api, _ = await _api([], _acepta)
+    reservado = (Bloque(TipoDeBloque.PARRAFO, "diagnóstico reservado"),)
+
+    with structlog.testing.capture_logs() as eventos:
+        await api.crear(USUARIO, _padre(), "Biopsia", reservado)
+        await api.agregar(USUARIO, PAGINA_ID, reservado)
+        await api.cambiar(USUARIO, PAGINA_ID, _TITULO, "Biopsia")
+        await api.subir(USUARIO, PAGINA_ID, "biopsia.pdf", "application/pdf", b"diagnostico")
+
+    assert eventos
+    registrado = json.dumps(eventos, default=str)
+    assert "iopsia" not in registrado
+    assert "diagn" not in registrado

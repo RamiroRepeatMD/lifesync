@@ -31,7 +31,16 @@ from src.application.ports.autorizador_google import (
 from src.application.ports.autorizador_notion import AutorizadorNotion, CredencialesNotion
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
-from src.application.ports.paginas import BaseConsultada, FilaDeBase, PaginaLeida, Paginas
+from src.application.ports.paginas import (
+    BaseConsultada,
+    Bloque,
+    FilaDeBase,
+    PaginaLeida,
+    Paginas,
+    Propiedad,
+    TipoDePropiedad,
+    ValorDePropiedad,
+)
 from src.application.ports.tareas import Tareas
 from src.application.ports.whatsapp import MensajeroWhatsApp
 from src.domain.entities.archivo import Archivo
@@ -572,9 +581,10 @@ class ArchivosFalsos(Archivos):
 
 
 class PaginasFalsas(Paginas):
-    """Doble del puerto `Paginas` (PB-014): un Notion fijo, sin filtrar.
+    """Doble del puerto `Paginas` (PB-014 · RF-07): un Notion fijo, sin filtrar.
 
-    Los ids son UUID, como los de Notion. `fallar_con` hace fallar todo. Leer
+    Los ids son UUID, como los de Notion. `fallar_con` hace fallar todo;
+    `fallar_al_escribir`, sólo las escrituras: lo de antes del sí anduvo. Leer
     algo que no está, o una base como página, da `EntityNotFoundError`, que es
     lo que hace Notion con lo que no existe o no está compartido.
     """
@@ -585,36 +595,123 @@ class PaginasFalsas(Paginas):
         *,
         contenidos: dict[str, str] | None = None,
         filas: dict[str, tuple[FilaDeBase, ...]] | None = None,
+        propiedades: dict[str, tuple[Propiedad, ...]] | None = None,
+        limite: int | None = 5 * 1024 * 1024,
         fallar_con: Exception | None = None,
+        fallar_al_escribir: Exception | None = None,
     ) -> None:
         self.paginas = tuple(paginas)
         self.contenidos = contenidos or {}
         self.filas = filas or {}
+        self.propiedades_de = propiedades or {}
+        self.limite = limite
         self.fallar_con = fallar_con
+        self.fallar_al_escribir = fallar_al_escribir
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidas: list[str] = []
         self.consultadas: list[str] = []
+        self.creadas: list[tuple[UUID, str, str, tuple[Bloque, ...]]] = []
+        self.agregados: list[tuple[UUID, str, tuple[Bloque, ...]]] = []
+        self.cambios: list[tuple[UUID, str, str, ValorDePropiedad]] = []
+        self.movidas: list[tuple[UUID, str, str]] = []
+        self.en_la_papelera: list[tuple[UUID, str]] = []
+        self.subidos: list[tuple[UUID, str, str, str, bytes]] = []
+
+    def escrituras(self) -> int:
+        """Cuántas escrituras llegaron, de cualquier clase."""
+        return (
+            len(self.creadas)
+            + len(self.agregados)
+            + len(self.cambios)
+            + len(self.movidas)
+            + len(self.en_la_papelera)
+            + len(self.subidos)
+        )
 
     async def buscar(self, usuario_id: UUID, texto: str, cantidad: int) -> tuple[Pagina, ...]:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._fallar()
         self.busquedas.append((usuario_id, texto, cantidad))
         return self.paginas[: max(1, min(cantidad, 10))]
 
     async def leer(self, usuario_id: UUID, pagina_id: str) -> PaginaLeida:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._fallar()
         self.leidas.append(pagina_id)
         pagina = self._buscar_por_id(pagina_id, TipoDePagina.PAGINA)
         return PaginaLeida(pagina=pagina, markdown=self.contenidos.get(pagina_id, ""))
 
     async def consultar(self, usuario_id: UUID, base_id: str, cantidad: int) -> BaseConsultada:
-        if self.fallar_con is not None:
-            raise self.fallar_con
+        self._fallar()
         self.consultadas.append(base_id)
         base = self._buscar_por_id(base_id, TipoDePagina.BASE)
         filas = self.filas.get(base_id, ())
         return BaseConsultada(base=base, filas=filas[:cantidad], hay_mas=len(filas) > cantidad)
+
+    async def obtener(self, usuario_id: UUID, pagina_id: str) -> Pagina:
+        self._fallar()
+        for pagina in self.paginas:
+            if pagina.id == pagina_id:
+                return pagina
+        raise EntityNotFoundError("No está en el Notion de la persona, o no está compartido.")
+
+    async def propiedades(
+        self, usuario_id: UUID, pagina_id: str
+    ) -> tuple[Pagina, tuple[Propiedad, ...]]:
+        self._fallar()
+        pagina = self._buscar_por_id(pagina_id, TipoDePagina.PAGINA)
+        titulo = Propiedad(
+            id="title", nombre="title", tipo=TipoDePropiedad.TITULO, valor=pagina.titulo
+        )
+        return pagina, self.propiedades_de.get(pagina_id, (titulo,))
+
+    async def crear(
+        self, usuario_id: UUID, padre: Pagina, titulo: str, bloques: tuple[Bloque, ...]
+    ) -> Pagina:
+        self._fallar(escritura=True)
+        self.creadas.append((usuario_id, padre.id, titulo, bloques))
+        nueva = Pagina(
+            id=str(uuid4()),
+            titulo=titulo,
+            tipo=TipoDePagina.PAGINA,
+            editada=datetime.now(UTC),
+            enlace="https://www.notion.so/nueva",
+            en_base=padre.tipo is TipoDePagina.BASE,
+        )
+        self.paginas = (*self.paginas, nueva)
+        return nueva
+
+    async def agregar(self, usuario_id: UUID, pagina_id: str, bloques: tuple[Bloque, ...]) -> None:
+        self._fallar(escritura=True)
+        self.agregados.append((usuario_id, pagina_id, bloques))
+
+    async def cambiar(
+        self, usuario_id: UUID, pagina_id: str, propiedad: Propiedad, valor: ValorDePropiedad
+    ) -> None:
+        self._fallar(escritura=True)
+        self.cambios.append((usuario_id, pagina_id, propiedad.id, valor))
+
+    async def mover(self, usuario_id: UUID, pagina_id: str, destino_id: str) -> None:
+        self._fallar(escritura=True)
+        self.movidas.append((usuario_id, pagina_id, destino_id))
+
+    async def a_la_papelera(self, usuario_id: UUID, pagina_id: str) -> None:
+        self._fallar(escritura=True)
+        self.en_la_papelera.append((usuario_id, pagina_id))
+
+    async def limite_de_subida(self, usuario_id: UUID) -> int | None:
+        self._fallar()
+        return self.limite
+
+    async def subir(
+        self, usuario_id: UUID, pagina_id: str, nombre: str, tipo_mime: str, contenido: bytes
+    ) -> None:
+        self._fallar(escritura=True)
+        self.subidos.append((usuario_id, pagina_id, nombre, tipo_mime, contenido))
+
+    def _fallar(self, *, escritura: bool = False) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        if escritura and self.fallar_al_escribir is not None:
+            raise self.fallar_al_escribir
 
     def _buscar_por_id(self, identificador: str, tipo: TipoDePagina) -> Pagina:
         for pagina in self.paginas:
