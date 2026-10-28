@@ -78,7 +78,11 @@ REINTENTOS_MODELO = 1
 CUOTA_AGOTADA = "RESOURCE_EXHAUSTED"
 
 # Respuestas cortas, de chat. Además acota la latencia, que es lo que aprieta.
-MAX_TOKENS_DE_SALIDA = 512
+# Era 512: alcanzaba para conversar, pero no para la llamada que crea una base
+# de Notion con sus filas (RF-07): una de 10 filas por 5 columnas se cortaba a
+# mitad y la persona recibía "Me quedé sin respuesta" (lo encontró la eval).
+# Una respuesta de chat sigue siendo corta: el tope sólo pesa en las largas.
+MAX_TOKENS_DE_SALIDA = 1024
 
 SIN_CONTENIDO = (
     "Me quedé sin respuesta para eso. ¿Lo probamos de otra manera o me lo contás distinto?"

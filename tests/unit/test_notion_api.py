@@ -731,9 +731,12 @@ def _padre(tipo: TipoDePagina = TipoDePagina.PAGINA) -> Pagina:
 
 
 def _acepta(pedido: httpx.Request) -> httpx.Response:
-    """Un Notion que acepta todo: las subidas con su id, lo demás con una página."""
+    """Un Notion que acepta todo: las subidas con su id, una base con su data
+    source, y lo demás con una página."""
     if pedido.url.path.startswith("/v1/file_uploads"):
         return httpx.Response(200, json={"object": "file_upload", "id": SUBIDA_ID})
+    if pedido.url.path == "/v1/databases":
+        return httpx.Response(200, json=_base_creada())
     return httpx.Response(200, json=_pagina())
 
 
@@ -922,6 +925,13 @@ _TITULO = Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO)
         lambda api: api.mover(USUARIO, PAGINA_ID, _INVALIDO),
         lambda api: api.a_la_papelera(USUARIO, _INVALIDO),
         lambda api: api.subir(USUARIO, _INVALIDO, "a.pdf", "application/pdf", b"x"),
+        lambda api: api.esquema(USUARIO, _INVALIDO),
+        lambda api: api.crear_base(
+            USUARIO,
+            Pagina(id=_INVALIDO, titulo="x", tipo=TipoDePagina.PAGINA, editada=datetime.now(UTC)),
+            "Base",
+            (),
+        ),
     ],
 )
 async def test_un_id_invalido_no_genera_ningun_pedido(
@@ -1140,13 +1150,239 @@ async def test_al_escribir_no_se_loguea_lo_escrito() -> None:
     api, _ = await _api([], _acepta)
     reservado = (Bloque(TipoDeBloque.PARRAFO, "diagnóstico reservado"),)
 
+    dato = Propiedad(id="n1", nombre="Diagnóstico", tipo=TipoDePropiedad.TEXTO)
+    columnas = (
+        Propiedad(id="Diagnóstico", nombre="Diagnóstico", tipo=TipoDePropiedad.TEXTO),
+        Propiedad(
+            id="Biopsia",
+            nombre="Biopsia",
+            tipo=TipoDePropiedad.SELECCION,
+            opciones=("diagnóstico reservado",),
+        ),
+    )
+
     with structlog.testing.capture_logs() as eventos:
         await api.crear(USUARIO, _padre(), "Biopsia", reservado)
+        await api.crear(USUARIO, _padre(TipoDePagina.BASE), "Biopsia", (), ((dato, "diagnóstico"),))
         await api.agregar(USUARIO, PAGINA_ID, reservado)
         await api.cambiar(USUARIO, PAGINA_ID, _TITULO, "Biopsia")
         await api.subir(USUARIO, PAGINA_ID, "biopsia.pdf", "application/pdf", b"diagnostico")
+        await api.crear_base(USUARIO, _padre(), "Biopsias", columnas)
 
     assert eventos
     registrado = json.dumps(eventos, default=str)
     assert "iopsia" not in registrado
     assert "diagn" not in registrado
+
+
+# --- Crear una base -------------------------------------------------------------------
+
+# Una base tiene dos ids que no se intercambian: el suyo y el de su data source.
+BASE_NUEVA_ID = "4d5e6f70-8192-4a3b-8c4d-5e6f708192a3"
+DATA_SOURCE_NUEVO_ID = "5e6f7081-92a3-4b4c-9d5e-6f708192a3b4"
+COLUMNAS = (
+    Propiedad(id="Texto", nombre="Notas", tipo=TipoDePropiedad.TEXTO),
+    Propiedad(id="Número", nombre="Monto", tipo=TipoDePropiedad.NUMERO),
+    Propiedad(id="Casilla", nombre="Pagado", tipo=TipoDePropiedad.CASILLA),
+    Propiedad(id="Fecha", nombre="Vence", tipo=TipoDePropiedad.FECHA),
+    Propiedad(
+        id="Rubro",
+        nombre="Rubro",
+        tipo=TipoDePropiedad.SELECCION,
+        opciones=("Servicios", "Comida"),
+    ),
+)
+
+
+def _base_creada(**cambios: Any) -> dict[str, Any]:
+    datos: dict[str, Any] = {
+        "object": "database",
+        "id": BASE_NUEVA_ID,
+        "url": f"https://www.notion.so/{BASE_NUEVA_ID.replace('-', '')}",
+        "last_edited_time": EDITADA,
+        "title": _texto("Gastos"),
+        "data_sources": [{"id": DATA_SOURCE_NUEVO_ID, "name": "Gastos"}],
+    }
+    datos.update(cambios)
+    return datos
+
+
+async def test_crear_base_manda_el_esquema_y_devuelve_el_data_source() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    base = await api.crear_base(USUARIO, _padre(), "Gastos", COLUMNAS)
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("POST", "/v1/databases")
+    assert _cuerpo(pedido) == {
+        "parent": {"type": "page_id", "page_id": PAGINA_ID},
+        "title": _rico("Gastos"),
+        "is_inline": True,
+        "initial_data_source": {
+            "properties": {
+                "Nombre": {"title": {}},
+                "Notas": {"rich_text": {}},
+                "Monto": {"number": {"format": "number"}},
+                "Pagado": {"checkbox": {}},
+                "Vence": {"date": {}},
+                "Rubro": {"select": {"options": [{"name": "Servicios"}, {"name": "Comida"}]}},
+            }
+        },
+    }
+    # El id del data source, no el de la base: es el que usa todo el bot.
+    assert (base.id, base.tipo, base.titulo) == (DATA_SOURCE_NUEVO_ID, TipoDePagina.BASE, "Gastos")
+    assert base.enlace == f"https://www.notion.so/{BASE_NUEVA_ID.replace('-', '')}"
+
+
+async def test_con_una_respuesta_parcial_pide_la_base_entera() -> None:
+    """La doc dice que la respuesta puede traer sólo el id."""
+    pedidos: list[httpx.Request] = []
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "POST":
+            return httpx.Response(200, json={"object": "database", "id": BASE_NUEVA_ID})
+        return httpx.Response(200, json=_base_creada())
+
+    api, _ = await _api(pedidos, responder)
+
+    base = await api.crear_base(USUARIO, _padre(), "Gastos", ())
+
+    assert [(p.method, p.url.path) for p in pedidos] == [
+        ("POST", "/v1/databases"),
+        ("GET", f"/v1/databases/{BASE_NUEVA_ID}"),
+    ]
+    assert base.id == DATA_SOURCE_NUEVO_ID
+
+
+@pytest.mark.parametrize(
+    "despues",
+    [
+        httpx.Response(200, json=_base_creada(data_sources=[])),  # sin data source
+        httpx.Response(200, json=_base_creada(data_sources=[{"id": "../x"}])),
+        httpx.Response(404, json={"code": "object_not_found"}),
+        httpx.Response(500, json={"code": "internal_server_error"}),
+    ],
+)
+async def test_si_despues_de_crearla_no_se_sabe_cual_es_queda_en_duda(
+    despues: httpx.Response,
+) -> None:
+    """Después del 200 la base existe: nunca "no se creó nada" ni "no está"."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.method == "POST":
+            return httpx.Response(200, json={"object": "database", "id": BASE_NUEVA_ID})
+        return despues
+
+    api, _ = await _api([], responder)
+
+    with pytest.raises(EscrituraEnDudaError):
+        await api.crear_base(USUARIO, _padre(), "Gastos", ())
+
+
+async def test_un_id_de_base_raro_en_la_respuesta_no_genera_otro_pedido() -> None:
+    pedidos: list[httpx.Request] = []
+    respuesta = {"object": "database", "id": "../../users"}
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=respuesta))
+
+    with pytest.raises(EscrituraEnDudaError):
+        await api.crear_base(USUARIO, _padre(), "Gastos", ())
+
+    assert len(pedidos) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "esperado"),
+    [
+        (403, NotionSinPermisoError),
+        (400, NotionRechazoError),
+        (503, EscrituraEnDudaError),
+    ],
+)
+async def test_crear_una_base_rechazada_dice_si_se_hizo_algo(
+    status: int, esperado: type[Exception]
+) -> None:
+    api, _ = await _api([], lambda _: httpx.Response(status, json={"code": "x"}))
+
+    with pytest.raises(esperado) as error:
+        await api.crear_base(USUARIO, _padre(), "Gastos", COLUMNAS)
+
+    assert type(error.value) is esperado
+
+
+async def test_una_columna_de_un_tipo_que_no_se_crea_no_genera_pedido() -> None:
+    """El estado no: Notion lo crea con opciones en inglés."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+    estado = Propiedad(id="Estado", nombre="Estado", tipo=TipoDePropiedad.ESTADO)
+
+    with pytest.raises(NotionRechazoError):
+        await api.crear_base(USUARIO, _padre(), "Gastos", (estado,))
+
+    assert pedidos == []
+
+
+# --- El esquema de una base, y una fila con datos ---------------------------------------
+
+
+async def test_el_esquema_trae_las_columnas_con_su_id_y_sus_opciones() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=_esquema()))
+
+    columnas = await api.esquema(USUARIO, BASE_ID)
+
+    [pedido] = pedidos
+    assert (pedido.method, pedido.url.path) == ("GET", f"/v1/data_sources/{BASE_ID}")
+    assert [(c.id, c.nombre, c.tipo, c.opciones) for c in columnas] == [
+        ("e1", "Estado", TipoDePropiedad.ESTADO, ("Pendiente", "Pagado")),
+        ("f1", "Rubro", TipoDePropiedad.SELECCION, ("Servicios",)),
+        ("a%3Fb", "Monto", TipoDePropiedad.NUMERO, ()),
+    ]
+
+
+async def test_el_esquema_de_una_pagina_no_sirve() -> None:
+    api, _ = await _api([], lambda _: httpx.Response(200, json=_pagina()))
+
+    with pytest.raises(EntityNotFoundError):
+        await api.esquema(USUARIO, PAGINA_ID)
+
+
+async def test_una_fila_nueva_lleva_sus_datos_por_el_id_de_cada_columna() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+    monto = Propiedad(id="a%3Fb", nombre="Monto", tipo=TipoDePropiedad.NUMERO)
+    vence = Propiedad(id="d1", nombre="Vence", tipo=TipoDePropiedad.FECHA)
+
+    await api.crear(
+        USUARIO,
+        _padre(TipoDePagina.BASE),
+        "Gas",
+        (),
+        ((monto, 1500.0), (vence, date(2026, 11, 10))),
+    )
+
+    [pedido] = pedidos
+    assert _cuerpo(pedido)["properties"] == {
+        "title": {"title": _rico("Gas")},
+        "a%3Fb": {"number": 1500},
+        "d1": {"date": {"start": "2026-11-10"}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("padre", "dato"),
+    [
+        (TipoDePagina.PAGINA, Propiedad(id="n1", nombre="Notas", tipo=TipoDePropiedad.TEXTO)),
+        (TipoDePagina.BASE, Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO)),
+        (TipoDePagina.BASE, Propiedad(id="title", nombre="title", tipo=TipoDePropiedad.TEXTO)),
+    ],
+)
+async def test_datos_que_no_van_no_generan_pedido(padre: TipoDePagina, dato: Propiedad) -> None:
+    """Datos fuera de una base, o el título entre los datos: pisaría el título."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    with pytest.raises(NotionRechazoError):
+        await api.crear(USUARIO, _padre(padre), "Gas", (), ((dato, "x"),))
+
+    assert pedidos == []

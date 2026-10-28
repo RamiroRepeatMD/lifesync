@@ -227,7 +227,7 @@ class Puertos:
         )
 
     def escrituras(self) -> int:
-        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 24 tools."""
+        """Cuántas escrituras llegaron a los puertos, de cualquiera de las 25 tools."""
         c, t = self.calendario, self.tareas
         recordatorios = sum(
             1
@@ -286,6 +286,12 @@ CASOS: dict[str, dict[str, Any]] = {
     "mover_archivo": {"id_archivo": "f1", "carpeta": "Facultad"},
     "borrar_archivo": {"id_archivo": "f1"},
     "crear_pagina_en_notion": {"id_padre": PAGINA_DE_NOTION, "titulo": "Torta"},
+    # Sin filas: así cuenta como UNA escritura, y la matriz D sigue sumando 2.
+    "crear_base_en_notion": {
+        "id_pagina": PAGINA_DE_NOTION,
+        "titulo": "Semana",
+        "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+    },
     "agregar_a_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "texto": "- Leche"},
     "cambiar_dato_en_notion": {"id_pagina": FILA_DE_NOTION, "dato": "Estado", "valor": "Pagado"},
     "mover_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "id_destino": DESTINO_DE_NOTION},
@@ -629,6 +635,7 @@ async def test_si_la_base_se_cae_al_cancelar_el_recordatorio_sigue_programado() 
         ("mover_archivo", "Ese archivo o esa carpeta ya no están en tu Drive"),
         ("borrar_archivo", "Ese archivo ya no está en tu Drive"),
         ("crear_pagina_en_notion", "Eso ya no está en tu Notion"),
+        ("crear_base_en_notion", "Esa página ya no está en tu Notion, así que no creé la base"),
         ("agregar_a_pagina_de_notion", "Esa página ya no está en tu Notion"),
         ("cambiar_dato_en_notion", "Esa página ya no está en tu Notion"),
         ("mover_pagina_de_notion", "Esa página o la de destino ya no están en tu Notion"),
@@ -866,6 +873,39 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
             "crear_pagina_en_notion",
             {"id_padre": PAGINA_DE_NOTION, "titulo": " "},
             "Falta el título",
+        ),
+        (
+            "crear_pagina_en_notion",
+            {
+                "id_padre": PAGINA_DE_NOTION,
+                "titulo": "x",
+                "datos": [{"columna": "M", "valor": "1"}],
+            },
+            "es una página, no una base",
+        ),
+        (
+            "crear_base_en_notion",
+            {"id_pagina": BASE_DE_NOTION, "titulo": "Semana", "columnas": []},
+            "es una base",
+        ),
+        (
+            "crear_base_en_notion",
+            {
+                "id_pagina": PAGINA_DE_NOTION,
+                "titulo": "Semana",
+                "columnas": [{"nombre": "Estado", "tipo": "estado"}],
+            },
+            "no puedo crear",
+        ),
+        (
+            "crear_base_en_notion",
+            {
+                "id_pagina": PAGINA_DE_NOTION,
+                "titulo": "Semana",
+                "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+                "filas": [["Lunes"]],
+            },
+            "cada fila lleva 2",
         ),
         (
             "crear_pagina_en_notion",

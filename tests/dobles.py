@@ -584,9 +584,10 @@ class PaginasFalsas(Paginas):
     """Doble del puerto `Paginas` (PB-014 · RF-07): un Notion fijo, sin filtrar.
 
     Los ids son UUID, como los de Notion. `fallar_con` hace fallar todo;
-    `fallar_al_escribir`, sólo las escrituras: lo de antes del sí anduvo. Leer
-    algo que no está, o una base como página, da `EntityNotFoundError`, que es
-    lo que hace Notion con lo que no existe o no está compartido.
+    `fallar_al_escribir`, sólo las escrituras: lo de antes del sí anduvo (con
+    `escrituras_antes_de_fallar`, recién después de ésas: un corte a mitad).
+    Leer algo que no está, o una base como página, da `EntityNotFoundError`,
+    que es lo que hace Notion con lo que no existe o no está compartido.
     """
 
     def __init__(
@@ -596,21 +597,28 @@ class PaginasFalsas(Paginas):
         contenidos: dict[str, str] | None = None,
         filas: dict[str, tuple[FilaDeBase, ...]] | None = None,
         propiedades: dict[str, tuple[Propiedad, ...]] | None = None,
+        esquemas: dict[str, tuple[Propiedad, ...]] | None = None,
         limite: int | None = 5 * 1024 * 1024,
         fallar_con: Exception | None = None,
         fallar_al_escribir: Exception | None = None,
+        escrituras_antes_de_fallar: int = 0,
     ) -> None:
         self.paginas = tuple(paginas)
         self.contenidos = contenidos or {}
         self.filas = filas or {}
         self.propiedades_de = propiedades or {}
+        self.esquemas = esquemas or {}
         self.limite = limite
         self.fallar_con = fallar_con
         self.fallar_al_escribir = fallar_al_escribir
+        self.escrituras_antes_de_fallar = escrituras_antes_de_fallar
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidas: list[str] = []
         self.consultadas: list[str] = []
         self.creadas: list[tuple[UUID, str, str, tuple[Bloque, ...]]] = []
+        # Los datos de cada `crear`, en el mismo orden que `creadas`.
+        self.datos_de_creadas: list[tuple[tuple[Propiedad, ValorDePropiedad], ...]] = []
+        self.bases_creadas: list[tuple[UUID, str, str, tuple[Propiedad, ...]]] = []
         self.agregados: list[tuple[UUID, str, tuple[Bloque, ...]]] = []
         self.cambios: list[tuple[UUID, str, str, ValorDePropiedad]] = []
         self.movidas: list[tuple[UUID, str, str]] = []
@@ -621,6 +629,7 @@ class PaginasFalsas(Paginas):
         """Cuántas escrituras llegaron, de cualquier clase."""
         return (
             len(self.creadas)
+            + len(self.bases_creadas)
             + len(self.agregados)
             + len(self.cambios)
             + len(self.movidas)
@@ -664,10 +673,16 @@ class PaginasFalsas(Paginas):
         return pagina, self.propiedades_de.get(pagina_id, (titulo,))
 
     async def crear(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, bloques: tuple[Bloque, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        bloques: tuple[Bloque, ...],
+        datos: tuple[tuple[Propiedad, ValorDePropiedad], ...] = (),
     ) -> Pagina:
         self._fallar(escritura=True)
         self.creadas.append((usuario_id, padre.id, titulo, bloques))
+        self.datos_de_creadas.append(datos)
         nueva = Pagina(
             id=str(uuid4()),
             titulo=titulo,
@@ -678,6 +693,27 @@ class PaginasFalsas(Paginas):
         )
         self.paginas = (*self.paginas, nueva)
         return nueva
+
+    async def crear_base(
+        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+    ) -> Pagina:
+        self._fallar(escritura=True)
+        self.bases_creadas.append((usuario_id, padre.id, titulo, columnas))
+        nueva = Pagina(
+            id=str(uuid4()),
+            titulo=titulo,
+            tipo=TipoDePagina.BASE,
+            editada=datetime.now(UTC),
+            enlace="https://www.notion.so/base-nueva",
+        )
+        self.paginas = (*self.paginas, nueva)
+        self.esquemas[nueva.id] = columnas
+        return nueva
+
+    async def esquema(self, usuario_id: UUID, base_id: str) -> tuple[Propiedad, ...]:
+        self._fallar()
+        self._buscar_por_id(base_id, TipoDePagina.BASE)
+        return self.esquemas.get(base_id, ())
 
     async def agregar(self, usuario_id: UUID, pagina_id: str, bloques: tuple[Bloque, ...]) -> None:
         self._fallar(escritura=True)
@@ -710,7 +746,8 @@ class PaginasFalsas(Paginas):
     def _fallar(self, *, escritura: bool = False) -> None:
         if self.fallar_con is not None:
             raise self.fallar_con
-        if escritura and self.fallar_al_escribir is not None:
+        hechas = self.escrituras() >= self.escrituras_antes_de_fallar
+        if escritura and self.fallar_al_escribir is not None and hechas:
             raise self.fallar_al_escribir
 
     def _buscar_por_id(self, identificador: str, tipo: TipoDePagina) -> Pagina:

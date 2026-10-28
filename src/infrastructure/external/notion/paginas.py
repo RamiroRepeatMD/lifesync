@@ -27,13 +27,17 @@ Lo que conviene saber antes de tocarlo:
   la respuesta sea un error.
 - **Se escribe sólo con bloques propios**, nunca con el Markdown de Notion, que
   admite menciones, embeds y bases.
+- **Una base tiene dos ids** que no se intercambian: el de la base y el de su
+  data source. Todo el bot usa el del data source (buscar, consultar, crear una
+  fila): `crear_base` devuelve ése, y la `Pagina` se arma a mano, porque
+  `_a_pagina` tomaría el otro.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +45,7 @@ import httpx
 import structlog
 
 from src.application.ports.paginas import (
+    NOMBRE_DEL_TITULO,
     BaseConsultada,
     Bloque,
     FilaDeBase,
@@ -57,6 +62,7 @@ from src.domain.exceptions import (
     AutorizacionFallidaError,
     EntityNotFoundError,
     EscrituraEnDudaError,
+    LifeSyncError,
     NotionRechazoError,
     NotionSinPermisoError,
     ServiceUnavailableError,
@@ -96,6 +102,15 @@ _TIPO_DE_PROPIEDAD = {
     "date": TipoDePropiedad.FECHA,
     "select": TipoDePropiedad.SELECCION,
     "status": TipoDePropiedad.ESTADO,
+}
+# Los tipos de columna que el bot crea en una base nueva: el estado no, porque
+# Notion lo crea con opciones en inglés.
+_JSON_DE_COLUMNA = {
+    TipoDePropiedad.TEXTO: "rich_text",
+    TipoDePropiedad.NUMERO: "number",
+    TipoDePropiedad.CASILLA: "checkbox",
+    TipoDePropiedad.FECHA: "date",
+    TipoDePropiedad.SELECCION: "select",
 }
 # Las dos formas de un id de Notion: 32 hex, o 8-4-4-4-12 con guiones.
 _ID_DE_NOTION = re.compile(
@@ -186,19 +201,31 @@ class NotionApi(Paginas):
         return pagina, _propiedades_editables(datos.get("properties"), opciones)
 
     async def crear(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, bloques: tuple[Bloque, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        bloques: tuple[Bloque, ...],
+        datos: tuple[tuple[Propiedad, ValorDePropiedad], ...] = (),
     ) -> Pagina:
+        if datos and padre.tipo is not TipoDePagina.BASE:
+            raise NotionRechazoError("Los datos van sólo en una fila de una base.")
+        if any(p.tipo is TipoDePropiedad.TITULO or p.id == "title" for p, _ in datos):
+            raise NotionRechazoError("El título va aparte, no entre los datos.")
         clave = "data_source_id" if padre.tipo is TipoDePagina.BASE else "page_id"
+        # Por el id `title`: vale para una página suelta y para la columna de
+        # título de una base, se llame como se llame.
+        propiedades = {"title": {"title": _texto_enriquecido(titulo)}}
+        for propiedad, valor in datos:
+            propiedades[propiedad.id] = _valor_json(propiedad.tipo, valor)
         cuerpo: dict[str, Any] = {
             "parent": {"type": clave, clave: _id_valido(padre.id)},
-            # Por el id `title`: vale para una página suelta y para la columna de
-            # título de una base, se llame como se llame.
-            "properties": {"title": {"title": _texto_enriquecido(titulo)}},
+            "properties": propiedades,
         }
         if bloques:
             cuerpo["children"] = [_bloque_json(bloque) for bloque in bloques]
-        datos = await self._pedir(usuario_id, "POST", f"{BASE}/pages", cuerpo, escritura=True)
-        creada = _a_pagina(datos)
+        respuesta = await self._pedir(usuario_id, "POST", f"{BASE}/pages", cuerpo, escritura=True)
+        creada = _a_pagina(respuesta)
         if creada is None:
             logger.error("notion.creada_sin_respuesta")
             raise EscrituraEnDudaError("Notion no devolvió la página creada.")
@@ -207,8 +234,57 @@ class NotionApi(Paginas):
             usuario_id=str(usuario_id),
             fila=padre.tipo is TipoDePagina.BASE,
             bloques=len(bloques),
+            datos=len(datos),
         )
         return creada
+
+    async def crear_base(
+        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+    ) -> Pagina:
+        """`POST /v1/databases`, adentro de la página y a la vista (inline).
+
+        Las columnas van por nombre: el pedido crea el esquema, así que todavía
+        no tienen id. Después del 200 la base existe: lo que falle de ahí en más
+        queda en duda, nunca como "no se hizo nada".
+        """
+        esquema: dict[str, Any] = {NOMBRE_DEL_TITULO: {"title": {}}}
+        for columna in columnas:
+            esquema[columna.nombre] = _columna_json(columna)
+        cuerpo = {
+            "parent": {"type": "page_id", "page_id": _id_valido(padre.id)},
+            "title": _texto_enriquecido(titulo),
+            "is_inline": True,
+            "initial_data_source": {"properties": esquema},
+        }
+        datos = await self._pedir(usuario_id, "POST", f"{BASE}/databases", cuerpo, escritura=True)
+        try:
+            fuente = _data_source_de(datos)
+            if fuente is None:
+                # La respuesta puede ser parcial (sólo el id): se pide entera.
+                url = f"{BASE}/databases/{_id_valido(str(datos.get('id', '')))}"
+                datos = await self._pedir(usuario_id, "GET", url)
+                fuente = _data_source_de(datos)
+        except LifeSyncError:
+            logger.error("notion.base_sin_confirmar")
+            raise EscrituraEnDudaError("Notion creó la base pero no se pudo leer.") from None
+        if fuente is None:
+            logger.error("notion.base_sin_data_source")
+            raise EscrituraEnDudaError("Notion no dijo cuál es el data source de la base.")
+        logger.info("notion.base_creada", usuario_id=str(usuario_id), columnas=len(columnas))
+        return Pagina(
+            id=fuente,
+            titulo=titulo,
+            tipo=TipoDePagina.BASE,
+            editada=_fecha(datos.get("last_edited_time")) or datetime.now(UTC),
+            enlace=_enlace(datos.get("url")),
+        )
+
+    async def esquema(self, usuario_id: UUID, base_id: str) -> tuple[Propiedad, ...]:
+        datos = await self._pedir(usuario_id, "GET", f"{BASE}/data_sources/{_id_valido(base_id)}")
+        base = _a_pagina(datos)
+        if base is None or base.tipo is not TipoDePagina.BASE:
+            raise EntityNotFoundError("Notion no devolvió una base.")
+        return _columnas_del_esquema(datos)
 
     async def agregar(self, usuario_id: UUID, pagina_id: str, bloques: tuple[Bloque, ...]) -> None:
         url = f"{BASE}/blocks/{_id_valido(pagina_id)}/children"
@@ -614,6 +690,33 @@ def _valor_json(tipo: TipoDePropiedad, valor: ValorDePropiedad) -> dict[str, Any
     raise NotionRechazoError("El valor no corresponde a ese dato.")
 
 
+def _columna_json(columna: Propiedad) -> dict[str, Any]:
+    """Una columna de una base nueva, en la forma del esquema de Notion.
+
+    Raises:
+        NotionRechazoError: Si es de un tipo que el bot no crea (no debería
+            pasar: la tool lo valida antes).
+    """
+    tipo = _JSON_DE_COLUMNA.get(columna.tipo)
+    if tipo is None:
+        raise NotionRechazoError("Ese tipo de columna no se crea desde acá.")
+    if columna.tipo is TipoDePropiedad.NUMERO:
+        return {"number": {"format": "number"}}
+    if columna.tipo is TipoDePropiedad.SELECCION:
+        return {"select": {"options": [{"name": opcion} for opcion in columna.opciones]}}
+    return {tipo: {}}
+
+
+def _data_source_de(base: dict[str, Any]) -> str | None:
+    """El id del primer data source de una base, validado; None si no vino."""
+    fuentes = _lista(base.get("data_sources"))
+    primera = fuentes[0] if fuentes else None
+    identificador = primera.get("id") if isinstance(primera, dict) else None
+    if not isinstance(identificador, str) or not _ID_DE_NOTION.fullmatch(identificador):
+        return None
+    return _id_valido(identificador)
+
+
 def _base_de(pagina: dict[str, Any]) -> str | None:
     """El data source de una fila, para leer las opciones de su esquema; None si no es fila."""
     padre = pagina.get("parent")
@@ -667,6 +770,27 @@ def _propiedades_editables(
             )
         )
     return tuple(editables)
+
+
+def _columnas_del_esquema(esquema: dict[str, Any]) -> tuple[Propiedad, ...]:
+    """Las columnas de una base que se pueden escribir, con su id y sus opciones."""
+    propiedades = esquema.get("properties")
+    opciones = _opciones_del_esquema(esquema)
+    columnas: list[Propiedad] = []
+    for nombre, propiedad in (propiedades if isinstance(propiedades, dict) else {}).items():
+        if not isinstance(propiedad, dict) or not isinstance(propiedad.get("id"), str):
+            continue
+        tipo = _TIPO_DE_PROPIEDAD.get(str(propiedad.get("type")))
+        if tipo is not None:
+            columnas.append(
+                Propiedad(
+                    id=propiedad["id"],
+                    nombre=str(nombre),
+                    tipo=tipo,
+                    opciones=opciones.get(propiedad["id"], ()),
+                )
+            )
+    return tuple(columnas)
 
 
 def create_notion_api(cliente: httpx.AsyncClient, conectar: ConectarNotion) -> NotionApi:

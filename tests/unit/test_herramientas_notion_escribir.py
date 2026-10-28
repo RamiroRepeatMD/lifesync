@@ -8,7 +8,9 @@ Lo que se cuida, además de que anden:
 - el texto pasa a bloques propios sin lanzar nunca, y los datos de una fila
   sólo toman valores que se entienden sin dudas y opciones que ya existen;
 - las bases no se mueven ni se borran, y las filas no salen de su base;
-- si Notion no confirmó, no se dice que se hizo, ni se invita a duplicarlo.
+- si Notion no confirmó, no se dice que se hizo, ni se invita a duplicarlo;
+- una base nueva se confirma entera (columnas y filas) en una pregunta, y si
+  sus filas se cortan a mitad, la base queda contada y no se la pide de nuevo.
 """
 
 from __future__ import annotations
@@ -97,7 +99,11 @@ def _notion(**opciones: Any) -> PaginasFalsas:
             _pagina(id=BASE_ID, titulo="Gastos", tipo=TipoDePagina.BASE),
             _pagina(id=FILA_ID, titulo="Luz", en_base=True),
         ),
-        **{"propiedades": {FILA_ID: DATOS_DE_LA_FILA}, **opciones},
+        **{
+            "propiedades": {FILA_ID: DATOS_DE_LA_FILA},
+            "esquemas": {BASE_ID: DATOS_DE_LA_FILA},
+            **opciones,
+        },
     )
 
 
@@ -721,4 +727,359 @@ async def test_un_lote_que_no_entra_en_un_mensaje_no_pausa_ni_escribe() -> None:
     assert "__interrupt__" not in estado
     respuestas = [m.content for m in estado["messages"] if isinstance(m, ToolMessage)]
     assert respuestas == [LOTE_DEMASIADO_LARGO, LOTE_DEMASIADO_LARGO]
+    assert escena.paginas.escrituras() == 0
+
+
+# --- Crear una base ----------------------------------------------------------------------
+
+SEMANA: dict[str, Any] = {
+    "id_pagina": PAGINA_ID,
+    "titulo": "Semana",
+    "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+    "filas": [["Lunes", "2026-11-02"], ["Martes", "2026-11-03"]],
+}
+
+
+def _base_nueva(escena: Escena) -> str:
+    return next(
+        p.id for p in escena.paginas.paginas if p.tipo is TipoDePagina.BASE and p.titulo == "Semana"
+    )
+
+
+async def test_crear_una_base_muestra_columnas_y_filas_y_pide_el_si() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", SEMANA))
+
+    assert _pregunta(estado) == (
+        "Crear en tu Notion la base «Semana» adentro de «Recetas», con estas columnas:\n"
+        "• Nombre (el nombre de cada fila)\n"
+        "• Fecha (fecha)\n"
+        "\n"
+        "Y estas 2 filas:\n"
+        "1. Lunes — Fecha: lunes 2 de noviembre de 2026\n"
+        "2. Martes — Fecha: martes 3 de noviembre de 2026"
+    )
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_con_el_si_crea_la_base_y_despues_sus_filas_en_orden() -> None:
+    escena = Escena()
+    await escena.pedir(("crear_base_en_notion", SEMANA))
+
+    estado = await escena.decidir(True)
+
+    [(usuario, padre, titulo, columnas)] = escena.paginas.bases_creadas
+    assert (usuario, padre, titulo) == (USUARIO, PAGINA_ID, "Semana")
+    assert [(c.nombre, c.tipo) for c in columnas] == [("Fecha", TipoDePropiedad.FECHA)]
+    base_id = _base_nueva(escena)
+    assert [(padre, titulo) for _, padre, titulo, _ in escena.paginas.creadas] == [
+        (base_id, "Lunes"),
+        (base_id, "Martes"),
+    ]
+    assert [[(c.nombre, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
+        [("Fecha", date(2026, 11, 2))],
+        [("Fecha", date(2026, 11, 3))],
+    ]
+    texto = _respuesta(estado)
+    assert texto == (
+        f"Creé la base «Semana» adentro de «Recetas» (id: {base_id}), con 2 filas "
+        "— link: https://www.notion.so/base-nueva"
+    )
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_una_base_sin_filas() -> None:
+    escena = Escena()
+    await escena.pedir(("crear_base_en_notion", {**SEMANA, "filas": None}))
+
+    estado = await escena.decidir(True)
+
+    assert escena.paginas.creadas == []
+    assert ", sin filas — link: " in _respuesta(estado)
+
+
+async def test_cada_tipo_de_columna_y_las_opciones_que_traen_las_filas() -> None:
+    escena = Escena()
+    args = {
+        "id_pagina": PAGINA_ID,
+        "titulo": "Gastos 2027",
+        "columnas": [
+            {"nombre": "Rubro", "tipo": "selección", "opciones": ["Servicios"]},
+            {"nombre": "Monto", "tipo": "numero"},
+            {"nombre": "Pagado", "tipo": "Casilla"},
+            {"nombre": "Notas", "tipo": "texto"},
+        ],
+        "filas": [
+            ["Luz", "servicios", "1.500,50", "sí", ""],
+            ["Súper", "Comida", "$2000", "no", "con tarjeta"],
+        ],
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    lineas = _pregunta(estado).splitlines()
+    assert lineas[1:6] == [
+        "• Nombre (el nombre de cada fila)",
+        "• Rubro (selección: Servicios, Comida)",  # «Comida» la trajo una fila
+        "• Monto (número)",
+        "• Pagado (casilla)",
+        "• Notas (texto)",
+    ]
+    assert lineas[-2:] == [
+        "1. Luz — Rubro: «Servicios» — Monto: 1.500,5 — Pagado: marcada",
+        "2. Súper — Rubro: «Comida» — Monto: 2.000 — Pagado: sin marcar — Notas: «con tarjeta»",
+    ]
+    await escena.decidir(True)
+    [(_, _, _, columnas)] = escena.paginas.bases_creadas
+    assert columnas[0].opciones == ("Servicios", "Comida")
+    assert [[v for _, v in datos] for datos in escena.paginas.datos_de_creadas] == [
+        ["Servicios", 1500.5, True],
+        ["Comida", 2000.0, False, "con tarjeta"],
+    ]
+
+
+def _con(**cambios: Any) -> dict[str, Any]:
+    return {**SEMANA, **cambios}
+
+
+def _columnas(*tipos: str) -> list[dict[str, Any]]:
+    return [{"nombre": f"C{n}", "tipo": tipo} for n, tipo in enumerate(tipos)]
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        (_con(titulo=""), "Falta el nombre de la base"),
+        (_con(titulo="Ver https://sitio.example"), "no puede tener links"),
+        (_con(columnas=_columnas(*["texto"] * 6), filas=None), "lleva hasta 5"),
+        (_con(columnas=[{"nombre": " ", "tipo": "texto"}], filas=None), "una columna sin nombre"),
+        (_con(columnas=[{"nombre": "Título", "tipo": "texto"}], filas=None), "No hace falta"),
+        (_con(columnas=[{"nombre": "nombre", "tipo": "texto"}], filas=None), "No hace falta"),
+        (
+            _con(
+                columnas=[
+                    {"nombre": "Fecha", "tipo": "fecha"},
+                    {"nombre": "fecha", "tipo": "texto"},
+                ],
+                filas=None,
+            ),
+            "Hay dos columnas que se llaman",
+        ),
+        (_con(columnas=[{"nombre": "x" * 81, "tipo": "texto"}], filas=None), "hasta 80"),
+        (_con(columnas=[{"nombre": "Estado", "tipo": "estado"}], filas=None), "no puedo crear"),
+        (_con(columnas=[{"nombre": "Lista", "tipo": "lista"}], filas=None), "no puedo crear"),
+        (
+            _con(columnas=[{"nombre": "R", "tipo": "selección", "opciones": ["A, B"]}], filas=None),
+            "tiene una coma",
+        ),
+        (
+            _con(
+                columnas=[{"nombre": "R", "tipo": "selección", "opciones": ["x" * 81]}], filas=None
+            ),
+            "es muy larga",
+        ),
+        (
+            _con(
+                columnas=[
+                    {"nombre": "R", "tipo": "selección", "opciones": [f"O{n}" for n in range(21)]}
+                ],
+                filas=None,
+            ),
+            "más de 20 opciones",
+        ),
+        (_con(filas=[[f"F{n}", ""] for n in range(11)]), "lleva hasta 10"),
+        (_con(filas=[["Lunes"]]), "tiene 1 valores y cada fila lleva 2"),
+        (_con(filas=[["Lunes", "2026-11-02", "extra"]]), "tiene 3 valores"),
+        (_con(filas=[["", "2026-11-02"]]), "A la fila 1 le falta el nombre"),
+        (_con(filas=[["Lunes", "2 de noviembre"]]), "Fila 1 («Lunes»), «Fecha»: La fecha va en"),
+        (
+            _con(columnas=[{"nombre": "Monto", "tipo": "número"}], filas=[["Luz", "1.500"]]),
+            "se puede leer de dos maneras",
+        ),
+        (
+            _con(columnas=[{"nombre": "Pagado", "tipo": "casilla"}], filas=[["Luz", "tal vez"]]),
+            "«sí» o «no»",
+        ),
+        (_con(id_pagina=BASE_ID), "es una base: una base nueva va adentro de una página"),
+        (_con(id_pagina=str(uuid4())), "compartilo con LifeSync"),
+        (
+            _con(
+                columnas=[{"nombre": "Notas", "tipo": "texto"}],
+                filas=[["A", "a" * 1990], ["B", "b" * 1990]],
+            ),
+            "demasiado largo",
+        ),
+    ],
+)
+async def test_crear_una_base_invalida_se_explica_sin_pausa(
+    args: dict[str, Any], esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_la_pregunta_cuenta_lo_ya_hecho_en_el_turno() -> None:
+    """El agente le antepone lo ya hecho («Listo — …»): todo tiene que entrar en un WhatsApp."""
+    escena = Escena()
+    # La pregunta sola entra (~250 caracteres); con esto adelante, ya no.
+    escena.contexto.acciones_realizadas.append("x" * 3700)
+
+    estado = await escena.pedir(("crear_base_en_notion", SEMANA))
+
+    assert "__interrupt__" not in estado
+    assert "demasiado largo" in _respuesta(estado)
+
+
+TRES_DIAS = _con(
+    filas=[["Lunes", "2026-11-02"], ["Martes", "2026-11-03"], ["Miércoles", "2026-11-04"]]
+)
+
+
+async def test_si_se_corta_a_mitad_dice_cuantas_filas_quedaron_y_no_invita_a_repetirla() -> None:
+    # Escrituras: la base (1) y el lunes (2); falla el martes.
+    escena = Escena(
+        _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=2)
+    )
+    await escena.pedir(("crear_base_en_notion", TRES_DIAS))
+
+    estado = await escena.decidir(True)
+
+    base_id = _base_nueva(escena)
+    assert _respuesta(estado) == (
+        f"Creé la base «Semana» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
+        "Alcancé a crear 1 de 3 filas. Faltan: «Martes», «Miércoles». Se pueden sumar de a "
+        "una, como filas nuevas de la base."
+    )
+    assert escena.contexto.acciones_realizadas == [
+        f"Creé la base «Semana» adentro de «Recetas» (id: {base_id}), con 1 de 3 filas"
+    ]
+
+
+async def test_una_fila_en_duda_se_dice_aparte() -> None:
+    escena = Escena(
+        _notion(fallar_al_escribir=EscrituraEnDudaError(), escrituras_antes_de_fallar=2)
+    )
+    await escena.pedir(("crear_base_en_notion", TRES_DIAS))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert "La fila «Martes» puede haber quedado" in texto
+    assert "Faltan: «Miércoles»." in texto
+
+
+@pytest.mark.parametrize(
+    ("falla", "esperado"),
+    [
+        (NotionSinPermisoError(), "volvé a hacer /conectar notion"),
+        (EscrituraEnDudaError(), "No sé si se pudo crear la base"),
+        (EntityNotFoundError(), "no creé la base"),
+    ],
+)
+async def test_si_la_base_no_se_crea_no_intenta_las_filas(falla: Exception, esperado: str) -> None:
+    escena = Escena(_notion(fallar_al_escribir=falla))
+    await escena.pedir(("crear_base_en_notion", SEMANA))
+
+    estado = await escena.decidir(True)
+
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+    assert escena.contexto.acciones_realizadas == []
+
+
+async def test_una_falla_no_prevista_en_las_filas_deja_la_base_en_la_bitacora() -> None:
+    """Si el turno se cae, el agente cuenta lo de la bitácora: nadie pide la base otra vez."""
+    escena = Escena(_notion(fallar_al_escribir=RuntimeError("bug"), escrituras_antes_de_fallar=1))
+    await escena.pedir(("crear_base_en_notion", SEMANA))
+
+    with pytest.raises(RuntimeError):
+        await escena.decidir(True)
+
+    [hecho] = escena.contexto.acciones_realizadas
+    assert hecho.startswith("Creé la base «Semana» adentro de «Recetas» (id: ")
+
+
+# --- Una fila nueva con sus datos -------------------------------------------------------
+
+
+async def test_una_fila_nueva_con_sus_datos_en_una_sola_confirmacion() -> None:
+    escena = Escena()
+    args = {
+        "id_padre": BASE_ID,
+        "titulo": "Gas",
+        "datos": [
+            {"columna": "monto", "valor": "1500"},
+            {"columna": "Vence", "valor": "2026-11-10"},
+            {"columna": "Estado", "valor": "pagado"},
+        ],
+    }
+
+    estado = await escena.pedir(("crear_pagina_en_notion", args))
+
+    assert _pregunta(estado) == (
+        "Crear en tu Notion la página «Gas» como fila nueva de la base «Gastos», con estos "
+        "datos:\n"
+        "• Monto: 1.500\n"
+        "• Vence: martes 10 de noviembre de 2026\n"
+        "• Estado: «Pagado»"
+    )
+    await escena.decidir(True)
+    [datos] = escena.paginas.datos_de_creadas
+    assert [(c.id, v) for c, v in datos] == [
+        ("m1", 1500.0),
+        ("v1", date(2026, 11, 10)),
+        ("e1", "Pagado"),
+    ]
+
+
+async def test_datos_y_texto_van_juntos_en_la_pregunta() -> None:
+    escena = Escena()
+    args = {
+        "id_padre": BASE_ID,
+        "titulo": "Gas",
+        "texto": "- pagar online",
+        "datos": [{"columna": "Monto", "valor": "1500"}],
+    }
+
+    estado = await escena.pedir(("crear_pagina_en_notion", args))
+
+    assert _pregunta(estado).endswith(
+        "con estos datos:\n• Monto: 1.500\n\nY con este texto:\n\n• pagar online"
+    )
+
+
+@pytest.mark.parametrize(
+    ("id_padre", "datos", "esperado"),
+    [
+        (PAGINA_ID, [{"columna": "Monto", "valor": "1"}], "es una página, no una base"),
+        (BASE_ID, [{"columna": "Color", "valor": "1"}], "no tiene un dato que se llame «Color»"),
+        (
+            BASE_ID,
+            [{"columna": "Monto", "valor": "1"}, {"columna": "monto", "valor": "2"}],
+            "está dos veces",
+        ),
+        (BASE_ID, [{"columna": "Concepto", "valor": "Gas"}], "va en el título"),
+        (BASE_ID, [{"columna": "título", "valor": "Gas"}], "va en el título"),
+        (BASE_ID, [{"columna": " ", "valor": "1"}], "Hay un dato sin columna"),
+        (BASE_ID, [{"columna": "Estado", "valor": "Archivado"}], "no tiene la opción"),
+        (BASE_ID, [{"columna": "Monto", "valor": "mil"}], "«Monto»: «mil» no es un número"),
+    ],
+)
+async def test_datos_que_no_sirven_se_explican_sin_pausa(
+    id_padre: str, datos: list[dict[str, str]], esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("crear_pagina_en_notion", {"id_padre": id_padre, "titulo": "Gas", "datos": datos})
+    )
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
     assert escena.paginas.escrituras() == 0

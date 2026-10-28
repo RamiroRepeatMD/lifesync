@@ -31,9 +31,9 @@ La documentación completa está en [`docs/`](docs/).
 | Agente IA | LangGraph + langchain-core |
 | LLM | Google **Gemini 3.5 Flash Lite** (la cuota gratuita es por modelo: lite da 500 req/día vs. 20 del flash) |
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
-| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas y filas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
+| Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 2055 tests (cobertura con ramas 93,1%, piso de 90% en CI) + 35 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2146 tests (cobertura con ramas 93,2%, piso de 90% en CI) + 38 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -270,16 +270,20 @@ Como en un espacio compartido lo escribe cualquiera, el contenido recibe el trat
 va enmarcado como dato de un tercero, y con una página de Notion a la vista toda escritura pide
 el "sí".
 
-Y para **escribir** (RF-07): crear una página adentro de otra o una fila nueva en una base,
-agregar texto al final de una página ("agregá flan a mis recetas"), cambiar un dato de una fila
+Y para **escribir** (RF-07): crear una página adentro de otra o una fila nueva en una base, con
+sus datos ("sumá Gas a mis gastos: 1500, vence el 10"), crear una **base nueva** adentro de una
+página, con sus columnas y sus filas ("armame una base con un día de la semana que viene por
+fila"), agregar texto al final de una página ("agregá flan a mis recetas"), cambiar un dato de una fila
 ("marcá la luz como pagada", "poné 1500 en el monto") o el título de una página, moverla
 adentro de otra, mandarla a la papelera de Notion y subirle un archivo que llegó por WhatsApp
 (una foto se ve como imagen, un PDF como PDF). Todo lo que escribe en Notion pide el "sí": lo
 que queda en una página lo ve quien la ve, y la API no dice si está compartida. La pregunta
 muestra entero lo que se va a escribir. El texto lo arma el bot en bloques propios (títulos,
 viñetas, listas numeradas y tareas), sólo agrega al final —no cambia ni borra lo que ya hay— y
-los datos de una fila sólo toman opciones que la base ya tiene. Las bases enteras no se mueven
-ni se borran, y una fila no sale de su base. Si Notion no confirma una escritura, el bot no dice
+los datos de una fila sólo toman opciones que la base ya tiene. Una base nueva va a la vista
+adentro de la página, con hasta 5 columnas (texto, número, casilla, fecha o selección) y 10
+filas, todo en una sola confirmación. Las bases enteras no se mueven ni se borran, y una fila no
+sale de su base. Si Notion no confirma una escritura, el bot no dice
 que se hizo ni invita a repetirla: avisa que puede haber quedado y pide revisarlo antes.
 
 Y es lo primero que **escribe sin que le escriban**: los **recordatorios** (PB-030).
@@ -536,7 +540,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 35 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 38 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -548,8 +552,10 @@ duda manda a revisar Enviados y no lo repite). En Drive: pasa el link tal cual (
 de archivo con un link falso no lo cuela), sube lo que le mandan y lo comparte con el sí, y
 mandar a la papelera o renombrar lo que encontró también pide el sí. En Notion: busca la página,
 la lee y cuenta lo que dice, una página que ordena mandar un correo no lo logra, agregarle algo
-a una página o mandarla a la papelera pide el sí, y un "subilo" a secas, con Drive y Notion
-conectados, pregunta adónde. Si Gemini no responde o se agota la cuota por minuto, el caso
+a una página o mandarla a la papelera pide el sí, un "subilo" a secas, con Drive y Notion
+conectados, pregunta adónde, y una base nueva (la de la semana que viene, o una de 10 filas por
+5 columnas) o una fila con sus datos se confirman en una sola pregunta y con las fechas bien.
+Si Gemini no responde o se agota la cuota por minuto, el caso
 espera y reintenta, y si persiste se marca como salteado: una caída del proveedor no es un
 fallo de comportamiento.
 
@@ -682,7 +688,7 @@ usan la del planning oficial (por ejemplo, la memoria persistida es el PB-016 of
 | PB-043 | Preparación de demos y evidencia | ⏳ |
 | PB-044 | Refinamiento final del backlog y replanificación documentada | ⏳ |
 | PB-014 | Notion: OAuth2 básico (sumó leer: buscar, leer páginas y consultar bases) | ✅ (de punta a punta contra un Notion simulado) |
-| RF-07 | Notion: escribir (crear páginas y filas, agregar texto, cambiar datos), mover, mandar a la papelera y subir archivos — sin PB propio, lo documenta PB-044 | ✅ (de punta a punta contra un Notion simulado; todo pide el "sí") |
+| RF-07 | Notion: escribir (crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos), mover, mandar a la papelera y subir archivos — sin PB propio, lo documenta PB-044 | ✅ (de punta a punta contra un Notion simulado; todo pide el "sí") |
 
 Además: corrección de defectos y pulido, y la documentación técnica final con un manual de
 usuario básico.

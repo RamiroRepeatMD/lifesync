@@ -2,10 +2,10 @@
 
 Capacidad externa, como `Archivos` para Drive: las páginas viven en el
 proveedor, y esta interfaz describe sólo lo que el agente necesita de ellas:
-encontrarlas, leer una y listar las filas de una base (PB-014); y crear,
-agregar al final, cambiar un dato, mover, mandar a la papelera y subir un
-archivo (RF-07). Nunca editar ni borrar texto que ya existe, ni borrar para
-siempre.
+encontrarlas, leer una y listar las filas de una base (PB-014); y crear
+páginas, filas (con sus datos) y bases, agregar al final, cambiar un dato,
+mover, mandar a la papelera y subir un archivo (RF-07). Nunca editar ni borrar
+texto que ya existe, ni borrar para siempre.
 """
 
 from __future__ import annotations
@@ -17,6 +17,9 @@ from enum import StrEnum
 from uuid import UUID
 
 from src.domain.entities.pagina import Pagina
+
+# La columna de título de una base que crea el bot: el nombre de cada fila.
+NOMBRE_DEL_TITULO = "Nombre"
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,15 +197,49 @@ class Paginas(ABC):
 
     @abstractmethod
     async def crear(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, bloques: tuple[Bloque, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        bloques: tuple[Bloque, ...],
+        datos: tuple[tuple[Propiedad, ValorDePropiedad], ...] = (),
     ) -> Pagina:
         """Crea una página dentro de otra, o una fila nueva si el padre es una base.
 
+        Args:
+            datos: Sólo en una fila: el valor de cada columna, ya validado para
+                su tipo. El título va en `titulo`, nunca acá.
+
         Raises:
-            NotionRechazoError: Si Notion no lo acepta (y su hija, si no deja).
+            NotionRechazoError: Si Notion no lo acepta (y su hija, si no deja), o
+                si hay datos y el padre no es una base: no se manda nada.
             EscrituraEnDudaError: Si Notion no confirmó: pudo haberse creado.
             EntityNotFoundError: Si el padre ya no está.
             (y las de `buscar`)
+        """
+
+    @abstractmethod
+    async def crear_base(
+        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+    ) -> Pagina:
+        """Crea una base adentro de una página: `NOMBRE_DEL_TITULO` y estas columnas.
+
+        Returns:
+            La base nueva, con el id de su data source: el que usan buscar,
+            consultar y crear una fila. El de la base es otro.
+
+        Raises:
+            EscrituraEnDudaError: Si Notion no confirmó, o si la creó pero no se
+                pudo saber cuál es: en los dos casos, la base puede existir.
+            (y las de `crear`)
+        """
+
+    @abstractmethod
+    async def esquema(self, usuario_id: UUID, base_id: str) -> tuple[Propiedad, ...]:
+        """Las columnas de una base que se pueden escribir, con sus ids y opciones.
+
+        Raises:
+            (las de `obtener`)
         """
 
     @abstractmethod

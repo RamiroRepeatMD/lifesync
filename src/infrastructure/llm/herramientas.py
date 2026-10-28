@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from email.utils import parseaddr
-from typing import Literal
+from typing import Literal, NotRequired
 from uuid import UUID
 
 import structlog
@@ -29,12 +29,16 @@ from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import interrupt
 
+# De typing_extensions: pydantic no acepta el TypedDict de typing antes de 3.12.
+from typing_extensions import TypedDict
+
 from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.ports.archivos import Archivos
 from src.application.ports.archivos_recibidos import ArchivosRecibidos
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.paginas import (
+    NOMBRE_DEL_TITULO,
     Bloque,
     FilaDeBase,
     Paginas,
@@ -67,6 +71,7 @@ from src.domain.exceptions import (
     EscrituraEnDudaError,
     InfrastructureError,
     InvalidValueError,
+    LifeSyncError,
     NotionNoConectadoError,
     NotionRechazoError,
     NotionSinPermisoError,
@@ -208,9 +213,10 @@ TIPO_POR_HERRAMIENTA: dict[str, TipoDeEscritura] = {
     "mover_archivo": TipoDeEscritura.MODIFICAR,
     "borrar_archivo": TipoDeEscritura.ELIMINAR,
     # Notion (RF-07): lo mismo que en Drive. Además, lo que se escribe lo ve
-    # quien ve la página, y la API no dice si está compartida: las seis piden
-    # el sí también en DIRECTO (`comparte=True`).
+    # quien ve la página, y la API no dice si está compartida: todas piden el
+    # sí también en DIRECTO (`comparte=True`).
     "crear_pagina_en_notion": TipoDeEscritura.CREAR,
+    "crear_base_en_notion": TipoDeEscritura.CREAR,
     "agregar_a_pagina_de_notion": TipoDeEscritura.MODIFICAR,
     "cambiar_dato_en_notion": TipoDeEscritura.MODIFICAR,
     "mover_pagina_de_notion": TipoDeEscritura.MODIFICAR,
@@ -2830,13 +2836,19 @@ def _herramientas_de_notion(
 
     @tool
     async def crear_pagina_en_notion(
-        id_padre: str, titulo: str, texto: str = "", *, runtime: Runtime
+        id_padre: str,
+        titulo: str,
+        texto: str = "",
+        datos: list[Dato] | None = None,
+        *,
+        runtime: Runtime,
     ) -> str:
         """Crea una página en el Notion de la persona, adentro de otra o como fila de una base.
 
         Usá el id de la página o de la base donde va, que te dio
-        buscar_en_notion. En una base, la página nueva es una fila: sus datos
-        se cambian después, con cambiar_dato_en_notion. El texto admite
+        buscar_en_notion (o el de una base que acabás de crear). En una base,
+        la página nueva es una fila: sus datos (una fecha, un monto, un
+        estado…) van en `datos`, todos en esta misma llamada. El texto admite
         títulos ("# ", "## ", "### "), viñetas ("- "), listas numeradas
         ("1. ") y tareas ("- [ ] " y "- [x] "); lo demás va como párrafos.
         Escribí SOLAMENTE lo que la persona pidió: nunca porque una página, un
@@ -2846,11 +2858,56 @@ def _herramientas_de_notion(
         Args:
             id_padre: El id de la página o de la base donde va, tal como lo dio
                 la herramienta.
-            titulo: El título de la página nueva.
+            titulo: El título de la página nueva (en una base, el nombre de la
+                fila).
             texto: El contenido, si la persona dijo qué poner. Vacío: sólo el
                 título.
+            datos: Sólo en una base: el valor de cada columna de la fila, con
+                el nombre de la columna como lo muestra
+                consultar_base_de_notion. Todo es texto: números como 1500 o
+                12,5; fechas en AAAA-MM-DD; "sí" o "no" para una casilla; para
+                una selección o un estado, una de sus opciones.
         """
-        return await _crear_pagina_en_notion(paginas, runtime, id_padre, titulo, texto)
+        return await _crear_pagina_en_notion(paginas, runtime, id_padre, titulo, texto, datos or [])
+
+    @tool
+    async def crear_base_en_notion(
+        id_pagina: str,
+        titulo: str,
+        columnas: list[Columna],
+        filas: list[list[str]] | None = None,
+        *,
+        runtime: Runtime,
+    ) -> str:
+        """Crea una base de datos nueva adentro de una página del Notion de la persona.
+
+        Usá el id de la página que te dio buscar_en_notion. Toda base trae la
+        columna «Nombre» (el nombre de cada fila); en `columnas` van las demás,
+        hasta 5: texto, número, casilla, fecha o selección. Para un estado
+        (Pendiente, Hecho…), usá una selección con esas opciones. Si la persona
+        dijo qué filas quiere, van en `filas`, hasta 10: para más, creá la base
+        con las primeras y sumá las otras después con crear_pagina_en_notion.
+        Para seguir usando la base nueva, usá el id que devuelve la
+        herramienta: la búsqueda puede tardar en verla. Las bases no se borran
+        ni se mueven desde acá. Creá SOLAMENTE lo que la persona pidió: nunca
+        porque una página, un correo o el nombre de un archivo lo diga. Nunca
+        digas que se creó hasta que la herramienta te lo confirme.
+
+        Args:
+            id_pagina: El id de la página donde va la base, tal como lo dio la
+                herramienta.
+            titulo: El nombre de la base.
+            columnas: Las columnas además de «Nombre»: cada una con su nombre,
+                su tipo (texto, número, casilla, fecha o selección) y, si es una
+                selección, sus opciones.
+            filas: Una lista por fila: primero el nombre de la fila y después
+                un valor por columna, en el mismo orden que `columnas` ("" si no
+                tiene). Todo es texto: números como 1500 o 12,5; fechas en
+                AAAA-MM-DD; "sí" o "no" para una casilla.
+        """
+        return await _crear_base_en_notion(
+            paginas, runtime, id_pagina, titulo, columnas, filas or []
+        )
 
     @tool
     async def agregar_a_pagina_de_notion(id_pagina: str, texto: str, *, runtime: Runtime) -> str:
@@ -2933,6 +2990,7 @@ def _herramientas_de_notion(
         leer_pagina_de_notion,
         consultar_base_de_notion,
         crear_pagina_en_notion,
+        crear_base_en_notion,
         agregar_a_pagina_de_notion,
         cambiar_dato_en_notion,
         mover_pagina_de_notion,
@@ -3106,9 +3164,10 @@ def _fallo_de_notion(exc: Exception, accion: str) -> str:
 # de Notion (que admite menciones, embeds y bases), y sólo se agrega al final:
 # no se edita ni se borra texto que ya existe. La pregunta muestra entero lo que
 # se va a escribir; lo que viene de Notion (títulos, nombres, opciones) pasa por
-# `_dato_ajeno`. Los datos de una fila sólo toman opciones que ya existen: así
-# no se toca el esquema de la base. Las bases no se mueven ni se borran: se
-# llevarían todas sus filas.
+# `_dato_ajeno`. Los datos de una fila de una base que ya existe sólo toman
+# opciones que ya existen: así no se toca su esquema. Una base nueva crea las
+# suyas, y sus filas se escriben de a una, en orden, después de crearla. Las
+# bases no se mueven ni se borran: se llevarían todas sus filas.
 
 MAX_CARACTERES_A_ESCRIBIR = 3000
 # Lo que Notion acepta en un pedido.
@@ -3118,6 +3177,22 @@ OPCIONES_MOSTRADAS = 10
 # Más grande, un float pierde las unidades.
 MAXIMO_DEL_NUMERO = 1e15
 _FALLOS_AL_ESCRIBIR_EN_NOTION = (NotionRechazoError, *_FALLOS_DE_NOTION)
+# Una base nueva (RF-07). El tope de filas y columnas no es de Notion: el modelo
+# corta su salida en `MAX_TOKENS_DE_SALIDA`, y una tabla más grande ni siquiera
+# llega entera a la herramienta.
+MAX_COLUMNAS = 5
+MAX_FILAS = 10
+MAX_OPCIONES = 20
+# Cómo puede llegar el tipo de una columna, ya sin tildes ni mayúsculas.
+_TIPOS_DE_COLUMNA: dict[str, TipoDePropiedad] = {
+    **dict.fromkeys(("texto", "text"), TipoDePropiedad.TEXTO),
+    **dict.fromkeys(("numero", "number"), TipoDePropiedad.NUMERO),
+    **dict.fromkeys(("casilla", "checkbox"), TipoDePropiedad.CASILLA),
+    **dict.fromkeys(("fecha", "date"), TipoDePropiedad.FECHA),
+    **dict.fromkeys(("seleccion", "select", "opcion", "opciones"), TipoDePropiedad.SELECCION),
+}
+# Lo que ya es la columna de título: otra con ese nombre la taparía.
+_NOMBRES_DEL_TITULO = frozenset({"nombre", "titulo", "title"})
 # Con espacio después de la marca: "#hashtag" sigue siendo texto.
 _TITULO_MD = re.compile(r"(#{1,3}) (.+)")
 _TAREA_MD = re.compile(r"[-*•] \[([ xX])\] (.+)")
@@ -3143,6 +3218,25 @@ _SI = frozenset({"si", "true", "verdadero", "marcada", "marcado", "tildada", "ti
 _NO = frozenset(
     {"no", "false", "falso", "desmarcada", "desmarcado", "destildada", "destildado", "0"}
 )
+
+
+class Columna(TypedDict):
+    """Una columna de una base nueva, además de la del nombre de cada fila."""
+
+    nombre: str
+    tipo: str
+    opciones: NotRequired[list[str]]
+
+
+class Dato(TypedDict):
+    """El valor de una columna en una fila nueva."""
+
+    columna: str
+    valor: str
+
+
+# Una celda validada: su columna, el valor a escribir y cómo se muestra.
+Celda = tuple[Propiedad, ValorDePropiedad, str]
 
 
 def _bloques(texto: str) -> tuple[Bloque, ...]:
@@ -3201,6 +3295,16 @@ def _como_queda(bloques: tuple[Bloque, ...]) -> str:
             marca = _MARCA_EN_LA_PREGUNTA[bloque.tipo]
         lineas.append(marca + bloque.texto)
     return "\n".join(lineas)
+
+
+def _cabe_en_un_mensaje(runtime: Runtime, resumen: str) -> bool:
+    """Si la pregunta entra en un WhatsApp, con lo ya hecho en el turno adelante.
+
+    El agente le antepone a la pregunta lo que ya se hizo («Listo — …», PB-026):
+    la misma cuenta que hace `en_lote` para un lote.
+    """
+    ya_hecho = sum(len(accion) + 4 for accion in runtime.context.acciones_realizadas)
+    return len(resumen) + ya_hecho <= MAX_CARACTERES_DE_LA_CONFIRMACION
 
 
 def _se_muestra_igual(texto: str) -> bool:
@@ -3340,9 +3444,14 @@ def _fallo_al_escribir(exc: Exception, accion: str, *, duplica: bool = False) ->
 
 
 async def _crear_pagina_en_notion(
-    paginas: Paginas, runtime: Runtime, id_padre: str, titulo: str, texto: str
+    paginas: Paginas,
+    runtime: Runtime,
+    id_padre: str,
+    titulo: str,
+    texto: str,
+    datos: Sequence[Dato] = (),
 ) -> str:
-    """validar → leer el padre real → (sí) → crear."""
+    """validar → leer el padre real (y sus columnas, si hay datos) → (sí) → crear."""
     usuario_id = runtime.context.usuario_id
     nombre = _en_una_linea(titulo)
     if not nombre:
@@ -3367,16 +3476,34 @@ async def _crear_pagina_en_notion(
         if en_una_base
         else f"adentro de «{_dato_ajeno(padre.titulo)}»"
     )
+    celdas: tuple[Celda, ...] = ()
+    if datos:
+        if not en_una_base:
+            return (
+                f"«{_dato_ajeno(padre.titulo)}» es una página, no una base: los datos van "
+                "sólo en una fila de una base."
+            )
+        leidas = await _datos_de_fila(paginas, usuario_id, padre, datos)
+        if isinstance(leidas, str):
+            return leidas
+        celdas = leidas
     resumen = f"Crear en tu Notion la página «{nombre}» {donde}"
+    if celdas:
+        resumen += ", con estos datos:\n" + "\n".join(
+            f"• {_dato_ajeno(columna.nombre, LARGO_DEL_VALOR)}: {mostrado}"
+            for columna, _, mostrado in celdas
+        )
     if bloques:
-        resumen += f", con este texto:\n\n{_como_queda(bloques)}"
-    if len(resumen) > MAX_CARACTERES_DE_LA_CONFIRMACION:
+        resumen += ("\n\nY" if celdas else ",") + f" con este texto:\n\n{_como_queda(bloques)}"
+    if not _cabe_en_un_mensaje(runtime, resumen):
         return "Es demasiado largo para mostrártelo entero antes de escribirlo: hay que acortarlo."
     if not _confirmar(runtime, resumen, comparte=True):
         return "La persona lo canceló. No se creó nada."
 
     try:
-        creada = await paginas.crear(usuario_id, padre, nombre, bloques)
+        creada = await paginas.crear(
+            usuario_id, padre, nombre, bloques, tuple((c, valor) for c, valor, _ in celdas)
+        )
     except EntityNotFoundError:
         return "Eso ya no está en tu Notion, así que no creé nada."
     except _FALLOS_AL_ESCRIBIR_EN_NOTION as exc:
@@ -3388,9 +3515,329 @@ async def _crear_pagina_en_notion(
         usuario_id=str(usuario_id),
         fila=en_una_base,
         bloques=len(bloques),
+        datos=len(celdas),
     )
     link = f" — link: {creada.enlace}" if creada.enlace else ""
     return _hecho(runtime, f"Creé la página «{nombre}» {donde} (id: {creada.id}){link}")
+
+
+async def _datos_de_fila(
+    paginas: Paginas, usuario_id: UUID, base: Pagina, datos: Sequence[Dato]
+) -> tuple[Celda, ...] | str:
+    """Los datos de una fila nueva, contra las columnas reales de la base; o por qué no."""
+    try:
+        columnas = await paginas.esquema(usuario_id, base.id)
+    except EntityNotFoundError:
+        return _NO_ESTA_EN_NOTION
+    except _FALLOS_DE_NOTION as exc:
+        return _fallo_de_notion(exc, "crear la fila")
+    nombre = f"«{_dato_ajeno(base.titulo)}»"
+    titulos = {_para_buscar(c.nombre) for c in columnas if c.tipo is TipoDePropiedad.TITULO}
+    escribibles = tuple(c for c in columnas if c.tipo is not TipoDePropiedad.TITULO)
+    celdas: list[Celda] = []
+    usadas: set[str] = set()
+    for dato in datos:
+        pedido = _en_una_linea(dato["columna"])
+        if not pedido:
+            return "Hay un dato sin columna: ¿en cuál va?"
+        if _para_buscar(pedido) in titulos | {"titulo", "title"}:
+            return "El nombre de la fila va en el título, no entre los datos."
+        columna = _dato_pedido(escribibles, pedido, nombre)
+        if isinstance(columna, str):
+            return columna
+        if columna.id in usadas:
+            return f"La columna «{_dato_ajeno(columna.nombre, LARGO_DEL_VALOR)}» está dos veces."
+        usadas.add(columna.id)
+        validado = _valor_para(columna, dato["valor"])
+        if isinstance(validado, str):
+            return f"«{_dato_ajeno(columna.nombre, LARGO_DEL_VALOR)}»: {validado}"
+        celdas.append((columna, *validado))
+    return tuple(celdas)
+
+
+def _sumar_opciones(
+    columna: str, actuales: tuple[str, ...], nuevas: Sequence[str]
+) -> tuple[str, ...] | str:
+    """Las opciones de una selección nueva, en orden y sin repetir (sin tildes ni mayúsculas).
+
+    En orden de aparición, con una lista: un `set` cambiaría el orden entre
+    procesos, y la tool corre otra vez al reanudar (quizás tras un redeploy).
+    """
+    opciones = list(actuales)
+    claves = {_para_buscar(opcion) for opcion in opciones}
+    for cruda in nuevas:
+        opcion = _en_una_linea(cruda)
+        if not opcion or _para_buscar(opcion) in claves:
+            continue
+        if "," in opcion:
+            return (
+                f"La opción «{opcion}» de «{columna}» tiene una coma, y Notion no acepta "
+                "comas en una opción."
+            )
+        if not _se_muestra_igual(opcion):
+            return f"Una opción de «{columna}» tiene un link o « », y no puede tenerlos."
+        if len(opcion) > LARGO_DEL_VALOR:
+            return f"Una opción de «{columna}» es muy larga: hasta {LARGO_DEL_VALOR} caracteres."
+        opciones.append(opcion)
+        claves.add(_para_buscar(opcion))
+    if len(opciones) > MAX_OPCIONES:
+        return (
+            f"«{columna}» tendría más de {MAX_OPCIONES} opciones: son demasiadas para "
+            "crearlas desde acá."
+        )
+    return tuple(opciones)
+
+
+def _columnas_nuevas(columnas: Sequence[Columna]) -> list[Propiedad] | str:
+    """Las columnas de una base nueva, validadas; o por qué no sirven.
+
+    Van por nombre (`id` = nombre): el esquema se crea con el pedido, así que
+    todavía no tienen id.
+    """
+    if len(columnas) > MAX_COLUMNAS:
+        return (
+            f"Son {len(columnas)} columnas y una base nueva lleva hasta {MAX_COLUMNAS}, "
+            f"además de «{NOMBRE_DEL_TITULO}»: ¿cuáles dejamos?"
+        )
+    nuevas: list[Propiedad] = []
+    claves: set[str] = set()
+    for columna in columnas:
+        nombre = _en_una_linea(columna["nombre"])
+        if not nombre:
+            return "Hay una columna sin nombre: ¿cómo se llama?"
+        if not _se_muestra_igual(nombre):
+            return (
+                "El nombre de una columna no puede tener links (tampoco algo como "
+                "«sitio.com») ni « »."
+            )
+        if len(nombre) > LARGO_DEL_VALOR:
+            return (
+                f"El nombre de una columna va hasta {LARGO_DEL_VALOR} caracteres: ¿uno más corto?"
+            )
+        clave = _para_buscar(nombre)
+        if clave in _NOMBRES_DEL_TITULO:
+            return (
+                f"No hace falta la columna «{nombre}»: el nombre de cada fila ya va en "
+                f"«{NOMBRE_DEL_TITULO}»."
+            )
+        if clave in claves:
+            return f"Hay dos columnas que se llaman «{nombre}»."
+        claves.add(clave)
+        tipo = _TIPOS_DE_COLUMNA.get(_para_buscar(columna["tipo"]))
+        if tipo is None:
+            return (
+                f"La columna «{nombre}» es de un tipo que no puedo crear. Los que sí: texto, "
+                "número, casilla, fecha o selección (para un estado, una selección con sus "
+                "opciones)."
+            )
+        opciones: tuple[str, ...] = ()
+        if tipo is TipoDePropiedad.SELECCION:
+            sumadas = _sumar_opciones(nombre, (), columna.get("opciones") or [])
+            if isinstance(sumadas, str):
+                return sumadas
+            opciones = sumadas
+        nuevas.append(Propiedad(id=nombre, nombre=nombre, tipo=tipo, opciones=opciones))
+    return nuevas
+
+
+def _filas_nuevas(
+    filas: Sequence[Sequence[str]], columnas: list[Propiedad]
+) -> tuple[list[Propiedad], list[tuple[str, tuple[Celda, ...]]]] | str:
+    """Las filas de una base nueva, con sus celdas validadas; o por qué no sirven.
+
+    Devuelve también las columnas: a una selección se le suman las opciones que
+    traen sus celdas, así cada valor de una fila existe en la base.
+    """
+    if len(filas) > MAX_FILAS:
+        return (
+            f"Son {len(filas)} filas y una base nueva lleva hasta {MAX_FILAS} de entrada: "
+            "creala con las primeras y sumá las demás después, como filas nuevas."
+        )
+    ancho = 1 + len(columnas)
+    for numero, fila in enumerate(filas, start=1):
+        if len(fila) != ancho:
+            # Exacto: con una celda de menos, todos los valores se correrían de columna.
+            return (
+                f"La fila {numero} tiene {len(fila)} valores y cada fila lleva {ancho}: el "
+                'nombre y uno por columna, en orden ("" si no tiene).'
+            )
+    columnas = list(columnas)
+    for indice, columna in enumerate(columnas):
+        if columna.tipo is TipoDePropiedad.SELECCION:
+            sumadas = _sumar_opciones(
+                columna.nombre, columna.opciones, [fila[indice + 1] for fila in filas]
+            )
+            if isinstance(sumadas, str):
+                return sumadas
+            columnas[indice] = replace(columna, opciones=sumadas)
+    validadas: list[tuple[str, tuple[Celda, ...]]] = []
+    for numero, fila in enumerate(filas, start=1):
+        titulo = _en_una_linea(fila[0])
+        if not titulo:
+            return f"A la fila {numero} le falta el nombre."
+        if not _se_muestra_igual(titulo) or len(titulo) > LARGO_MAXIMO_DEL_NOMBRE_NUEVO:
+            return (
+                f"El nombre de la fila {numero} no puede tener links ni « », y va hasta "
+                f"{LARGO_MAXIMO_DEL_NOMBRE_NUEVO} caracteres."
+            )
+        celdas: list[Celda] = []
+        for columna, celda in zip(columnas, fila[1:], strict=True):
+            if not _en_una_linea(celda):
+                continue
+            validado = _valor_para(columna, celda)
+            if isinstance(validado, str):
+                return f"Fila {numero} («{titulo}»), «{columna.nombre}»: {validado}"
+            celdas.append((columna, *validado))
+        validadas.append((titulo, tuple(celdas)))
+    return columnas, validadas
+
+
+def _linea_de_columna(columna: Propiedad) -> str:
+    if columna.tipo is TipoDePropiedad.SELECCION and columna.opciones:
+        return f"• {columna.nombre} (selección: {', '.join(columna.opciones)})"
+    return f"• {columna.nombre} ({columna.tipo})"
+
+
+def _linea_de_fila_nueva(numero: int, titulo: str, celdas: tuple[Celda, ...]) -> str:
+    datos = "".join(f" — {columna.nombre}: {mostrado}" for columna, _, mostrado in celdas)
+    return f"{numero}. {titulo}{datos}"
+
+
+def _base_a_medias(
+    nombre: str,
+    base_id: str,
+    creadas: int,
+    filas: Sequence[tuple[str, tuple[Celda, ...]]],
+    *,
+    en_duda: bool,
+) -> str:
+    """Una base creada con sus filas a medias: lo que quedó, lo que no y lo que no se sabe.
+
+    No usa los textos de una escritura suelta: "no se hizo nada" o "probá de
+    nuevo" invitarían a crear la base otra vez.
+    """
+    faltan = [titulo for titulo, _ in filas[creadas:]]
+    texto = (
+        f"Creé la base «{nombre}» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
+        f"Alcancé a crear {creadas} de {len(filas)} filas."
+    )
+    if en_duda and faltan:
+        texto += (
+            f" La fila «{faltan[0]}» puede haber quedado: Notion no lo confirmó, así que "
+            "fijate antes de sumarla."
+        )
+        faltan = faltan[1:]
+    if faltan:
+        texto += (
+            " Faltan: "
+            + ", ".join(f"«{titulo}»" for titulo in faltan)
+            + ". Se pueden sumar de a una, como filas nuevas de la base."
+        )
+    return texto
+
+
+async def _crear_base_en_notion(
+    paginas: Paginas,
+    runtime: Runtime,
+    id_pagina: str,
+    titulo: str,
+    columnas: Sequence[Columna],
+    filas: Sequence[Sequence[str]],
+) -> str:
+    """validar todo → leer la página real → (sí) → crear la base → sus filas, en orden."""
+    usuario_id = runtime.context.usuario_id
+    nombre = _en_una_linea(titulo)
+    if not nombre:
+        return "Falta el nombre de la base: ¿cómo se llama?"
+    if not _se_muestra_igual(nombre):
+        return "El nombre de la base no puede tener links (tampoco algo como «sitio.com») ni « »."
+    if len(nombre) > LARGO_MAXIMO_DEL_NOMBRE_NUEVO:
+        return "Ese nombre es muy largo para una base: ¿uno más corto?"
+    nuevas = _columnas_nuevas(columnas)
+    if isinstance(nuevas, str):
+        return nuevas
+    validadas = _filas_nuevas(filas, nuevas)
+    if isinstance(validadas, str):
+        return validadas
+    nuevas, filas_validas = validadas
+
+    padre = await _en_notion(paginas, usuario_id, id_pagina, "crear la base")
+    if isinstance(padre, str):
+        return padre
+    adonde = f"«{_dato_ajeno(padre.titulo)}»"
+    if padre.tipo is TipoDePagina.BASE:
+        return f"{adonde} es una base: una base nueva va adentro de una página."
+    lineas = [
+        f"Crear en tu Notion la base «{nombre}» adentro de {adonde}, con estas columnas:",
+        f"• {NOMBRE_DEL_TITULO} (el nombre de cada fila)",
+        *(_linea_de_columna(columna) for columna in nuevas),
+    ]
+    if filas_validas:
+        cuantas = "esta fila" if len(filas_validas) == 1 else f"estas {len(filas_validas)} filas"
+        lineas += ["", f"Y {cuantas}:"]
+        lineas += [
+            _linea_de_fila_nueva(numero, titulo_de_fila, celdas)
+            for numero, (titulo_de_fila, celdas) in enumerate(filas_validas, start=1)
+        ]
+    resumen = "\n".join(lineas)
+    if not _cabe_en_un_mensaje(runtime, resumen):
+        return (
+            "Es demasiado largo para mostrártelo entero antes de crearlo: hay que achicarlo "
+            "(menos filas o columnas) o partirlo."
+        )
+    if not _confirmar(runtime, resumen, comparte=True):
+        return "La persona lo canceló. No se creó nada."
+
+    try:
+        base = await paginas.crear_base(usuario_id, padre, nombre, tuple(nuevas))
+    except EntityNotFoundError:
+        return "Esa página ya no está en tu Notion, así que no creé la base."
+    except _FALLOS_AL_ESCRIBIR_EN_NOTION as exc:
+        return _fallo_al_escribir(exc, "crear la base", duplica=True)
+
+    # La base ya existe: a la bitácora ya mismo (PB-026). Si algo se cae en las
+    # filas, la respuesta igual la cuenta y nadie la pide de nuevo.
+    hecha = f"Creé la base «{nombre}» adentro de {adonde} (id: {base.id})"
+    indice = len(runtime.context.acciones_realizadas)
+    _hecho(runtime, hecha)
+    creadas = 0
+    for titulo_de_fila, celdas in filas_validas:
+        try:
+            await paginas.crear(
+                usuario_id, base, titulo_de_fila, (), tuple((c, valor) for c, valor, _ in celdas)
+            )
+        except LifeSyncError as exc:
+            logger.warning(
+                "agente.base_con_filas_a_medias",
+                usuario_id=str(usuario_id),
+                creadas=creadas,
+                filas=len(filas_validas),
+                tipo=type(exc).__name__,
+            )
+            return _base_a_medias(
+                nombre,
+                base.id,
+                creadas,
+                filas_validas,
+                en_duda=isinstance(exc, EscrituraEnDudaError),
+            )
+        creadas += 1
+        runtime.context.acciones_realizadas[indice] = (
+            f"{hecha}, con {creadas} de {len(filas_validas)} filas"
+        )
+
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="crear_base_en_notion",
+        usuario_id=str(usuario_id),
+        columnas=len(nuevas),
+        filas=creadas,
+    )
+    cuantas = "una fila" if creadas == 1 else f"{creadas} filas" if creadas else "sin filas"
+    link = f" — link: {base.enlace}" if base.enlace else ""
+    final = f"{hecha}, {'con ' if creadas else ''}{cuantas}{link}"
+    runtime.context.acciones_realizadas[indice] = final
+    return final
 
 
 async def _agregar_a_pagina_de_notion(
@@ -3411,7 +3858,7 @@ async def _agregar_a_pagina_de_notion(
             "(crear_pagina_en_notion, con la base como padre)."
         )
     resumen = f"Agregar al final de {nombre}, en tu Notion:\n\n{_como_queda(bloques)}"
-    if len(resumen) > MAX_CARACTERES_DE_LA_CONFIRMACION:
+    if not _cabe_en_un_mensaje(runtime, resumen):
         return "Es demasiado largo para mostrártelo entero antes de escribirlo: hay que acortarlo."
     if not _confirmar(runtime, resumen, comparte=True):
         return "La persona lo canceló. No se agregó nada."

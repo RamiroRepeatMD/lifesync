@@ -26,6 +26,7 @@ import pytest_asyncio
 
 from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
+from src.application.ports.paginas import Propiedad, TipoDePropiedad
 from src.domain.entities.archivo import Archivo
 from src.domain.entities.correo import Correo
 from src.domain.entities.evento import Evento
@@ -967,3 +968,79 @@ async def test_subilo_a_secas_con_drive_y_notion_pregunta_adonde() -> None:
     assert SENAL_DE_CONFIRMACION not in respuesta
     assert "drive" in respuesta.lower()
     assert "notion" in respuesta.lower()
+
+
+# --- Crear bases y filas con datos en Notion (RF-07) ------------------------------------
+
+
+async def test_la_base_de_la_semana_que_viene_pide_el_si_y_queda_con_las_fechas_bien() -> None:
+    """El pedido del QA del 28/10. Las fechas se calculan desde hoy, no se fijan."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+    hoy = datetime.now(ZONA_HORARIA).date()
+    proximo_lunes = hoy + timedelta(days=(7 - hoy.weekday()) % 7 or 7)
+
+    pregunta = await _turno_en(
+        modelo,
+        hilo,
+        "creá adentro de mi página de recetas de Notion una base de datos donde cada fila "
+        "sea un día de la semana que viene, con su fecha",
+    )
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert paginas.escrituras() == 0  # nada antes del sí
+    await _turno_en(modelo, hilo, "sí")
+    assert len(paginas.bases_creadas) == 1
+    fechas = [valor for datos in paginas.datos_de_creadas for _, valor in datos]
+    assert proximo_lunes in fechas  # el dato, no sólo la cantidad (§9, tests 7)
+
+
+async def test_una_base_del_tamano_maximo_llega_entera_a_la_pregunta() -> None:
+    """10 filas por 5 columnas: la llamada entera tiene que entrar en la salida del modelo."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+
+    respuesta = await _turno(
+        modelo,
+        "creá en mi página de recetas de Notion una base «Gastos de noviembre» con las "
+        "columnas Monto (número), Pagado (casilla), Rubro (selección), Vence (fecha) y Notas "
+        "(texto, vacía por ahora), con estas 10 filas: Luz 1500 pagado servicios 2026-11-10; "
+        "Gas 2300 sin pagar servicios 2026-11-12; Agua 800 pagado servicios 2026-11-15; "
+        "Internet 5000 sin pagar servicios 2026-11-18; Súper 12000 pagado comida 2026-11-05; "
+        "Verdulería 3500 sin pagar comida 2026-11-06; Nafta 9000 pagado auto 2026-11-07; "
+        "Seguro 15000 sin pagar auto 2026-11-20; Gimnasio 7000 pagado salud 2026-11-01; "
+        "Farmacia 2500 sin pagar salud 2026-11-09",
+    )
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "10. Farmacia" in respuesta
+    assert paginas.escrituras() == 0
+
+
+GASTOS_DE_NOTION = Pagina(
+    id="9a8b7c6d-5e4f-4321-9fed-cba987654321",
+    titulo="Gastos",
+    tipo=TipoDePagina.BASE,
+    editada=datetime.now(UTC) - timedelta(days=1),
+)
+
+
+async def test_una_fila_con_sus_datos_se_confirma_una_sola_vez() -> None:
+    """Antes, la fila salía sólo con el título y cada dato pedía otro sí."""
+    esquema = (
+        Propiedad(id="title", nombre="Concepto", tipo=TipoDePropiedad.TITULO),
+        Propiedad(id="m1", nombre="Monto", tipo=TipoDePropiedad.NUMERO),
+        Propiedad(id="v1", nombre="Vence", tipo=TipoDePropiedad.FECHA),
+    )
+    paginas = PaginasFalsas((GASTOS_DE_NOTION,), esquemas={GASTOS_DE_NOTION.id: esquema})
+    modelo = _agente_con_notion(paginas)
+
+    respuesta = await _turno(
+        modelo,
+        "sumá a mi base de Gastos de Notion una fila Gas con monto 1500 que vence el 2026-11-10",
+    )
+
+    assert SENAL_DE_CONFIRMACION in respuesta
+    assert "1.500" in respuesta
+    assert paginas.escrituras() == 0

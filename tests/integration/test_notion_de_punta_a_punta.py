@@ -97,7 +97,13 @@ class NotionFalso:
     credencial ya no vale. El refresco rota el par. Lo que no está compartido
     contesta 404 `object_not_found`, igual que lo que no existe, y una ruta
     desconocida también: así se ve si un pedido salió de los recursos. Con
-    `fallar_al_escribir`, toda escritura contesta eso (las lecturas andan).
+    `fallar_al_escribir`, toda escritura contesta eso (las lecturas andan),
+    salvo las primeras `escrituras_antes_de_fallar`.
+
+    Una base nueva tiene dos ids distintos, el suyo y el de su data source, y
+    su esquema guarda ids propios para cada columna: una fila que llega con
+    una columna o un valor que el esquema no tiene contesta 400, como Notion.
+    Con `base_parcial`, crear una base contesta sólo el id.
     """
 
     def __init__(self) -> None:
@@ -141,7 +147,10 @@ class NotionFalso:
         self.filas = {GASTOS: [self.paginas[LUZ]]}
         self.bloques: dict[str, list[dict[str, Any]]] = {}
         self.subidas: dict[str, dict[str, Any]] = {}
+        self.bases_de_datos: dict[str, dict[str, Any]] = {}
+        self.base_parcial = False
         self.fallar_al_escribir: httpx.Response | None = None
+        self.escrituras_antes_de_fallar = 0
         self.access_vigente = "access-1"
         self.refresh_vigente = "refresh-1"
         self.pedidos: list[httpx.Request] = []
@@ -155,9 +164,14 @@ class NotionFalso:
         if pedido.method == "POST" and pedido.url.path == "/v1/search":
             return self._buscar(pedido)
         if _es_escritura(pedido):
-            return self.fallar_al_escribir or self._escribir(pedido)
+            ya_escritas = len(self.escrituras()) > self.escrituras_antes_de_fallar
+            if self.fallar_al_escribir is not None and ya_escritas:
+                return self.fallar_al_escribir
+            return self._escribir(pedido)
         recurso, _, resto = pedido.url.path.removeprefix("/v1/").partition("/")
         identificador, _, sub = resto.partition("/")
+        if recurso == "databases" and identificador in self.bases_de_datos and not sub:
+            return httpx.Response(200, json=self.bases_de_datos[identificador])
         if pedido.url.path == "/v1/users/me":
             limites = {"max_file_upload_size_in_bytes": LIMITE_DEL_ESPACIO}
             return httpx.Response(
@@ -203,6 +217,8 @@ class NotionFalso:
         cuerpo = json.loads(pedido.content)
         if recurso == "pages" and not identificador:
             return self._crear(cuerpo)
+        if recurso == "databases" and not identificador:
+            return self._crear_base(cuerpo)
         pagina = self.paginas.get(identificador)
         if pagina is None or pagina.get("in_trash"):
             return _error(404, "object_not_found")
@@ -232,15 +248,79 @@ class NotionFalso:
             return _error(404, "object_not_found")
         nueva = str(uuid4())
         titulo = _plano(cuerpo["properties"]["title"]["title"])
+        propiedades = {"Nombre": {"id": "title", "type": "title", "title": titulo}}
+        if padre["type"] == "data_source_id":
+            esquema = self.bases[padre["data_source_id"]]["properties"]
+            for clave, valor in cuerpo["properties"].items():
+                if clave == "title":
+                    continue
+                # Por nombre o por id, como acepta Notion; y con el tipo del esquema.
+                propiedad = next(
+                    (p for nombre, p in esquema.items() if clave in (nombre, p["id"])), None
+                )
+                if propiedad is None or set(valor) != {propiedad["type"]}:
+                    return _error(400, "validation_error")
+                tipo = propiedad["type"]
+                if tipo in ("select", "status"):
+                    opciones = [o["name"] for o in propiedad[tipo].get("options", [])]
+                    if valor[tipo]["name"] not in opciones:
+                        return _error(400, "validation_error")
+                dato = _plano(valor[tipo]) if tipo == "rich_text" else valor[tipo]
+                propiedades[propiedad["name"]] = {"id": propiedad["id"], "type": tipo, tipo: dato}
         self.paginas[nueva] = {
             **_pagina(nueva, "Nueva"),
             "parent": padre,
-            "properties": {"Nombre": {"id": "title", "type": "title", "title": titulo}},
+            "properties": propiedades,
         }
         self.bloques[nueva] = list(cuerpo.get("children", []))
         if padre["type"] == "data_source_id":
             self.filas[padre["data_source_id"]].insert(0, self.paginas[nueva])
         return httpx.Response(200, json=self.paginas[nueva])
+
+    def _crear_base(self, cuerpo: dict[str, Any]) -> httpx.Response:
+        if cuerpo["parent"].get("page_id") not in self.paginas:
+            return _error(404, "object_not_found")
+        base_id, fuente_id = str(uuid4()), str(uuid4())  # distintos, como en Notion
+        propiedades = {}
+        for numero, (nombre, config) in enumerate(
+            cuerpo["initial_data_source"]["properties"].items()
+        ):
+            [tipo] = config
+            identificador = "title" if tipo == "title" else f"col{numero}"
+            propiedades[nombre] = {
+                "id": identificador,
+                "name": nombre,
+                "type": tipo,
+                tipo: config[tipo],
+            }
+        titulo = _plano(cuerpo["title"])
+        self.bases[fuente_id] = {
+            "object": "data_source",
+            "id": fuente_id,
+            "title": titulo,
+            "last_edited_time": EDITADA,
+            "parent": {"type": "database_id", "database_id": base_id},
+            "properties": propiedades,
+        }
+        self.filas[fuente_id] = []
+        self.bases_de_datos[base_id] = {
+            "object": "database",
+            "id": base_id,
+            "title": titulo,
+            "url": f"https://www.notion.so/{base_id.replace('-', '')}",
+            "last_edited_time": EDITADA,
+            "is_inline": cuerpo.get("is_inline", False),
+            "parent": cuerpo["parent"],
+            "data_sources": [{"id": fuente_id, "name": _titulo(self.bases[fuente_id])}],
+        }
+        if self.base_parcial:
+            return httpx.Response(200, json={"object": "database", "id": base_id})
+        return httpx.Response(200, json=self.bases_de_datos[base_id])
+
+    def base_nueva(self) -> tuple[str, dict[str, Any]]:
+        """El id del data source de la única base creada, y el data source."""
+        [fuente] = [b for b in self.bases.values() if b["id"] != GASTOS]
+        return fuente["id"], fuente
 
     def _actualizar(self, pagina: dict[str, Any], cuerpo: dict[str, Any]) -> httpx.Response:
         if cuerpo.get("in_trash") is True:
@@ -789,3 +869,152 @@ async def test_una_pagina_que_ordena_borrar_no_borra_sin_el_si() -> None:
     assert CONFIRMAR in pregunta
     await bot.decir("no")
     assert notion.escrituras() == []
+
+
+# --- Crear una base, y filas con datos (RF-07) ------------------------------------------
+
+SEMANA = [
+    ["Lunes", "2026-11-02"],
+    ["Martes", "2026-11-03"],
+    ["Miércoles", "2026-11-04"],
+    ["Jueves", "2026-11-05"],
+    ["Viernes", "2026-11-06"],
+    ["Sábado", "2026-11-07"],
+    ["Domingo", "2026-11-08"],
+]
+PEDIDO_DEL_QA = {
+    "id_pagina": RECETAS,
+    "titulo": "Semana que viene",
+    "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+    "filas": SEMANA,
+}
+
+
+async def test_el_pedido_del_qa_crea_la_base_adentro_de_la_pagina_y_sus_filas() -> None:
+    """ "Creá ahí dentro una base donde cada fila es un día de la semana que viene"."""
+    notion = NotionFalso()
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", PEDIDO_DEL_QA)), AIMessage("Listo."))
+
+    pregunta = await bot.decir(
+        "creá ahí dentro una base con un día de la semana que viene por fila"
+    )
+
+    assert CONFIRMAR in pregunta
+    assert "7. Domingo — Fecha: domingo 8 de noviembre de 2026" in pregunta
+    assert notion.escrituras() == []
+    await bot.decir("sí")
+    crear, *filas = notion.escrituras()
+    assert (crear.method, crear.url.path) == ("POST", "/v1/databases")
+    assert json.loads(crear.content) == {
+        "parent": {"type": "page_id", "page_id": RECETAS},
+        "title": [{"type": "text", "text": {"content": "Semana que viene"}}],
+        "is_inline": True,
+        "initial_data_source": {"properties": {"Nombre": {"title": {}}, "Fecha": {"date": {}}}},
+    }
+    fuente_id, fuente = notion.base_nueva()
+    [base_id] = notion.bases_de_datos
+    assert fuente_id != base_id
+    assert [json.loads(f.content)["parent"] for f in filas] == [
+        {"type": "data_source_id", "data_source_id": fuente_id}
+    ] * 7
+    assert [
+        (_titulo(f), f["properties"]["Fecha"]["date"]["start"])
+        for f in reversed(notion.filas[fuente_id])
+    ] == [tuple(fila) for fila in SEMANA]
+    assert _titulo(fuente) == "Semana que viene"
+    [hecho] = await bot.respuestas_de_tools()
+    assert hecho.startswith(
+        f"Creé la base «Semana que viene» adentro de «Recetas» (id: {fuente_id})"
+    )
+    assert ", con 7 filas — link: https://www.notion.so/" in hecho
+
+
+async def test_una_base_con_seleccion_y_numero_guarda_las_opciones_y_los_valores() -> None:
+    notion = NotionFalso()
+    args = {
+        "id_pagina": RECETAS,
+        "titulo": "Compras",
+        "columnas": [
+            {"nombre": "Pasillo", "tipo": "selección"},
+            {"nombre": "Precio", "tipo": "número"},
+        ],
+        "filas": [["Leche", "Lácteos", "1200"], ["Pan", "Panadería", "2500,5"]],
+    }
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Listo."))
+
+    await bot.decir("armame una base de compras")
+    await bot.decir("sí")
+
+    fuente_id, fuente = notion.base_nueva()
+    opciones = fuente["properties"]["Pasillo"]["select"]["options"]
+    assert opciones == [{"name": "Lácteos"}, {"name": "Panadería"}]
+    [pan, leche] = notion.filas[fuente_id]
+    assert (leche["properties"]["Pasillo"]["select"], leche["properties"]["Precio"]["number"]) == (
+        {"name": "Lácteos"},
+        1200,
+    )
+    assert pan["properties"]["Precio"]["number"] == 2500.5
+
+
+async def test_con_una_respuesta_parcial_pide_la_base_y_sigue_con_las_filas() -> None:
+    notion = NotionFalso()
+    notion.base_parcial = True
+    args = {**PEDIDO_DEL_QA, "filas": SEMANA[:2]}
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Listo."))
+
+    await bot.decir("creá la base")
+    await bot.decir("sí")
+
+    [base_id] = notion.bases_de_datos
+    assert f"/v1/databases/{base_id}" in [p.url.path for p in notion.pedidos if p.method == "GET"]
+    fuente_id, _ = notion.base_nueva()
+    assert len(notion.filas[fuente_id]) == 2
+
+
+async def test_si_notion_se_cae_a_mitad_cuenta_la_base_y_las_filas_que_quedaron() -> None:
+    """Un 503 en una escritura puede haberse guardado: esa fila queda en duda."""
+    notion = NotionFalso()
+    notion.fallar_al_escribir = _error(503, "service_unavailable")
+    notion.escrituras_antes_de_fallar = 2  # la base y el lunes
+    args = {**PEDIDO_DEL_QA, "filas": SEMANA[:3]}
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Cortó."))
+
+    await bot.decir("creá la base")
+    await bot.decir("sí")
+
+    fuente_id, _ = notion.base_nueva()
+    [texto] = await bot.respuestas_de_tools()
+    assert texto.startswith(f"Creé la base «Semana que viene» (id: {fuente_id}): ya existe")
+    assert "Alcancé a crear 1 de 3 filas." in texto
+    assert "La fila «Martes» puede haber quedado" in texto
+    assert "Faltan: «Miércoles»." in texto
+    assert len(notion.escrituras()) == 3  # no reintenta nada
+
+
+async def test_una_fila_nueva_lleva_sus_datos_por_el_id_de_cada_columna() -> None:
+    notion = NotionFalso()
+    args = {
+        "id_padre": GASTOS,
+        "titulo": "Gas",
+        "datos": [
+            {"columna": "monto", "valor": "1500"},
+            {"columna": "Estado", "valor": "pendiente"},
+        ],
+    }
+    bot = Bot(notion, _llamadas(("crear_pagina_en_notion", args)), AIMessage("Listo."))
+
+    pregunta = await bot.decir("sumá Gas a mis gastos: 1500, pendiente")
+
+    assert "• Monto: 1.500\n• Estado: «Pendiente»" in pregunta
+    await bot.decir("sí")
+    [crear] = notion.escrituras()
+    assert json.loads(crear.content)["properties"] == {
+        "title": {"title": [{"type": "text", "text": {"content": "Gas"}}]},
+        "m1": {"number": 1500},
+        "e1": {"status": {"name": "Pendiente"}},
+    }
+    gas = notion.filas[GASTOS][0]
+    assert (gas["properties"]["Monto"]["number"], gas["properties"]["Estado"]["status"]) == (
+        1500,
+        {"name": "Pendiente"},
+    )
