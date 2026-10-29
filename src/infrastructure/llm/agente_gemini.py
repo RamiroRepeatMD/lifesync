@@ -157,6 +157,31 @@ class AgenteGemini(AgenteConversacional):
         logger.info("agente.conversacion_olvidada", conversacion_id=str(conversacion_id))
         return True
 
+    async def cancelar_pendiente(self, conversacion_id: UUID) -> bool:
+        """Cancela lo que esperaba un sí, como un «no», fuera de un turno de la persona.
+
+        Con el candado de los turnos, como `olvidar`. Es el mismo camino que un
+        «no» (el modelo redacta la cancelación), pero esa respuesta no se manda:
+        la persona recibe la explicación del comando.
+        """
+        configuracion = {
+            "configurable": {"thread_id": _hilo_de(conversacion_id)},
+            "recursion_limit": LIMITE_DE_PASOS,
+        }
+        async with self._candado_de(conversacion_id):
+            if await self._interrupcion_pendiente(configuracion) is None:
+                return False
+            # La conversación de una persona es la de su id (ProcesarMensajeEntrante).
+            contexto = ContextoDeAgente(usuario_id=conversacion_id)
+            await self._invocar(Command(resume={"aprobado": False}), configuracion, contexto)
+        logger.info(
+            "agente.confirmacion_cancelada",
+            conversacion_id=str(conversacion_id),
+            explicita=False,
+            por_comando=True,
+        )
+        return True
+
     async def _responder(self, consulta: ConsultaDelUsuario) -> str:
         """Corre un turno de conversación y devuelve el texto de respuesta.
 

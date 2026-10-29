@@ -33,6 +33,7 @@ async def test_contesta_siempre_lo_mismo() -> None:
 
 async def test_no_tiene_conversacion_que_olvidar() -> None:
     assert await AgenteDegradado().olvidar(uuid4()) is False
+    assert await AgenteDegradado().cancelar_pendiente(uuid4()) is False
 
 
 def test_cumple_el_puerto() -> None:

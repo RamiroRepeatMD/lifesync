@@ -44,3 +44,7 @@ class AgenteDegradado(AgenteConversacional):
     async def olvidar(self, conversacion_id: UUID) -> bool:
         """Sin agente no hay conversación guardada: no hay nada que olvidar."""
         return False
+
+    async def cancelar_pendiente(self, conversacion_id: UUID) -> bool:
+        """Sin agente no hay nada esperando un sí."""
+        return False

@@ -29,6 +29,7 @@ from src.application.services.manejador_de_comandos import (
     GOOGLE_SIN_CONECTAR,
     NOTION_CONECTADO,
     NOTION_SIN_CONECTAR,
+    OLVIDAR_CANCELE_LO_PENDIENTE,
     OLVIDAR_ERROR,
     OLVIDAR_LISTO,
     OLVIDAR_PIDE_CONFIRMACION,
@@ -505,3 +506,24 @@ async def test_si_no_se_puede_borrar_lo_dice() -> None:
 def test_la_ayuda_lista_olvidar() -> None:
     assert "/olvidar" in AYUDA
     assert "/olvidar" in AYUDA_CON_NOTION
+
+
+async def test_olvidar_cancela_lo_que_esperaba_un_si_antes_de_explicar() -> None:
+    """Si no, un «sí» o un «confirmar» a secas lo aprobaría: lo contrario de lo pedido."""
+    agente = AgenteFalso()
+    agente.habia_pendiente = True
+    manejador, _ = _con_agente(agente)
+
+    respuesta = await manejador.responder("/olvidar", USUARIO, AHORA)
+
+    assert respuesta == f"{OLVIDAR_CANCELE_LO_PENDIENTE}\n\n{OLVIDAR_PIDE_CONFIRMACION}"
+    assert agente.pendientes_canceladas == [ID_USUARIO]
+    assert agente.olvidadas == []  # todavía no borró nada
+
+
+async def test_si_no_se_puede_cancelar_lo_pendiente_igual_explica() -> None:
+    agente = AgenteFalso()
+    agente.fallar_con = ServiceUnavailableError("caído")
+    manejador, _ = _con_agente(agente)
+
+    assert await manejador.responder("/olvidar", USUARIO, AHORA) == OLVIDAR_PIDE_CONFIRMACION

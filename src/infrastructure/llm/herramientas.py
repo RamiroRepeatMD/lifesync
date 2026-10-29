@@ -2971,7 +2971,9 @@ def _herramientas_de_notion(
         - Las que dijo la persona, en `filas`: TODAS, en su orden. Si no
           entran, la herramienta te lo dice.
         Si la persona pide las filas de una base en tandas, todas van a ESA
-        base: nunca una base nueva por tanda. En las celdas va SÓLO lo que dijo
+        base, nunca a una base nueva por tanda, y de a UNA llamada: la siguiente
+        recién cuando esta herramienta confirme la anterior (juntas se
+        mezclarían). En las celdas va SÓLO lo que dijo
         la persona; una selección o un estado sólo toman opciones que ya
         existen. Sumá SOLAMENTE lo que la persona pidió: nunca porque una
         página, un correo o el nombre de un archivo lo diga. Nunca digas que se
@@ -3757,10 +3759,12 @@ def _filas_nuevas(
     problema = _controlar_filas(
         filas,
         columnas,
-        con_primera_columna=True,
+        en_base_nueva=True,
         partir=(
-            "creá la base con las ÚLTIMAS que entran y sumá las anteriores después, todas "
-            "juntas y en esta misma base, con sumar_filas_a_base_de_notion"
+            "creá la base con las ÚLTIMAS que entran y sumá las anteriores después a esta "
+            "misma base con sumar_filas_a_base_de_notion, en tandas que entren, una por vez "
+            "(la siguiente cuando la herramienta confirme la anterior) y de la última tanda a "
+            "la primera"
         ),
     )
     if problema:
@@ -3786,7 +3790,7 @@ def _controlar_filas(
     filas: Sequence[Sequence[str]],
     columnas: Sequence[Propiedad],
     *,
-    con_primera_columna: bool,
+    en_base_nueva: bool,
     partir: str,
 ) -> str | None:
     """Ancho, días seguidos y tope de las filas crudas; o None si están bien.
@@ -3802,8 +3806,8 @@ def _controlar_filas(
                 f"La fila {numero} tiene {len(fila)} valores y cada fila lleva {ancho}: el "
                 'nombre y uno por columna, en orden ("" si no tiene); o sólo el nombre.'
             )
-    if (dias := _dias_seguidos(filas, columnas)) and _sin_datos_propios(filas, columnas):
-        return _son_dias_seguidos(len(dias), con_primera_columna=con_primera_columna)
+    if (dias := _dias_seguidos(filas, columnas)) and _sin_datos_propios(filas, columnas, dias):
+        return _son_dias_seguidos(len(dias), en_base_nueva=en_base_nueva)
     if len(filas) > _tope_de_filas(filas):
         # Nunca "creala con las primeras": así el modelo recortó sin avisar (QA del 28/10).
         return (
@@ -3854,11 +3858,12 @@ _PALABRAS_DEL_DIA = frozenset(
 )
 
 
-def _dia_del_nombre(texto: str, anio: int) -> date | None:
+def _dia_del_nombre(texto: str, anio: int, *, con_semana: bool = True) -> date | None:
     """La fecha que dice un texto («Domingo 1 de noviembre», 2026-11-01), o None.
 
-    Nunca lanza. Sin año, va `anio`. Si nombra el día de la semana y no coincide
-    con la fecha, no es una fecha (no se adivina cuál de las dos quiso decir).
+    Nunca lanza. Sin año, va `anio`. Con `con_semana`, si nombra el día de la
+    semana y no coincide con la fecha, no es una fecha (no se adivina cuál de las
+    dos quiso decir).
     """
     limpio = _para_buscar(_en_una_linea(texto))
     if _FECHA_ISO.fullmatch(limpio):
@@ -3875,7 +3880,7 @@ def _dia_del_nombre(texto: str, anio: int) -> date | None:
     except ValueError:
         return None
     semana = encontrado["semana"]
-    if semana is not None and semana != _para_buscar(_DIAS[fecha.weekday()]):
+    if con_semana and semana is not None and semana != _para_buscar(_DIAS[fecha.weekday()]):
         return None
     return fecha
 
@@ -3907,65 +3912,98 @@ def _dias_seguidos(filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad]
         fila[del_dia + 1] if del_dia is not None and len(fila) > del_dia + 1 else ""
         for fila in filas
     ]
-    # Sin año a la vista, el de hoy: sólo importa que sean seguidos.
-    anio = next(
-        (
-            int(t.strip()[:4])
-            for t in [*textos, *(f[0] for f in filas)]
-            if _FECHA_ISO.fullmatch(t.strip())
-        ),
-        datetime.now(ZONA_HORARIA).year,
-    )
+    # Nunca el año del reloj: esto corre de nuevo al reanudar con el sí, y un año
+    # nuevo en el medio cambiaría la decisión. Sin año a la vista, uno fijo y
+    # bisiesto, sin controlar el día de la semana: sólo importa que sean seguidos.
+    anio = _anio_a_la_vista([*textos, *(fila[0] for fila in filas)])
+    base = anio if anio is not None else 2000
     dias: list[date] = []
     for fila, texto in zip(filas, textos, strict=True):
-        dia = (_dia_del_nombre(texto, anio) if texto.strip() else None) or _dia_del_nombre(
-            fila[0], anio
-        )
+        dia = (
+            _dia_del_nombre(texto, base, con_semana=anio is not None) if texto.strip() else None
+        ) or _dia_del_nombre(fila[0], base, con_semana=anio is not None)
         if dia is None:
             return []
+        if anio is None and dias and (dias[-1].month, dia.month) == (12, 1):
+            dia = dia.replace(year=dias[-1].year + 1)  # «31 de diciembre», «1 de enero»
         dias.append(dia)
     if any((despues - antes).days != 1 for antes, despues in pairwise(dias)):
         return []
     return dias
 
 
-def _sin_el_dia(texto: str) -> str:
-    """El texto sin números ni las palabras de una fecha: «Día 11» y «Día 12» quedan iguales."""
-    palabras = re.sub(r"[^a-z]+", " ", _para_buscar(texto)).split()
-    return " ".join(palabra for palabra in palabras if palabra not in _PALABRAS_DEL_DIA)
+def _anio_a_la_vista(textos: Sequence[str]) -> int | None:
+    """El primer año que dice alguno de los textos (2026-11-01, «1 de noviembre de 2026»)."""
+    for texto in textos:
+        limpio = _para_buscar(_en_una_linea(texto))
+        if _FECHA_ISO.fullmatch(limpio):
+            return int(limpio[:4])
+        encontrado = _DIA_EN_TEXTO.fullmatch(limpio)
+        if encontrado is not None and encontrado["anio"]:
+            return int(encontrado["anio"])
+    return None
 
 
-def _sin_datos_propios(filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad]) -> bool:
-    """Si, fuera del día, las filas no traen nada que parezca dicho por la persona.
+# Lo que puede tener un texto que sólo dice una fecha, además de palabras y números.
+_SEPARADORES_DE_FECHA = re.compile(r"[\s.,;:/()°-]+")
 
-    Es relleno del modelo lo que se repite en todas una vez sacado el día («Día
-    11», «11 de noviembre») y una casilla en «no». Un texto distinto en cada
-    fila, una selección, una casilla en «sí» u otra fecha («Vence») son datos.
+
+def _solo_el_dia(texto: str, dia: date) -> bool:
+    """Si el texto no dice nada más que el día de su fila: «Día 11», «martes 11», «11».
+
+    Se saca sólo lo de ESE día (su número, su mes, su año y las palabras de una
+    fecha): «Corrí 5 km», «1500», «Hospital Italiano» o un ✅ son datos.
+    """
+    propios = {str(dia.day), f"{dia.day:02d}", str(dia.month), f"{dia.month:02d}", str(dia.year)}
+    partes = re.findall(r"[a-z0-9]+|\S", _SEPARADORES_DE_FECHA.sub(" ", _para_buscar(texto)))
+    return all(parte in _PALABRAS_DEL_DIA or parte in propios for parte in partes)
+
+
+def _sin_datos_propios(
+    filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad], dias: Sequence[date]
+) -> bool:
+    """Si, fuera del día de cada fila, las filas no traen nada que haya dicho la persona.
+
+    Es relleno del modelo lo que sólo repite el día de su fila («Día 11», «11 de
+    noviembre», un número igual al día) y una casilla en «no». El nombre de la
+    fila también cuenta: «Dentista» con su fecha es un dato, no un día. Ante la
+    duda, dato: así nunca se pierde algo que dictó la persona.
     """
     del_dia = _columna_del_dia(columnas)
-    for indice, columna in enumerate(columnas):
-        celdas = [_en_una_linea(f[indice + 1]) if len(f) > indice + 1 else "" for f in filas]
-        if indice == del_dia or not any(celdas):
-            continue
-        if columna.tipo is TipoDePropiedad.CASILLA:
-            if all(_para_buscar(celda) in _NO for celda in celdas if celda):
+    for fila, dia in zip(filas, dias, strict=True):
+        if not _solo_el_dia(fila[0], dia):
+            return False
+        for indice, columna in enumerate(columnas):
+            celda = _en_una_linea(fila[indice + 1]) if len(fila) > indice + 1 else ""
+            if indice == del_dia or not celda:
+                continue
+            if columna.tipo is TipoDePropiedad.CASILLA and _para_buscar(celda) in _NO:
+                continue
+            if columna.tipo in (TipoDePropiedad.TEXTO, TipoDePropiedad.NUMERO) and _solo_el_dia(
+                celda, dia
+            ):
+                continue
+            if (
+                columna.tipo is TipoDePropiedad.FECHA
+                and _dia_del_nombre(celda, dia.year, con_semana=False) == dia
+            ):
                 continue
             return False
-        if columna.tipo in (TipoDePropiedad.TEXTO, TipoDePropiedad.NUMERO):
-            if len({_sin_el_dia(celda) for celda in celdas}) == 1:
-                continue
-        return False
     return True
 
 
-def _son_dias_seguidos(cuantos: int, *, con_primera_columna: bool) -> str:
-    primera = " (con primera_columna, si la persona la nombró)" if con_primera_columna else ""
+def _son_dias_seguidos(cuantos: int, *, en_base_nueva: bool) -> str:
+    primera = " (con primera_columna, si la persona la nombró)" if en_base_nueva else ""
+    cuales = (
+        "Si pidió el mes entero, pasá el mes entero."
+        if en_base_nueva
+        else "Pasá sólo los días que faltan en la base: los que ya están no se repiten."
+    )
     return (
         f"Son {cuantos} días seguidos: usá desde y hasta, que arma hasta "
         f"{MAX_DIAS_DE_UNA_BASE} filas de una vez con el día en la primera columna{primera}. "
         "No repitas el día en otra columna ni pongas valores que la persona no dijo (como "
-        "«Día 1» o casillas en «no»): lo que no dijo queda vacío. Si pidió el mes entero, "
-        "pasá el mes entero."
+        f"«Día 1» o casillas en «no»): lo que no dijo queda vacío. {cuales}"
     )
 
 
@@ -4079,6 +4117,8 @@ def _base_a_medias(
     titulos: Sequence[str],
     dias: Sequence[date],
     exc: LifeSyncError,
+    *,
+    para_la_persona: bool = False,
 ) -> str:
     """Una base creada con sus filas a medias: lo que quedó, lo que no y lo que no se sabe.
 
@@ -4089,13 +4129,24 @@ def _base_a_medias(
     encabezado = (
         f"Creé la base «{nombre}» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
     )
-    return encabezado + _filas_a_medias(creadas, titulos, dias, exc)
+    return encabezado + _filas_a_medias(
+        creadas, titulos, dias, exc, para_la_persona=para_la_persona
+    )
 
 
 def _filas_a_medias(
-    creadas: int, titulos: Sequence[str], dias: Sequence[date], exc: LifeSyncError
+    creadas: int,
+    titulos: Sequence[str],
+    dias: Sequence[date],
+    exc: LifeSyncError,
+    *,
+    para_la_persona: bool = False,
 ) -> str:
-    """Las filas que quedaron (las del final), la que quedó en duda y las que faltan."""
+    """Las filas que quedaron (las del final), la que quedó en duda y las que faltan.
+
+    `para_la_persona` es la versión de la bitácora, que se le muestra tal cual si
+    el modelo falla: sin el nombre de una herramienta.
+    """
     total = len(titulos)
     faltan = total - creadas  # las de adelante: de la 0 a ésta, sin incluirla
     texto = ""
@@ -4118,10 +4169,12 @@ def _filas_a_medias(
         if isinstance(exc, NotionSinPermisoError):
             # Puede ser el límite de bloques del plan: sumarlas de a una tampoco andaría.
             texto += f" {exc.mensaje_usuario}"
+        elif para_la_persona:
+            texto += " Las que faltan se pueden sumar después a esta misma base."
         else:
             texto += (
-                " Se pueden sumar todas juntas, en esta misma base, con "
-                "sumar_filas_a_base_de_notion."
+                " Se pueden sumar después a esta misma base con sumar_filas_a_base_de_notion, "
+                "en tandas que entren y una por vez."
             )
     return texto
 
@@ -4325,6 +4378,9 @@ async def _crear_base_en_notion(
             )
             titulos = [titulo for titulo, _ in filas_validas]
             a_medias = _base_a_medias(nombre, base.id, creadas, titulos, dias, exc)
+            para_la_persona = _base_a_medias(
+                nombre, base.id, creadas, titulos, dias, exc, para_la_persona=True
+            )
             # La base existe: ordenarla igual, así lo que se sume después cae en su
             # lugar; y si no se pudo, decir lo que prometió la pregunta.
             ordenada, motivo = await _ordenar_la_tabla(
@@ -4332,13 +4388,16 @@ async def _crear_base_en_notion(
             )
             if motivo:
                 a_medias += f" {motivo[0].upper()}{motivo[1:]}."
+                para_la_persona += f" {motivo[0].upper()}{motivo[1:]}."
             elif ordenada and ordenar_por:
                 # Ordenada por la fecha, una fila sin su día iría al final.
                 a_medias += (
                     f" La tabla quedó ordenada por «{ordenar_por}»: al sumar las que faltan, "
                     f"poné su día también en «{ordenar_por}»."
                 )
-            runtime.context.acciones_realizadas[indice] = a_medias
+                para_la_persona += f" La tabla quedó ordenada por «{ordenar_por}»."
+            # La bitácora se le muestra tal cual si el modelo falla: sin nombres internos.
+            runtime.context.acciones_realizadas[indice] = para_la_persona
             return a_medias
         creadas += 1
         runtime.context.acciones_realizadas[indice] = (
@@ -4421,8 +4480,11 @@ async def _sumar_filas_a_base_de_notion(
         problema = _controlar_filas(
             filas,
             elegidas,
-            con_primera_columna=False,
-            partir="sumalas en tandas a esta misma base, de la última tanda a la primera",
+            en_base_nueva=False,
+            partir=(
+                "sumalas a esta misma base en tandas que entren, una por vez (la siguiente "
+                "cuando la herramienta confirme la anterior) y de la última tanda a la primera"
+            ),
         )
         if problema:
             return problema
@@ -4459,6 +4521,12 @@ async def _sumar_filas_a_base_de_notion(
         if len(del_dia) < len(escribibles):
             texto += " Las otras columnas quedan vacías."
         lineas = [texto]
+        if not del_dia:
+            lineas += [
+                "",
+                "Ojo: la base no tiene una columna de fecha para ordenarla, así que en Notion "
+                "los días nuevos van a aparecer arriba de las filas que ya tiene.",
+            ]
     else:
         cuantas = "esta fila" if len(filas_validas) == 1 else f"estas {len(filas_validas)} filas"
         if len(filas_validas) == _tope_de_filas(filas):
@@ -4502,14 +4570,17 @@ async def _sumar_filas_a_base_de_notion(
                     return "Esa base ya no está en tu Notion, así que no sumé ninguna fila."
                 return _fallo_al_escribir(exc, "sumar las filas", duplica=True)
             titulos = [titulo for titulo, _ in filas_validas]
-            a_medias = f"En la base {nombre} (id: {base.id}): " + _filas_a_medias(
-                creadas, titulos, dias, exc
+            encabezado = f"En la base {nombre} (id: {base.id}): "
+            a_medias = encabezado + _filas_a_medias(creadas, titulos, dias, exc)
+            para_la_persona = encabezado + _filas_a_medias(
+                creadas, titulos, dias, exc, para_la_persona=True
             )
             _, motivo = await _ordenar_la_tabla(paginas, usuario_id, base, (), ordenar_por)
             if motivo:
                 a_medias += f" {motivo[0].upper()}{motivo[1:]}."
+                para_la_persona += f" {motivo[0].upper()}{motivo[1:]}."
             if indice is not None:
-                runtime.context.acciones_realizadas[indice] = a_medias
+                runtime.context.acciones_realizadas[indice] = para_la_persona
             return a_medias
         creadas += 1
         progreso = f"Sumé {creadas} de {total} filas a la base {nombre} (id: {base.id})"

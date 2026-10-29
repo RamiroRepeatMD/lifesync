@@ -110,14 +110,16 @@ DESCONECTAR_SIN_REVOCAR = (
 )
 
 
-# Como /desconectar: dos pasos sin estado. Nunca "¿Confirmás?": con una acción
-# esperando su sí, un "sí" la aprobaría a ella y no al olvido.
+# Como /desconectar: dos pasos sin estado. Nunca "¿Confirmás?". Y lo que estaba
+# esperando un sí se cancela en el primer paso: si no, un «sí» o un «confirmar» a
+# secas lo aprobaría, justo lo que la persona quiere descartar.
 OLVIDAR_PIDE_CONFIRMACION = (
-    "Vas a borrar lo que hablamos: me olvido de la conversación y de lo que esté esperando "
-    "tu «sí». No toca tus cuentas conectadas, tus recordatorios ni nada de tu Google o tu "
-    "Notion. Los archivos que me mandaste antes ya no los voy a poder subir.\n\n"
+    "Vas a borrar lo que hablamos: me olvido de la conversación. No toca tus cuentas "
+    "conectadas, tus recordatorios ni nada de tu Google o tu Notion. Los archivos que me "
+    "mandaste antes ya no los voy a poder subir.\n\n"
     "Para confirmar, escribí: /olvidar confirmar"
 )
+OLVIDAR_CANCELE_LO_PENDIENTE = "Cancelé lo que estaba esperando tu «sí»: no se hizo."
 OLVIDAR_LISTO = "Listo, me olvidé de lo que hablamos: empezamos de cero."
 OLVIDAR_SIN_CONVERSACION = (
     "No hay nada que olvidar: no tengo guardada ninguna conversación con vos."
@@ -349,6 +351,8 @@ class ManejadorDeComandos:
         una persona es la de su id, la misma que arma `ProcesarMensajeEntrante`.
         """
         if not confirmado:
+            if await self._cancelar_lo_pendiente(usuario):
+                return f"{OLVIDAR_CANCELE_LO_PENDIENTE}\n\n{OLVIDAR_PIDE_CONFIRMACION}"
             return OLVIDAR_PIDE_CONFIRMACION
         if self._agente is None or usuario.id is None:
             return OLVIDAR_SIN_CONVERSACION
@@ -360,3 +364,15 @@ class ManejadorDeComandos:
             )
             return OLVIDAR_ERROR
         return OLVIDAR_LISTO if habia else OLVIDAR_SIN_CONVERSACION
+
+    async def _cancelar_lo_pendiente(self, usuario: Usuario) -> bool:
+        """Cancela lo que esperaba un sí; si no se puede, la explicación sale igual."""
+        if self._agente is None or usuario.id is None:
+            return False
+        try:
+            return await self._agente.cancelar_pendiente(usuario.id)
+        except Exception as exc:  # el comando nunca deja a la persona sin respuesta
+            logger.error(
+                "comando.cancelacion_fallida", usuario_id=str(usuario.id), tipo=type(exc).__name__
+            )
+            return False

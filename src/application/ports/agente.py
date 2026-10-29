@@ -47,3 +47,12 @@ class AgenteConversacional(ABC):
         Raises:
             ServiceUnavailableError: Si no se pudo borrar.
         """
+
+    @abstractmethod
+    async def cancelar_pendiente(self, conversacion_id: UUID) -> bool:
+        """Cancela, como un «no», lo que esté esperando una confirmación (RF-08).
+
+        Lo usa /olvidar antes de explicar: si no, un «sí» a secas aprobaría lo
+        pendiente, justo lo que la persona quiere descartar. Devuelve True si
+        había algo esperando.
+        """

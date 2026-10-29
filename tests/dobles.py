@@ -244,6 +244,8 @@ class AgenteFalso(AgenteConversacional):
         self.fallar_con: Exception | None = None
         self.olvidadas: list[UUID] = []
         self.habia_conversacion = True
+        self.pendientes_canceladas: list[UUID] = []
+        self.habia_pendiente = False
 
     async def responder(self, consulta: ConsultaDelUsuario) -> str:
         self.consultas.append(consulta)
@@ -256,6 +258,12 @@ class AgenteFalso(AgenteConversacional):
         if self.fallar_con is not None:
             raise self.fallar_con
         return self.habia_conversacion
+
+    async def cancelar_pendiente(self, conversacion_id: UUID) -> bool:
+        self.pendientes_canceladas.append(conversacion_id)
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        return self.habia_pendiente
 
     @property
     def textos(self) -> list[str]:

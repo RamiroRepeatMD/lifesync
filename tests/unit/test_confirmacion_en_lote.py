@@ -387,3 +387,25 @@ async def test_olvidar_borra_la_conversacion_y_lo_que_esperaba_el_si() -> None:
 
 async def test_olvidar_sin_haber_hablado_no_tiene_nada_que_borrar() -> None:
     assert await Bot().olvidar() is False
+
+
+async def test_olvidar_cancela_lo_pendiente_y_un_confirmar_suelto_ya_no_aprueba_nada() -> None:
+    """«confirmar» está entre los síes, y era la palabra que mostraba /olvidar."""
+    bot = Bot(
+        _llamadas(EVENTO, TAREA),
+        AIMessage("Ok, no hago nada."),
+        AIMessage("¿Confirmar qué? No tengo nada pendiente."),
+    )
+    await bot.decir("agendame dentista el lunes a las 16 y anotá el regalo")
+
+    assert await bot._agente.cancelar_pendiente(USUARIO) is True
+
+    assert (await bot.estado()).interrupts == ()
+    assert await bot.decir("confirmar") == "¿Confirmar qué? No tengo nada pendiente."
+    assert bot.calendario.creados == []
+    assert bot.tareas.creadas == []
+
+
+async def test_sin_nada_pendiente_no_hay_que_cancelar() -> None:
+    assert await Bot().olvidar() is False
+    assert await Bot()._agente.cancelar_pendiente(USUARIO) is False

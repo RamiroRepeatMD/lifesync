@@ -966,10 +966,16 @@ async def test_si_se_corta_a_mitad_dice_cuantas_filas_quedaron_y_no_invita_a_rep
     assert texto == (
         f"Creé la base «Semana» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
         "Alcancé a crear 1 de 3 filas: «Miércoles». Faltan «Lunes», «Martes». Se pueden "
-        "sumar todas juntas, en esta misma base, con sumar_filas_a_base_de_notion."
+        "sumar después a esta misma base con sumar_filas_a_base_de_notion, en tandas que "
+        "entren y una por vez."
     )
-    # La bitácora dice lo mismo: si el modelo se cae, la persona sabe qué falta.
-    assert escena.contexto.acciones_realizadas == [texto]
+    # La bitácora dice lo mismo, pero para la persona: se le muestra tal cual si el
+    # modelo se cae, así que sin el nombre de una herramienta.
+    assert escena.contexto.acciones_realizadas == [
+        f"Creé la base «Semana» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
+        "Alcancé a crear 1 de 3 filas: «Miércoles». Faltan «Lunes», «Martes». Las que faltan "
+        "se pueden sumar después a esta misma base."
+    ]
 
 
 async def test_una_fila_en_duda_se_dice_aparte_y_no_se_reintenta() -> None:
@@ -1504,9 +1510,13 @@ async def test_si_las_filas_se_cortan_igual_ordena_y_si_no_puede_lo_dice() -> No
 
     texto = _respuesta(estado)
     assert texto.endswith(
-        "con sumar_filas_a_base_de_notion. No pude ordenarlas por «Fecha»: se puede desde Notion."
+        "en tandas que entren y una por vez. No pude ordenarlas por «Fecha»: se puede desde Notion."
     )
-    assert escena.contexto.acciones_realizadas == [texto]
+    [bitacora] = escena.contexto.acciones_realizadas
+    assert bitacora.endswith(
+        "Las que faltan se pueden sumar después a esta misma base. No pude ordenarlas por "
+        "«Fecha»: se puede desde Notion."
+    )
 
 
 async def test_con_filas_a_medias_la_tabla_queda_ordenada_si_se_puede() -> None:
@@ -1681,6 +1691,15 @@ def test_la_columna_del_dia_gana_al_nombre_de_la_fila() -> None:
         (_columna("Rubro", TipoDePropiedad.SELECCION), ["A", "A", "A"], False),
         (_columna("Vence", TipoDePropiedad.FECHA), ["2026-11-30"] * 3, False),
         (_columna("Notas", TipoDePropiedad.TEXTO), ["", "", ""], True),
+        # La revisión del 29/10: lo que dictó la persona nunca es relleno.
+        (_columna("Monto", TipoDePropiedad.NUMERO), ["1500", "2300", "800"], False),
+        (_columna("Lugar", TipoDePropiedad.TEXTO), ["Hospital Italiano"] * 3, False),
+        (
+            _columna("Notas", TipoDePropiedad.TEXTO),
+            ["Corrí 3 km", "Corrí 4 km", "Corrí 5 km"],
+            False,
+        ),
+        (_columna("Hecho", TipoDePropiedad.TEXTO), ["✅", "❌", "✅"], False),
     ],
     ids=[
         "casillas_en_no",
@@ -1692,6 +1711,10 @@ def test_la_columna_del_dia_gana_al_nombre_de_la_fila() -> None:
         "seleccion",
         "otra_fecha",
         "vacias",
+        "montos",
+        "el_mismo_valor_real",
+        "texto_con_numeros",
+        "emojis",
     ],
 )
 def test_que_cuenta_como_dato_propio(columna: Propiedad, celdas: list[str], esperado: bool) -> None:
@@ -1699,8 +1722,9 @@ def test_que_cuenta_como_dato_propio(columna: Propiedad, celdas: list[str], espe
         [f"{d} de noviembre", f"2026-11-0{d}", celda]
         for d, celda in zip((3, 4, 5), celdas, strict=True)
     ]
+    dias = [date(2026, 11, d) for d in (3, 4, 5)]
 
-    assert _sin_datos_propios(filas, [FECHA, columna]) is esperado
+    assert _sin_datos_propios(filas, [FECHA, columna], dias) is esperado
 
 
 # --- Sumar filas a una base que ya existe (QA del 29/10) ---------------------------
@@ -1858,7 +1882,7 @@ async def test_filas_solo_con_nombre_y_sin_columnas() -> None:
                 "columnas": ["Monto"],
                 "filas": [[f"F{n}", "1"] for n in range(11)],
             },
-            "sumalas en tandas a esta misma base, de la última tanda a la primera",
+            "sumalas a esta misma base en tandas que entren, una por vez",
         ),
         (
             {
@@ -1917,10 +1941,13 @@ async def test_si_se_corta_a_mitad_cuenta_cuales_quedaron_en_la_misma_base() -> 
     texto = _respuesta(estado)
     assert texto == (
         f"En la base «Gastos» (id: {BASE_ID}): Alcancé a crear 1 de 3 filas: «Luz». Faltan "
-        "«Gas», «Agua». Se pueden sumar todas juntas, en esta misma base, con "
-        "sumar_filas_a_base_de_notion."
+        "«Gas», «Agua». Se pueden sumar después a esta misma base con "
+        "sumar_filas_a_base_de_notion, en tandas que entren y una por vez."
     )
-    assert escena.contexto.acciones_realizadas == [texto]
+    assert escena.contexto.acciones_realizadas == [
+        f"En la base «Gastos» (id: {BASE_ID}): Alcancé a crear 1 de 3 filas: «Luz». Faltan "
+        "«Gas», «Agua». Las que faltan se pueden sumar después a esta misma base."
+    ]
 
 
 async def test_los_nombres_de_una_base_ajena_se_muestran_saneados() -> None:
@@ -1936,3 +1963,85 @@ async def test_los_nombres_de_una_base_ajena_se_muestran_saneados() -> None:
     pregunta = _pregunta(estado)
     assert "sitio-falso.com" not in pregunta
     assert "[link quitado]" in pregunta
+
+
+# --- La revisión adversarial del 29/10: lo que dictó la persona no es relleno ----------
+
+
+async def test_montos_de_dias_seguidos_se_confirman_como_filas() -> None:
+    """«11 de noviembre 1500, 12 de noviembre 2300…»: los montos son de la persona."""
+    escena = Escena()
+    args = _con(
+        columnas=[{"nombre": "Monto", "tipo": "número"}],
+        filas=[
+            ["11 de noviembre", "1500"],
+            ["12 de noviembre", "2300"],
+            ["13 de noviembre", "800"],
+        ],
+    )
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert "Y estas 3 filas:" in _pregunta(estado)
+
+
+async def test_nombres_con_fechas_seguidas_se_confirman_como_filas() -> None:
+    """«Dentista el 11, gimnasio el 12…»: con el período se perderían los nombres."""
+    escena = Escena()
+    filas = [
+        ["Dentista", "2026-11-11"],
+        ["Gimnasio", "2026-11-12"],
+        ["Cumpleaños de Ana", "2026-11-13"],
+    ]
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
+
+    assert "3. Cumpleaños de Ana — Fecha: viernes 13 de noviembre de 2026" in _pregunta(estado)
+
+
+async def test_dias_de_la_semana_con_su_fecha_igual_van_como_periodo() -> None:
+    """El nombre «Lunes» sólo dice el día: con su fecha, es un período."""
+    escena = Escena()
+    filas = [["Lunes", "2026-11-02"], ["Martes", "2026-11-03"], ["Miércoles", "2026-11-04"]]
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
+
+    assert _respuesta(estado).startswith("Son 3 días seguidos: usá desde y hasta")
+
+
+def test_sin_anio_a_la_vista_no_depende_del_reloj_y_cruza_el_anio() -> None:
+    """Corre de nuevo al reanudar con el sí: un año nuevo en el medio no puede cambiarla."""
+    filas = [["30 de diciembre"], ["31 de diciembre"], ["1 de enero"]]
+
+    assert len(_dias_seguidos(filas, [])) == 3
+    # Sin año, el día de la semana no se controla (depende del año).
+    assert (
+        len(_dias_seguidos([["Lunes 1 de noviembre"], ["2 de noviembre"], ["3 de noviembre"]], []))
+        == 3
+    )
+
+
+async def test_en_una_base_que_existe_pide_solo_los_dias_que_faltan() -> None:
+    """Pasar el mes entero repetiría los días que ya están."""
+    escena = Escena(_con_noviembre())
+    args = {
+        "id_base": NOVIEMBRE_ID,
+        "columnas": ["Descripcion"],
+        "filas": [[f"{d} de noviembre", f"Día {d}"] for d in (11, 12, 13)],
+    }
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    texto = _respuesta(estado)
+    assert "Pasá sólo los días que faltan en la base" in texto
+    assert "mes entero" not in texto
+
+
+async def test_sin_columna_de_fecha_avisa_que_los_dias_nuevos_salen_arriba() -> None:
+    escena = Escena()
+    args = {"id_base": BASE_ID, "desde": "2026-11-11", "hasta": "2026-11-12"}
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    assert "los días nuevos van a aparecer arriba de las filas que ya tiene" in _pregunta(estado)
+    assert "queda ordenada" not in _pregunta(estado)
