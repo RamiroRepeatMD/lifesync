@@ -35,6 +35,7 @@ from src.infrastructure.llm.agente_gemini import (
     TEXTO_VACIO,
     AgenteGemini,
     _ajustes_de_razonamiento,
+    _formato_de_whatsapp,
     crear_agente_gemini,
 )
 from src.infrastructure.llm.contexto import ContextoDeAgente  # noqa: F401
@@ -205,6 +206,68 @@ async def test_la_respuesta_se_recorta_al_maximo_de_whatsapp() -> None:
 
     assert len(respuesta) <= LARGO_MAXIMO_WHATSAPP
     assert respuesta.endswith("…")
+
+
+# --- El formato de WhatsApp en lo que redacta el modelo -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("del_modelo", "a_whatsapp"),
+    [
+        (
+            "Listo, creé la página «Torta» adentro de «Recetas».",
+            "Listo, creé la página *Torta* adentro de *Recetas*.",
+        ),
+        ("Te agendé **Dentista** el lunes.", "Te agendé *Dentista* el lunes."),
+        ("Subí «informe.pdf» a tu Drive.", "Subí *informe.pdf* a tu Drive."),
+        # La negrita rompería un link, un dominio o una dirección: quedan entre « ».
+        ("Mirá «sitio.com/login».", "Mirá «sitio.com/login»."),
+        ("Se lo mandé a «ana@example.com».", "Se lo mandé a «ana@example.com»."),
+        ("El link: «https://www.notion.so/x».", "El link: «https://www.notion.so/x»."),
+        ("La tarea «a*b» quedó.", "La tarea «a*b» quedó."),
+        # Un asterisco pegado a un link termina adentro del link.
+        ("Link: *https://www.notion.so/x*.", "Link: https://www.notion.so/x."),
+        ("**Link:** **https://drive.google.com/a**", "*Link:* https://drive.google.com/a"),
+        ("Tenés:\n* Pagar la luz\n* Llamar a Ana", "Tenés:\n• Pagar la luz\n• Llamar a Ana"),
+        ("Sin nada que cambiar: 2 * 3 = 6.", "Sin nada que cambiar: 2 * 3 = 6."),
+    ],
+)
+def test_la_respuesta_del_modelo_pasa_a_negritas_de_whatsapp(
+    del_modelo: str, a_whatsapp: str
+) -> None:
+    assert _formato_de_whatsapp(del_modelo) == a_whatsapp
+
+
+async def test_las_negritas_se_aplican_a_lo_que_redacta_el_modelo() -> None:
+    grafo = GrafoFalso([AIMessage("Listo, creé «Torta» en **Recetas**.")])
+
+    respuesta = await AgenteGemini(grafo).responder(_consulta())
+
+    assert respuesta == "Listo, creé *Torta* en *Recetas*."
+
+
+async def test_la_pregunta_de_confirmacion_se_manda_tal_cual() -> None:
+    """Lo que se confirma es lo que corre (RF-08): la pregunta no se toca."""
+    grafo = GrafoFalso()
+
+    async def pausado(entrada: Any, config: dict[str, Any], context: Any = None) -> Any:
+        resumen = "Crear en tu Notion la página «Torta» adentro de «Recetas»"
+        return {"messages": [], "__interrupt__": [InterrupcionFalsa({"resumen": resumen})]}
+
+    grafo.ainvoke = pausado  # type: ignore[method-assign]
+
+    respuesta = await AgenteGemini(grafo).responder(_consulta("creá Torta en Recetas"))
+
+    assert respuesta.startswith("Crear en tu Notion la página «Torta» adentro de «Recetas».")
+
+
+async def test_las_negritas_se_ponen_antes_de_recortar() -> None:
+    """Con `**` el texto no entra (4900); con `*`, sí (3500): no se corta de más."""
+    grafo = GrafoFalso([AIMessage("**ab** " * 700)])
+
+    respuesta = await AgenteGemini(grafo).responder(_consulta())
+
+    assert respuesta == ("*ab* " * 700).strip()
 
 
 async def test_un_mensaje_en_blanco_no_llega_al_modelo() -> None:

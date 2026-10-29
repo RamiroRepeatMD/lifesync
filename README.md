@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 2211 tests (cobertura con ramas 93,4%, piso de 90% en CI) + 42 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2225 tests (cobertura con ramas 93,5%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -546,7 +546,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 42 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 43 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -563,7 +563,8 @@ conectados, pregunta adónde, y una base nueva (la de la semana que viene, o una
 5 columnas) o una fila con sus datos se confirman en una sola pregunta y con las fechas bien. Una
 base con todos los días del mes que viene sale con la fecha primero, un día por fila, en orden y
 sin datos inventados; con 14 filas que no entran avisa sin recortar; "Gastos de noviembre" no se
-vuelve un día por fila, y una fila sin dato queda vacía.
+vuelve un día por fila, y una fila sin dato queda vacía. Y lo que contesta el modelo
+nombra las cosas en negrita de WhatsApp (`*así*`), sin « » ni markdown.
 Si Gemini no responde o se agota la cuota por minuto, el caso
 espera y reintenta, y si persiste se marca como salteado: una caída del proveedor no es un
 fallo de comportamiento.

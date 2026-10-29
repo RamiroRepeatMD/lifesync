@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import os
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -1154,3 +1155,24 @@ async def test_una_fila_sin_dato_queda_vacia_y_no_se_inventa() -> None:
         for (_, _, titulo, _), celdas in zip(paginas.creadas, paginas.datos_de_creadas, strict=True)
     }
     assert datos == {"leche": [2], "pan": [], "huevos": [12]}
+
+
+# --- Negritas de WhatsApp en lo que redacta el modelo (28/10) ---------------------------
+
+
+async def test_lo_que_contesta_nombra_en_negrita_sin_comillas_ni_markdown() -> None:
+    """Las « » las copia de las herramientas: a la persona le llegan como negrita."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+
+    pregunta = await _turno_en(
+        modelo, hilo, "creá adentro de mi página de recetas de Notion una página que se llame Torta"
+    )
+    assert SENAL_DE_CONFIRMACION in pregunta
+    respuesta = await _turno_en(modelo, hilo, "sí")
+
+    assert paginas.creadas  # la creó: lo de abajo no pasa en el vacío
+    assert "«" not in respuesta
+    assert "**" not in respuesta
+    assert not re.search(r"\*\S*https?://|https?://\S*\*", respuesta)

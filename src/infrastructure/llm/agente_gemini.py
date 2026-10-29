@@ -9,6 +9,7 @@ fallas** para que no se filtren hacia adentro.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import weakref
 from collections.abc import Sequence
@@ -44,7 +45,13 @@ from src.infrastructure.llm.confirmacion import (
 )
 from src.infrastructure.llm.contexto import ContextoDeAgente
 from src.infrastructure.llm.grafo import LIMITE_DE_PASOS, NODO_AGENTE, construir_grafo
-from src.infrastructure.llm.herramientas import construir_herramientas, mensaje_de_la_persona
+from src.infrastructure.llm.herramientas import (
+    _DOMINIO,
+    _LINK,
+    _sin_dominio,
+    construir_herramientas,
+    mensaje_de_la_persona,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -368,7 +375,7 @@ class AgenteGemini(AgenteConversacional):
             return "Necesito que me confirmes la acción. ¿Sí o no?"
 
         mensajes: list[BaseMessage] = estado.get("messages", [])
-        texto = _recortar(_texto_de(mensajes[-1]) if mensajes else "")
+        texto = _recortar(_formato_de_whatsapp(_texto_de(mensajes[-1])) if mensajes else "")
         return texto or SIN_CONTENIDO
 
 
@@ -436,6 +443,40 @@ def _texto_de(mensaje: BaseMessage) -> str:
         if isinstance(bloque, dict) and bloque.get("type") == "text"
     ]
     return "\n".join(parte for parte in partes if parte).strip()
+
+
+# La negrita de WhatsApp es UN asterisco por lado; la de markdown (dos) se ve
+# con los asteriscos. Pegado a un link, un asterisco termina adentro del link.
+_NEGRITA_DE_MARKDOWN = re.compile(r"\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*")
+_ENTRE_COMILLAS = re.compile(r"«\s*([^«»\n]{1,200}?)\s*»")
+_ANTES_DE_UN_LINK = re.compile(r"\*+(?=(?:https?://|www\.))", re.IGNORECASE)
+_DESPUES_DE_UN_LINK = re.compile(r"((?:https?://|www\.)[^\s*]+)\*+", re.IGNORECASE)
+_VINETA_DE_MARKDOWN = re.compile(r"^\* ", re.MULTILINE)
+
+
+def _formato_de_whatsapp(texto: str) -> str:
+    """La respuesta libre del modelo con el formato de WhatsApp: los nombres, en negrita.
+
+    El modelo copia las « » de lo que le devuelven las herramientas y a veces
+    escribe `**así**`: los dos pasan a `*así*`. Un nombre con un asterisco, un
+    link, un dominio o una dirección de correo queda entre « »: la negrita lo
+    rompería. Sólo para lo que redacta el modelo: una pregunta de confirmación
+    se manda tal cual (lo que se confirma es lo que corre, RF-08).
+    """
+    texto = _NEGRITA_DE_MARKDOWN.sub(r"*\1*", texto)
+    texto = _ENTRE_COMILLAS.sub(_en_negrita, texto)
+    texto = _ANTES_DE_UN_LINK.sub("", texto)
+    texto = _DESPUES_DE_UN_LINK.sub(r"\1", texto)
+    return _VINETA_DE_MARKDOWN.sub("• ", texto)
+
+
+def _en_negrita(encontrado: re.Match[str]) -> str:
+    nombre = encontrado[1]
+    # Un dominio, como en los nombres de Drive: «informe.pdf» es un archivo, no un link.
+    con_link = bool(_LINK.search(nombre)) or _DOMINIO.sub(_sin_dominio, nombre) != nombre
+    if "*" in nombre or "@" in nombre or con_link:
+        return encontrado[0]
+    return f"*{nombre}*"
 
 
 def _recortar(texto: str) -> str:
