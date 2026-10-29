@@ -23,6 +23,7 @@ from datetime import datetime
 
 import structlog
 
+from src.application.ports.agente import AgenteConversacional
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.application.use_cases.conectar_notion import ConectarNotion
 from src.domain.entities.usuario import Usuario
@@ -48,7 +49,8 @@ def _texto_de_ayuda(con_notion: bool) -> str:
         "• /conectar — vincular tu cuenta de Google\n"
         "• /desconectar — desvincularla y revocar el permiso\n"
         f"{notion}"
-        "• /estado — qué cuentas tenés conectadas\n\n"
+        "• /estado — qué cuentas tenés conectadas\n"
+        "• /olvidar — borra lo que hablamos y empezamos de cero\n\n"
         "Cuando conectes tu Google voy a poder consultarte la agenda."
     )
 
@@ -106,6 +108,21 @@ DESCONECTAR_SIN_REVOCAR = (
     "Borré tu cuenta de mi lado, pero no pude confirmar la revocación con "
     "Google. Si querés estar seguro, revisá myaccount.google.com/permissions"
 )
+
+
+# Como /desconectar: dos pasos sin estado. Nunca "¿Confirmás?": con una acción
+# esperando su sí, un "sí" la aprobaría a ella y no al olvido.
+OLVIDAR_PIDE_CONFIRMACION = (
+    "Vas a borrar lo que hablamos: me olvido de la conversación y de lo que esté esperando "
+    "tu «sí». No toca tus cuentas conectadas, tus recordatorios ni nada de tu Google o tu "
+    "Notion. Los archivos que me mandaste antes ya no los voy a poder subir.\n\n"
+    "Para confirmar, escribí: /olvidar confirmar"
+)
+OLVIDAR_LISTO = "Listo, me olvidé de lo que hablamos: empezamos de cero."
+OLVIDAR_SIN_CONVERSACION = (
+    "No hay nada que olvidar: no tengo guardada ninguna conversación con vos."
+)
+OLVIDAR_ERROR = "No pude borrar la conversación ahora. Probá de nuevo en un rato."
 
 
 # --- Notion (PB-014) ---------------------------------------------------------
@@ -170,17 +187,22 @@ class ManejadorDeComandos:
     """Resuelve los comandos que no pasan por el modelo."""
 
     def __init__(
-        self, conectar_google: ConectarGoogle | None, conectar_notion: ConectarNotion | None = None
+        self,
+        conectar_google: ConectarGoogle | None,
+        conectar_notion: ConectarNotion | None = None,
+        agente: AgenteConversacional | None = None,
     ) -> None:
         """Recibe sus dependencias por constructor (inyección explícita).
 
         Cada caso de uso es `None` cuando falta la configuración de su OAuth. No
         se usa un *null object* como con el agente porque acá los dos casos
         dicen cosas distintas y ninguna es "responder igual pero peor". Sin
-        Notion configurado, todo responde exactamente como antes de PB-014.
+        Notion configurado, todo responde exactamente como antes de PB-014. El
+        agente sólo hace falta para /olvidar: su memoria es la conversación.
         """
         self._conectar_google = conectar_google
         self._conectar_notion = conectar_notion
+        self._agente = agente
 
     async def responder(self, texto: str, usuario: Usuario, ahora: datetime) -> str | None:
         """Devuelve la respuesta del comando, o None si no es un comando.
@@ -211,6 +233,8 @@ class ManejadorDeComandos:
                 confirmado = " ".join(argumentos[1:]) == "confirmar"
                 return await self._desconectar_notion(usuario, confirmado)
             return await self._desconectar(usuario, " ".join(argumentos) == "confirmar")
+        if comando == "/olvidar":
+            return await self._olvidar(usuario, " ".join(argumentos) == "confirmar")
         return None
 
     async def _estado(self, usuario: Usuario) -> str:
@@ -317,3 +341,22 @@ class ManejadorDeComandos:
             return "No pude desconectar tu Notion ahora mismo. Probá de nuevo en un minuto."
 
         return DESCONECTAR_NOTION_LISTO if revocado else DESCONECTAR_NOTION_SIN_REVOCAR
+
+    async def _olvidar(self, usuario: Usuario, confirmado: bool) -> str:
+        """Borra la memoria de la conversación, con la confirmación en dos pasos.
+
+        `/olvidar` sólo explica y `/olvidar confirmar` borra. La conversación de
+        una persona es la de su id, la misma que arma `ProcesarMensajeEntrante`.
+        """
+        if not confirmado:
+            return OLVIDAR_PIDE_CONFIRMACION
+        if self._agente is None or usuario.id is None:
+            return OLVIDAR_SIN_CONVERSACION
+        try:
+            habia = await self._agente.olvidar(usuario.id)
+        except Exception as exc:  # el comando nunca deja a la persona sin respuesta
+            logger.error(
+                "comando.olvido_fallido", usuario_id=str(usuario.id), tipo=type(exc).__name__
+            )
+            return OLVIDAR_ERROR
+        return OLVIDAR_LISTO if habia else OLVIDAR_SIN_CONVERSACION

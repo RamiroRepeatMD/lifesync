@@ -12,6 +12,7 @@ tampoco: sólo sabe que alguien puede contestar.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from uuid import UUID
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
 
@@ -33,4 +34,16 @@ class AgenteConversacional(ABC):
 
         Raises:
             AgenteNoDisponibleError: Si no se pudo obtener una respuesta.
+        """
+
+    @abstractmethod
+    async def olvidar(self, conversacion_id: UUID) -> bool:
+        """Borra la memoria de una conversación (el comando /olvidar).
+
+        Se va también lo que estaba esperando una confirmación. No toca nada
+        fuera de la conversación: cuentas, recordatorios ni datos de terceros.
+        Devuelve True si había algo guardado.
+
+        Raises:
+            ServiceUnavailableError: Si no se pudo borrar.
         """

@@ -56,9 +56,15 @@ class InterrupcionFalsa:
 class EstadoFalso:
     """Imita el StateSnapshot de `aget_state`."""
 
-    def __init__(self, interrupts: tuple[Any, ...], created_at: str | None) -> None:
+    def __init__(
+        self,
+        interrupts: tuple[Any, ...],
+        created_at: str | None,
+        values: dict[str, Any] | None = None,
+    ) -> None:
         self.interrupts = interrupts
         self.created_at = created_at
+        self.values = values or {}
 
 
 class GrafoFalso:
@@ -654,6 +660,73 @@ async def test_dos_turnos_de_la_misma_conversacion_no_corren_a_la_vez() -> None:
     await asyncio.gather(agente.responder(_con_archivo()), agente.responder(_consulta("subila")))
 
     assert grafo.maximo_simultaneas == 1
+
+
+class CheckpointerFalso:
+    """Anota cada hilo borrado en el registro de su grafo."""
+
+    def __init__(self, registro: list[str], fallar_con: Exception | None = None) -> None:
+        self.registro = registro
+        self.fallar_con = fallar_con
+        self.borrados: list[str] = []
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        self.registro.append("borrado")
+        self.borrados.append(thread_id)
+
+
+class GrafoConMemoria(GrafoLento):
+    """Recuerda si hubo un turno y anota en orden los turnos y los borrados."""
+
+    def __init__(self, fallar_al_borrar: Exception | None = None) -> None:
+        super().__init__()
+        self.registro: list[str] = []
+        self.checkpointer = CheckpointerFalso(self.registro, fallar_al_borrar)
+
+    async def ainvoke(
+        self, entrada: Any, config: dict[str, Any], context: Any = None
+    ) -> dict[str, Any]:
+        resultado = await super().ainvoke(entrada, config, context)
+        self.registro.append("turno")
+        return resultado
+
+    async def aget_state(self, config: dict[str, Any]) -> EstadoFalso:
+        hubo = self.registro.count("turno") > self.registro.count("borrado")
+        return EstadoFalso((), None, {"messages": self.mensajes} if hubo else None)
+
+
+async def test_olvidar_espera_al_turno_en_curso() -> None:
+    """Cada checkpoint guarda la lista entera: un turno sin terminar reescribiría lo borrado."""
+    grafo = GrafoConMemoria()
+    agente = AgenteGemini(grafo)
+
+    _, habia = await asyncio.gather(agente.responder(_consulta()), agente.olvidar(CONVERSACION))
+
+    assert habia is True
+    assert grafo.registro == ["turno", "borrado"]
+    assert grafo.checkpointer.borrados == [str(CONVERSACION)]
+
+
+async def test_olvidar_sin_conversacion_no_borra_nada() -> None:
+    grafo = GrafoConMemoria()
+
+    assert await AgenteGemini(grafo).olvidar(CONVERSACION) is False
+    assert grafo.checkpointer.borrados == []
+
+
+async def test_si_no_se_puede_borrar_sube_como_servicio_no_disponible() -> None:
+    grafo = GrafoConMemoria(fallar_al_borrar=RuntimeError("se cayó la base"))
+    agente = AgenteGemini(grafo)
+    await agente.responder(_consulta())
+
+    with structlog.testing.capture_logs() as eventos:
+        with pytest.raises(ServiceUnavailableError):
+            await agente.olvidar(CONVERSACION)
+
+    [fallo] = [e for e in eventos if e["event"] == "agente.olvido_fallido"]
+    assert fallo["tipo"] == "RuntimeError"
 
 
 async def test_conversaciones_distintas_no_se_esperan() -> None:

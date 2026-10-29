@@ -12,6 +12,7 @@ from src.application.dto.mensaje_entrante import MensajeEntrante
 from src.application.services.manejador_de_comandos import (
     AYUDA,
     ESTADO_SIN_CUENTAS,
+    OLVIDAR_LISTO,
     ManejadorDeComandos,
 )
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
@@ -99,6 +100,21 @@ async def test_los_comandos_los_contesta_el_router(texto: str, esperado: str) ->
     assert mensajero.textos == [esperado]
     # Lo importante: el comando NO gastó una llamada al modelo.
     assert agente.consultas == []
+
+
+async def test_olvidar_es_un_comando_y_borra_la_conversacion_de_la_persona() -> None:
+    repo, mensajero, agente = RepositorioUsuarioEnMemoria(), MensajeroFalso(), AgenteFalso()
+    caso = ProcesarMensajeEntrante(
+        repo, mensajero, agente, ManejadorDeComandos(None, agente=agente)
+    )
+
+    await caso.ejecutar(_mensaje(texto="/olvidar confirmar"))
+
+    usuario = await repo.obtener_por_telefono(TELEFONO_E164)
+    assert usuario is not None
+    assert agente.olvidadas == [usuario.id]
+    assert agente.consultas == []  # no gastó una llamada al modelo
+    assert mensajero.textos == [OLVIDAR_LISTO]
 
 
 async def test_el_lenguaje_natural_va_al_agente() -> None:

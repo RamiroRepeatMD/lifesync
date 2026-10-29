@@ -158,7 +158,9 @@ def get_conectar_notion(request: Request) -> ConectarNotion | None:
 
 def get_manejador_de_comandos(request: Request) -> ManejadorDeComandos:
     """Manejador de los comandos que no pasan por el modelo (RF-11, RF-12)."""
-    return ManejadorDeComandos(get_conectar_google(request), get_conectar_notion(request))
+    return ManejadorDeComandos(
+        get_conectar_google(request), get_conectar_notion(request), get_agente(request)
+    )
 
 
 def get_procesador_de_mensajes(request: Request) -> ProcesarMensajeEntrante | None:

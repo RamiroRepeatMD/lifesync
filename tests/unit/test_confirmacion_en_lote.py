@@ -94,6 +94,12 @@ class Bot:
         mensajes: list[Any] = estado.values["messages"]
         return mensajes
 
+    async def olvidar(self) -> bool:
+        return await self._agente.olvidar(USUARIO)
+
+    async def estado(self) -> Any:
+        return await self.grafo.aget_state({"configurable": {"thread_id": str(USUARIO)}})
+
 
 # --- El lote -----------------------------------------------------------------
 
@@ -359,3 +365,25 @@ def test_solo_confirmar_y_el_nodo_pueden_pausar() -> None:
         recorrer(ast.parse(fuente), "<módulo>")
 
     assert sorted(llamados) == ["_confirmar", "en_lote"]
+
+
+# --- /olvidar con algo esperando el sí ----------------------------------------
+
+
+async def test_olvidar_borra_la_conversacion_y_lo_que_esperaba_el_si() -> None:
+    bot = Bot(_llamadas(EVENTO, TAREA), AIMessage("¿Sí qué? No tengo nada pendiente."))
+    await bot.decir("agendame dentista el lunes a las 16 y anotá el regalo")
+    assert (await bot.estado()).interrupts  # la lista espera su sí
+
+    assert await bot.olvidar() is True
+
+    estado = await bot.estado()
+    assert (estado.values, estado.interrupts) == ({}, ())
+    # Un "sí" después ya no aprueba nada: es un turno nuevo.
+    assert await bot.decir("sí") == "¿Sí qué? No tengo nada pendiente."
+    assert bot.calendario.creados == []
+    assert bot.tareas.creadas == []
+
+
+async def test_olvidar_sin_haber_hablado_no_tiene_nada_que_borrar() -> None:
+    assert await Bot().olvidar() is False

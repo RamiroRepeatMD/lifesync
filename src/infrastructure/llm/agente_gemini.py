@@ -121,14 +121,41 @@ class AgenteGemini(AgenteConversacional):
             weakref.WeakValueDictionary()
         )
 
-    async def responder(self, consulta: ConsultaDelUsuario) -> str:
-        """Corre un turno de conversación, de a uno por conversación."""
-        candado = self._candados.get(consulta.conversacion_id)
+    def _candado_de(self, conversacion_id: UUID) -> asyncio.Lock:
+        candado = self._candados.get(conversacion_id)
         if candado is None:
             candado = asyncio.Lock()
-            self._candados[consulta.conversacion_id] = candado
-        async with candado:
+            self._candados[conversacion_id] = candado
+        return candado
+
+    async def responder(self, consulta: ConsultaDelUsuario) -> str:
+        """Corre un turno de conversación, de a uno por conversación."""
+        async with self._candado_de(consulta.conversacion_id):
             return await self._responder(consulta)
+
+    async def olvidar(self, conversacion_id: UUID) -> bool:
+        """Borra el hilo de la conversación (/olvidar), con el mismo candado que los turnos.
+
+        Si hay un turno en curso, espera a que termine: cada checkpoint guarda
+        la lista entera de mensajes, y ese turno volvería a escribir lo borrado.
+        Con el hilo se va también lo que esperaba un sí.
+        """
+        hilo = _hilo_de(conversacion_id)
+        async with self._candado_de(conversacion_id):
+            try:
+                estado = await self._grafo.aget_state({"configurable": {"thread_id": hilo}})
+                if not estado.values:
+                    return False
+                await self._grafo.checkpointer.adelete_thread(hilo)
+            except Exception as exc:
+                logger.error(
+                    "agente.olvido_fallido",
+                    conversacion_id=str(conversacion_id),
+                    tipo=type(exc).__name__,
+                )
+                raise ServiceUnavailableError("No se pudo borrar la conversación.") from None
+        logger.info("agente.conversacion_olvidada", conversacion_id=str(conversacion_id))
+        return True
 
     async def _responder(self, consulta: ConsultaDelUsuario) -> str:
         """Corre un turno de conversación y devuelve el texto de respuesta.

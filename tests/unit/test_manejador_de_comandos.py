@@ -29,13 +29,23 @@ from src.application.services.manejador_de_comandos import (
     GOOGLE_SIN_CONECTAR,
     NOTION_CONECTADO,
     NOTION_SIN_CONECTAR,
+    OLVIDAR_ERROR,
+    OLVIDAR_LISTO,
+    OLVIDAR_PIDE_CONFIRMACION,
+    OLVIDAR_SIN_CONVERSACION,
     PISTA_DE_NOTION,
     ManejadorDeComandos,
 )
 from src.application.use_cases.conectar_google import ConectarGoogle
 from src.application.use_cases.conectar_notion import ConectarNotion
 from src.domain.entities.usuario import Usuario
-from tests.dobles import AutorizadorFalso, AutorizadorNotionFalso, RepositorioOAuthTokenEnMemoria
+from src.domain.exceptions import ServiceUnavailableError
+from tests.dobles import (
+    AgenteFalso,
+    AutorizadorFalso,
+    AutorizadorNotionFalso,
+    RepositorioOAuthTokenEnMemoria,
+)
 
 AHORA = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 ID_USUARIO = uuid4()
@@ -423,3 +433,75 @@ async def test_sin_notion_configurado_desconectar_notion_no_rompe() -> None:
     respuesta = await manejador.responder("/desconectar notion", USUARIO, AHORA)
 
     assert respuesta == DESCONECTAR_NOTION_SIN_CUENTA
+
+
+# --- /olvidar ----------------------------------------------------------------
+
+
+def _con_agente(agente: AgenteFalso | None = None) -> tuple[ManejadorDeComandos, AgenteFalso]:
+    agente = agente or AgenteFalso()
+    return ManejadorDeComandos(None, agente=agente), agente
+
+
+async def test_olvidar_sin_confirmar_solo_explica_y_no_borra() -> None:
+    manejador, agente = _con_agente()
+
+    respuesta = await manejador.responder("/olvidar", USUARIO, AHORA)
+
+    assert respuesta == OLVIDAR_PIDE_CONFIRMACION
+    assert agente.olvidadas == []
+
+
+def test_la_explicacion_no_pide_un_si() -> None:
+    """Con una acción esperando su sí, un "sí" la aprobaría a ella y no al olvido."""
+    assert "/olvidar confirmar" in OLVIDAR_PIDE_CONFIRMACION
+    assert "¿Confirmás?" not in OLVIDAR_PIDE_CONFIRMACION
+    # Dice qué se va y qué no.
+    for aclaracion in ("recordatorios", "Google", "Notion", "archivos"):
+        assert aclaracion in OLVIDAR_PIDE_CONFIRMACION
+
+
+async def test_olvidar_confirmar_borra_la_conversacion_de_esa_persona() -> None:
+    manejador, agente = _con_agente()
+
+    respuesta = await manejador.responder("/olvidar confirmar", USUARIO, AHORA)
+
+    assert respuesta == OLVIDAR_LISTO
+    assert agente.olvidadas == [ID_USUARIO]
+
+
+@pytest.mark.parametrize("texto", ["/olvidar ya", "/olvidar confirmar todo", "/olvidar si"])
+async def test_solo_confirmar_exacto_borra(texto: str) -> None:
+    manejador, agente = _con_agente()
+
+    assert await manejador.responder(texto, USUARIO, AHORA) == OLVIDAR_PIDE_CONFIRMACION
+    assert agente.olvidadas == []
+
+
+async def test_sin_conversacion_guardada_lo_dice() -> None:
+    agente = AgenteFalso()
+    agente.habia_conversacion = False
+    manejador, _ = _con_agente(agente)
+
+    assert await manejador.responder("/olvidar confirmar", USUARIO, AHORA) == (
+        OLVIDAR_SIN_CONVERSACION
+    )
+
+
+async def test_sin_agente_no_hay_nada_que_olvidar() -> None:
+    assert await _sin_google().responder("/olvidar confirmar", USUARIO, AHORA) == (
+        OLVIDAR_SIN_CONVERSACION
+    )
+
+
+async def test_si_no_se_puede_borrar_lo_dice() -> None:
+    agente = AgenteFalso()
+    agente.fallar_con = ServiceUnavailableError("caído")
+    manejador, _ = _con_agente(agente)
+
+    assert await manejador.responder("/olvidar confirmar", USUARIO, AHORA) == OLVIDAR_ERROR
+
+
+def test_la_ayuda_lista_olvidar() -> None:
+    assert "/olvidar" in AYUDA
+    assert "/olvidar" in AYUDA_CON_NOTION

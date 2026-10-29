@@ -13,6 +13,8 @@ LangChain no está disponible, así que no puede importar nada de él.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import structlog
 
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
@@ -38,3 +40,7 @@ class AgenteDegradado(AgenteConversacional):
         """
         logger.warning("agente.degradado.respuesta", conversacion_id=str(consulta.conversacion_id))
         return SIN_AGENTE
+
+    async def olvidar(self, conversacion_id: UUID) -> bool:
+        """Sin agente no hay conversación guardada: no hay nada que olvidar."""
+        return False

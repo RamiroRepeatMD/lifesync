@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 2225 tests (cobertura con ramas 93,5%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2242 tests (cobertura con ramas 93,5%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -192,6 +192,10 @@ igual pero la memoria vive en RAM y muere con cada deploy.
   RLS + revocación de permisos en cada arranque (`db/migrations/003` es la copia documentada).
 - El modelo recibe una ventana de los **últimos 20 mensajes**; lo demás queda guardado pero
   fuera del contexto. Sin límite de almacenamiento todavía (deuda de Sprint 3).
+- `/olvidar` borra la conversación de la persona (también lo que esperaba un "sí"), en dos
+  pasos: `/olvidar` explica y `/olvidar confirmar` borra. Espera a que termine un turno en
+  curso, para que no vuelva a guardar lo borrado. No toca cuentas, recordatorios ni datos de
+  Google o Notion.
 
 ---
 
@@ -302,8 +306,9 @@ lo pendiente vive en la base, así que un redeploy no pierde ninguno, y un *comp
 evita mandarlo dos veces si dos contenedores conviven durante un deploy.
 
 Los comandos siguen siendo determinísticos y no pasan por el modelo: `/ayuda`, `/estado`,
-`/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google), y sus
-versiones para Notion, `/conectar notion` y `/desconectar notion`.
+`/conectar` y `/desconectar` (en dos pasos, con revocación real del permiso en Google), sus
+versiones para Notion, `/conectar notion` y `/desconectar notion`, y `/olvidar` (en dos pasos:
+borra la conversación y empezamos de cero).
 
 Que la ayuda no dependa del LLM es a propósito: RF-11 pide un sistema de ayuda, y uno que cambia
 de texto en cada invocación —o que inventa funciones que no existen— no lo cumple. Además es lo

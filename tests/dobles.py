@@ -242,12 +242,20 @@ class AgenteFalso(AgenteConversacional):
         self.consultas: list[ConsultaDelUsuario] = []
         self.respuesta = respuesta
         self.fallar_con: Exception | None = None
+        self.olvidadas: list[UUID] = []
+        self.habia_conversacion = True
 
     async def responder(self, consulta: ConsultaDelUsuario) -> str:
         self.consultas.append(consulta)
         if self.fallar_con is not None:
             raise self.fallar_con
         return self.respuesta
+
+    async def olvidar(self, conversacion_id: UUID) -> bool:
+        self.olvidadas.append(conversacion_id)
+        if self.fallar_con is not None:
+            raise self.fallar_con
+        return self.habia_conversacion
 
     @property
     def textos(self) -> list[str]:
