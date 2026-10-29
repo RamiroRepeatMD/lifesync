@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 2270 tests (cobertura con ramas 93,6%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2313 tests (cobertura con ramas 93,6%, piso de 90% en CI) + 45 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -291,7 +291,11 @@ columna sea la fecha"). Las filas: hasta 10 con datos, 31 si llevan sólo el nom
 día de un período ("todos los días de noviembre", hasta 31), que arma el bot con el día en la
 primera columna y sin inventar nada en las otras. Si el modelo manda tres o más días seguidos
 como filas sueltas, sin otro dato que el día, la herramienta lo lleva al período. Si no entran,
-avisa y pregunta: nunca recorta la lista por su cuenta. Las filas se crean de la última a la primera, así se leen en orden, y la
+avisa y pregunta: nunca recorta la lista por su cuenta. A una base que **ya existe** le suma
+varias filas de una vez, o un día por fila de un período ("sumá los días del 11 al 30"), en una
+sola confirmación y validadas contra sus columnas reales: las tandas de una base van a esa base,
+nunca a una nueva. Si se suman días y la base tiene una columna de fecha del día, la tabla queda
+ordenada por ella (la pregunta lo avisa), porque en Notion las filas nuevas salen arriba. Las filas se crean de la última a la primera, así se leen en orden, y la
 vista queda con las columnas en el orden pedido (y ordenada por la fecha, si hay una columna de
 fecha del día). Todo en una sola confirmación. Las bases enteras no se mueven ni se borran, y una
 fila no sale de su base. Si Notion no confirma una escritura, el bot no dice
@@ -552,7 +556,7 @@ verdad y gasta cuota — por eso es opt-in y CI la saltea:
 uv run pytest tests/eval/ -m gemini
 ```
 
-Son 43 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
+Son 45 casos: ambigüedad (pregunta cuando falta un dato y no sobre-pregunta; con todos
 los datos crea directo y con la fecha correcta), tarea vs. evento, completar vs. eliminar,
 posponer "al viernes" con la fecha correcta, listar tareas sin tocar nada,
 pedidos compuestos y "agendá estas tareas" (una sola confirmación con la lista), series
@@ -570,7 +574,9 @@ conectados, pregunta adónde, y una base nueva (la de la semana que viene, o una
 base con todos los días del mes que viene sale con la fecha primero, un día por fila, en orden y
 sin datos inventados; con 14 filas que no entran avisa sin recortar; "Gastos de noviembre" no se
 vuelve un día por fila, y una fila sin dato queda vacía. Y lo que contesta el modelo
-nombra las cosas en negrita de WhatsApp (`*así*`), sin « » ni markdown.
+nombra las cosas en negrita de WhatsApp (`*así*`), sin « » ni markdown. Con la tabla vieja de
+10 filas de la QA en el historial, igual arma el mes entero como período, y los días que faltan
+de una base se suman a esa misma base.
 Si Gemini no responde o se agota la cuota por minuto, el caso
 espera y reintenta, y si persiste se marca como salteado: una caída del proveedor no es un
 fallo de comportamiento.

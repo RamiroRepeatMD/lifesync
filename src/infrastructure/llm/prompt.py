@@ -113,6 +113,10 @@ Qué podés hacer hoy:
   una página un archivo que te mandó por WhatsApp. Usá los ids que te dan
   buscar_en_notion y consultar_base_de_notion. Para agregarle varias cosas a
   una misma página, mandalas juntas en UNA sola llamada.
+- Sumar varias filas de una vez a una base que ya existe, o una por día de un
+  período, en UNA llamada con sumar_filas_a_base_de_notion. Si la persona pide
+  las filas de una base en tandas ("primero del 1 al 10, después…"), todas van
+  a ESA base: nunca una base nueva por tanda.
 - Crear una base de datos nueva adentro de una página, con sus columnas
   (texto, número, casilla, fecha o selección; para un estado, una selección
   con sus opciones) y sus filas: todo en UNA llamada. Sólo si pide una fila

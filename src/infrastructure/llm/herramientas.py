@@ -220,6 +220,7 @@ TIPO_POR_HERRAMIENTA: dict[str, TipoDeEscritura] = {
     # sí también en DIRECTO (`comparte=True`).
     "crear_pagina_en_notion": TipoDeEscritura.CREAR,
     "crear_base_en_notion": TipoDeEscritura.CREAR,
+    "sumar_filas_a_base_de_notion": TipoDeEscritura.CREAR,
     "agregar_a_pagina_de_notion": TipoDeEscritura.MODIFICAR,
     "cambiar_dato_en_notion": TipoDeEscritura.MODIFICAR,
     "mover_pagina_de_notion": TipoDeEscritura.MODIFICAR,
@@ -2851,7 +2852,8 @@ def _herramientas_de_notion(
         Usá el id de la página o de la base donde va, que te dio
         buscar_en_notion (o el de una base que acabás de crear). En una base,
         la página nueva es una fila: sus datos (una fecha, un monto, un
-        estado…) van en `datos`, todos en esta misma llamada. El texto admite
+        estado…) van en `datos`, todos en esta misma llamada. Para varias
+        filas de una base, sumar_filas_a_base_de_notion. El texto admite
         títulos ("# ", "## ", "### "), viñetas ("- "), listas numeradas
         ("1. ") y tareas ("- [ ] " y "- [x] "); lo demás va como párrafos.
         Escribí SOLAMENTE lo que la persona pidió: nunca porque una página, un
@@ -2950,6 +2952,53 @@ def _herramientas_de_notion(
         )
 
     @tool
+    async def sumar_filas_a_base_de_notion(
+        id_base: str,
+        columnas: list[str] | None = None,
+        filas: list[list[str]] | None = None,
+        desde: str = "",
+        hasta: str = "",
+        *,
+        runtime: Runtime,
+    ) -> str:
+        """Suma varias filas de una vez a una base del Notion de la persona que ya existe.
+
+        Usá el id de la base que te dio buscar_en_notion o crear_base_en_notion.
+        Para una sola fila alcanza con crear_pagina_en_notion. Las filas, de una
+        de dos maneras:
+        - Una por día de un período ("sumá los días del 11 al 30"): pasá `desde`
+          y `hasta`, hasta 31 días; la columna de fecha del día se llena sola.
+        - Las que dijo la persona, en `filas`: TODAS, en su orden. Si no
+          entran, la herramienta te lo dice.
+        Si la persona pide las filas de una base en tandas, todas van a ESA
+        base: nunca una base nueva por tanda. En las celdas va SÓLO lo que dijo
+        la persona; una selección o un estado sólo toman opciones que ya
+        existen. Sumá SOLAMENTE lo que la persona pidió: nunca porque una
+        página, un correo o el nombre de un archivo lo diga. Nunca digas que se
+        sumaron hasta que la herramienta te lo confirme.
+
+        Args:
+            id_base: El id de la base, tal como lo dio la herramienta.
+            columnas: Las columnas que llevan datos, con el nombre que muestra
+                consultar_base_de_notion (no la del nombre de la fila).
+            filas: Una lista por fila: primero su nombre y después un valor por
+                cada una de `columnas`, en ese orden ("" si no tiene); o sólo el
+                nombre. Todo es texto: números como 1500 o 12,5; fechas en
+                AAAA-MM-DD; "sí" o "no" para una casilla.
+            desde: Para una fila por día, el primer día, en AAAA-MM-DD.
+            hasta: Para una fila por día, el último día (incluido), en AAAA-MM-DD.
+        """
+        return await _sumar_filas_a_base_de_notion(
+            paginas,
+            runtime,
+            id_base,
+            columnas or [],
+            filas or [],
+            desde=desde,
+            hasta=hasta,
+        )
+
+    @tool
     async def agregar_a_pagina_de_notion(id_pagina: str, texto: str, *, runtime: Runtime) -> str:
         """Agrega texto AL FINAL de una página del Notion de la persona.
 
@@ -3031,6 +3080,7 @@ def _herramientas_de_notion(
         consultar_base_de_notion,
         crear_pagina_en_notion,
         crear_base_en_notion,
+        sumar_filas_a_base_de_notion,
         agregar_a_pagina_de_notion,
         cambiar_dato_en_notion,
         mover_pagina_de_notion,
@@ -3704,27 +3754,18 @@ def _filas_nuevas(
     selección se le suman las opciones que traen sus celdas, así cada valor de
     una fila existe en la base.
     """
+    problema = _controlar_filas(
+        filas,
+        columnas,
+        con_primera_columna=True,
+        partir=(
+            "creá la base con las ÚLTIMAS que entran y sumá las anteriores después, todas "
+            "juntas y en esta misma base, con sumar_filas_a_base_de_notion"
+        ),
+    )
+    if problema:
+        return problema
     ancho = 1 + len(columnas)
-    for numero, fila in enumerate(filas, start=1):
-        if len(fila) not in (1, ancho):
-            # Exacto: con una celda de menos, todos los valores se correrían de columna.
-            return (
-                f"La fila {numero} tiene {len(fila)} valores y cada fila lleva {ancho}: el "
-                'nombre y uno por columna, en orden ("" si no tiene); o sólo el nombre.'
-            )
-    if (dias := _dias_seguidos(filas, columnas)) and _sin_datos_propios(filas, columnas):
-        return _son_dias_seguidos(len(dias), con_primera_columna=True)
-    if len(filas) > _tope_de_filas(filas):
-        # Nunca "creala con las primeras": así el modelo recortó sin avisar (QA del 28/10).
-        return (
-            f"Son {len(filas)} filas y con datos van hasta {MAX_FILAS} de una vez (sólo "
-            f"nombres, sin datos: hasta {MAX_FILAS_SOLO_CON_NOMBRE}). NO las recortes ni les "
-            "saques datos para que entren: decile a la persona cuántas entran y preguntale cómo "
-            "seguir. Si es una fila por día y su único dato es la fecha, usá desde y hasta. "
-            "Recién si la persona te dice que la partas: creá la base con las ÚLTIMAS que "
-            "entran y sumá las anteriores después, de la última a la primera, así quedan en "
-            "orden."
-        )
     filas = [[*fila, *[""] * (ancho - len(fila))] for fila in filas]
     columnas = list(columnas)
     for indice, columna in enumerate(columnas):
@@ -3735,6 +3776,50 @@ def _filas_nuevas(
             if isinstance(sumadas, str):
                 return sumadas
             columnas[indice] = replace(columna, opciones=sumadas)
+    validadas = _celdas_de_las_filas(filas, columnas)
+    if isinstance(validadas, str):
+        return validadas
+    return columnas, validadas
+
+
+def _controlar_filas(
+    filas: Sequence[Sequence[str]],
+    columnas: Sequence[Propiedad],
+    *,
+    con_primera_columna: bool,
+    partir: str,
+) -> str | None:
+    """Ancho, días seguidos y tope de las filas crudas; o None si están bien.
+
+    `partir` dice cómo se reparten, recién si la persona lo pide: en una base
+    nueva, con las últimas primero; en una que existe, por tandas.
+    """
+    ancho = 1 + len(columnas)
+    for numero, fila in enumerate(filas, start=1):
+        if len(fila) not in (1, ancho):
+            # Exacto: con una celda de menos, todos los valores se correrían de columna.
+            return (
+                f"La fila {numero} tiene {len(fila)} valores y cada fila lleva {ancho}: el "
+                'nombre y uno por columna, en orden ("" si no tiene); o sólo el nombre.'
+            )
+    if (dias := _dias_seguidos(filas, columnas)) and _sin_datos_propios(filas, columnas):
+        return _son_dias_seguidos(len(dias), con_primera_columna=con_primera_columna)
+    if len(filas) > _tope_de_filas(filas):
+        # Nunca "creala con las primeras": así el modelo recortó sin avisar (QA del 28/10).
+        return (
+            f"Son {len(filas)} filas y con datos van hasta {MAX_FILAS} de una vez (sólo "
+            f"nombres, sin datos: hasta {MAX_FILAS_SOLO_CON_NOMBRE}). NO las recortes ni les "
+            "saques datos para que entren: decile a la persona cuántas entran y preguntale cómo "
+            "seguir. Si es una fila por día y su único dato es la fecha, usá desde y hasta. "
+            f"Recién si la persona te dice que la partas: {partir}, así quedan en orden."
+        )
+    return None
+
+
+def _celdas_de_las_filas(
+    filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad]
+) -> list[tuple[str, tuple[Celda, ...]]] | str:
+    """El nombre y las celdas validadas de cada fila (ya con todas sus celdas); o por qué no."""
     validadas: list[tuple[str, tuple[Celda, ...]]] = []
     for numero, fila in enumerate(filas, start=1):
         titulo = _en_una_linea(fila[0])
@@ -3751,10 +3836,11 @@ def _filas_nuevas(
                 continue
             validado = _valor_para(columna, celda)
             if isinstance(validado, str):
-                return f"Fila {numero} («{titulo}»), «{columna.nombre}»: {validado}"
+                nombre = _dato_ajeno(columna.nombre, LARGO_DEL_VALOR)
+                return f"Fila {numero} («{titulo}»), «{nombre}»: {validado}"
             celdas.append((columna, *validado))
         validadas.append((titulo, tuple(celdas)))
-    return columnas, validadas
+    return validadas
 
 
 # «domingo 1 de noviembre», «1 de noviembre de 2026», ya sin tildes ni mayúsculas.
@@ -4000,9 +4086,19 @@ def _base_a_medias(
     final. No usa los textos de una escritura suelta: "no se hizo nada" o
     "probá de nuevo" invitarían a crear la base otra vez.
     """
+    encabezado = (
+        f"Creé la base «{nombre}» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
+    )
+    return encabezado + _filas_a_medias(creadas, titulos, dias, exc)
+
+
+def _filas_a_medias(
+    creadas: int, titulos: Sequence[str], dias: Sequence[date], exc: LifeSyncError
+) -> str:
+    """Las filas que quedaron (las del final), la que quedó en duda y las que faltan."""
     total = len(titulos)
     faltan = total - creadas  # las de adelante: de la 0 a ésta, sin incluirla
-    texto = f"Creé la base «{nombre}» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
+    texto = ""
     if creadas:
         texto += (
             f"Alcancé a crear {creadas} de {total} filas: {_cuales(titulos, dias, faltan, total)}."
@@ -4024,8 +4120,8 @@ def _base_a_medias(
             texto += f" {exc.mensaje_usuario}"
         else:
             texto += (
-                " Se pueden sumar de a una, como filas nuevas de la base, de la última a la "
-                "primera: así quedan en orden."
+                " Se pueden sumar todas juntas, en esta misma base, con "
+                "sumar_filas_a_base_de_notion."
             )
     return texto
 
@@ -4267,6 +4363,201 @@ async def _crear_base_en_notion(
     final = f"{hecha}, {'con ' if creadas else ''}{cuantas}{aviso}{link}"
     runtime.context.acciones_realizadas[indice] = final
     return final
+
+
+async def _sumar_filas_a_base_de_notion(
+    paginas: Paginas,
+    runtime: Runtime,
+    id_base: str,
+    columnas: Sequence[str],
+    filas: Sequence[Sequence[str]],
+    *,
+    desde: str = "",
+    hasta: str = "",
+) -> str:
+    """validar → leer la base real y su esquema → (sí) → las filas → ordenarla, si se prometió.
+
+    Las filas van de la última a la primera, como en una base nueva. Si alguna
+    lleva el día en la columna de fecha del día, la tabla se ordena por ella: en
+    Notion las filas nuevas salen arriba de las que ya estaban (decisión del
+    alumno, 29/10, y la pregunta lo dice).
+    """
+    usuario_id = runtime.context.usuario_id
+    por_dia = bool(desde.strip() or hasta.strip())
+    if por_dia and (filas or columnas):
+        return (
+            "O una fila por día (desde y hasta) o las filas que dijo la persona (columnas y "
+            "filas): las dos cosas juntas no."
+        )
+    if not por_dia and not filas:
+        return "Faltan las filas: ¿cuáles sumo? Para una por día, pasá desde y hasta."
+    dias: list[date] = []
+    if por_dia:
+        rango = _dias_del_rango(desde, hasta)
+        if isinstance(rango, str):
+            return rango
+        dias = rango
+
+    base = await _en_notion(paginas, usuario_id, id_base, "sumar las filas")
+    if isinstance(base, str):
+        return base
+    nombre = f"«{_dato_ajeno(base.titulo)}»"
+    if base.tipo is not TipoDePagina.BASE:
+        return f"{nombre} es una página: para sumarle filas tiene que ser una base."
+    try:
+        esquema = await paginas.esquema(usuario_id, base.id)
+    except EntityNotFoundError:
+        return _NO_ESTA_EN_NOTION
+    except _FALLOS_DE_NOTION as exc:
+        return _fallo_de_notion(exc, "sumar las filas")
+    escribibles = tuple(c for c in esquema if c.tipo is not TipoDePropiedad.TITULO)
+
+    if por_dia:
+        filas_validas, del_dia = _filas_por_dia(dias, escribibles)
+    else:
+        elegidas = _columnas_de_la_base(columnas, esquema, nombre)
+        if isinstance(elegidas, str):
+            return elegidas
+        problema = _controlar_filas(
+            filas,
+            elegidas,
+            con_primera_columna=False,
+            partir="sumalas en tandas a esta misma base, de la última tanda a la primera",
+        )
+        if problema:
+            return problema
+        ancho = 1 + len(elegidas)
+        validadas = _celdas_de_las_filas(
+            [[*fila, *[""] * (ancho - len(fila))] for fila in filas], elegidas
+        )
+        if isinstance(validadas, str):
+            return validadas
+        filas_validas = validadas
+        del_dia = [
+            columna
+            for columna in elegidas
+            if columna.tipo is TipoDePropiedad.FECHA
+            and _para_buscar(columna.nombre) in _NOMBRES_DEL_DIA
+            and any(celda[0] is columna for _, celdas in filas_validas for celda in celdas)
+        ]
+    ordenar_por = del_dia[0].nombre if del_dia else None
+
+    def mostrado(columna: Propiedad) -> Propiedad:
+        # Los nombres de una base ajena son de terceros: así se muestran en la pregunta.
+        return replace(columna, nombre=_dato_ajeno(columna.nombre, LARGO_DEL_VALOR))
+
+    if dias:
+        cuantas = "una fila" if len(dias) == 1 else f"{len(dias)} filas"
+        texto = (
+            f"Sumar a la base {nombre} de tu Notion una fila por día, "
+            f"{_periodo(dias[0], dias[-1])}: {cuantas}"
+        )
+        if del_dia:
+            en = " y ".join(f"«{mostrado(columna).nombre}»" for columna in del_dia)
+            texto += f", con el día también en {en}"
+        texto += "."
+        if len(del_dia) < len(escribibles):
+            texto += " Las otras columnas quedan vacías."
+        lineas = [texto]
+    else:
+        cuantas = "esta fila" if len(filas_validas) == 1 else f"estas {len(filas_validas)} filas"
+        if len(filas_validas) == _tope_de_filas(filas):
+            cuantas += " (es lo máximo de una vez: las que falten se suman después)"
+        lineas = [f"Sumar a la base {nombre} de tu Notion {cuantas}:"]
+        lineas += [
+            _linea_de_fila_nueva(numero, titulo, tuple((mostrado(c), v, m) for c, v, m in celdas))
+            for numero, (titulo, celdas) in enumerate(filas_validas, start=1)
+        ]
+    if ordenar_por:
+        lineas += ["", f"Y la tabla queda ordenada por «{mostrado(del_dia[0]).nombre}»."]
+    if len(filas_validas) > MAX_FILAS:
+        lineas += ["", "Puede tardar cerca de medio minuto."]
+    resumen = "\n".join(lineas)
+    if not _cabe_en_un_mensaje(runtime, resumen):
+        return (
+            "Es demasiado largo para mostrártelo entero antes de sumarlo: hay que achicarlo o "
+            "partirlo en tandas."
+        )
+    if not _confirmar(runtime, resumen, comparte=True):
+        return "La persona lo canceló. No se sumó nada."
+
+    comenzo = time.perf_counter()
+    total = len(filas_validas)
+    indice: int | None = None
+    creadas = 0
+    for titulo_de_fila, celdas in reversed(filas_validas):
+        try:
+            await _crear_fila(paginas, usuario_id, base, titulo_de_fila, celdas)
+        except LifeSyncError as exc:
+            logger.warning(
+                "agente.filas_sumadas_a_medias",
+                usuario_id=str(usuario_id),
+                creadas=creadas,
+                filas=total,
+                tipo=type(exc).__name__,
+            )
+            if not creadas:
+                # Nada cambió en la base: el texto de cualquier escritura que no salió.
+                if isinstance(exc, EntityNotFoundError):
+                    return "Esa base ya no está en tu Notion, así que no sumé ninguna fila."
+                return _fallo_al_escribir(exc, "sumar las filas", duplica=True)
+            titulos = [titulo for titulo, _ in filas_validas]
+            a_medias = f"En la base {nombre} (id: {base.id}): " + _filas_a_medias(
+                creadas, titulos, dias, exc
+            )
+            _, motivo = await _ordenar_la_tabla(paginas, usuario_id, base, (), ordenar_por)
+            if motivo:
+                a_medias += f" {motivo[0].upper()}{motivo[1:]}."
+            if indice is not None:
+                runtime.context.acciones_realizadas[indice] = a_medias
+            return a_medias
+        creadas += 1
+        progreso = f"Sumé {creadas} de {total} filas a la base {nombre} (id: {base.id})"
+        if indice is None:
+            indice = len(runtime.context.acciones_realizadas)
+            _hecho(runtime, progreso)
+        else:
+            runtime.context.acciones_realizadas[indice] = progreso
+
+    ordenada, motivo = await _ordenar_la_tabla(paginas, usuario_id, base, (), ordenar_por)
+    logger.info(
+        "agente.herramienta.invocada",
+        herramienta="sumar_filas_a_base_de_notion",
+        usuario_id=str(usuario_id),
+        filas=creadas,
+        por_dia=por_dia,
+        ordenada=ordenada,
+        duracion_ms=round((time.perf_counter() - comenzo) * 1000),
+    )
+    aviso = f" ({motivo})" if motivo else ""
+    link = f" — link: {base.enlace}" if base.enlace else ""
+    cuantas = "una fila" if creadas == 1 else f"{creadas} filas"
+    final = f"Sumé {cuantas} a la base {nombre} (id: {base.id}){aviso}{link}"
+    if indice is not None:
+        runtime.context.acciones_realizadas[indice] = final
+    return final
+
+
+def _columnas_de_la_base(
+    pedidas: Sequence[str], esquema: tuple[Propiedad, ...], nombre: str
+) -> list[Propiedad] | str:
+    """Las columnas que nombró el modelo, contra el esquema real de la base; o por qué no."""
+    titulos = {_para_buscar(c.nombre) for c in esquema if c.tipo is TipoDePropiedad.TITULO}
+    escribibles = tuple(c for c in esquema if c.tipo is not TipoDePropiedad.TITULO)
+    elegidas: list[Propiedad] = []
+    for pedida in pedidas:
+        limpia = _en_una_linea(pedida)
+        if not limpia:
+            return "Hay una columna sin nombre: ¿cuál es?"
+        if _para_buscar(limpia) in titulos | _OTROS_NOMBRES_DEL_TITULO:
+            return "El nombre de cada fila va primero en la fila, no entre las columnas."
+        columna = _dato_pedido(escribibles, limpia, nombre)
+        if isinstance(columna, str):
+            return columna
+        if columna in elegidas:
+            return f"La columna «{_dato_ajeno(columna.nombre, LARGO_DEL_VALOR)}» está dos veces."
+        elegidas.append(columna)
+    return elegidas
 
 
 async def _agregar_a_pagina_de_notion(

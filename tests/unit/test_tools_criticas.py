@@ -292,6 +292,8 @@ CASOS: dict[str, dict[str, Any]] = {
         "titulo": "Semana",
         "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
     },
+    # Una sola fila, sin día: UNA escritura (la matriz D sigue en 2) y nada que ordenar.
+    "sumar_filas_a_base_de_notion": {"id_base": BASE_DE_NOTION, "filas": [["Gas"]]},
     "agregar_a_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "texto": "- Leche"},
     "cambiar_dato_en_notion": {"id_pagina": FILA_DE_NOTION, "dato": "Estado", "valor": "Pagado"},
     "mover_pagina_de_notion": {"id_pagina": PAGINA_DE_NOTION, "id_destino": DESTINO_DE_NOTION},
@@ -636,6 +638,7 @@ async def test_si_la_base_se_cae_al_cancelar_el_recordatorio_sigue_programado() 
         ("borrar_archivo", "Ese archivo ya no está en tu Drive"),
         ("crear_pagina_en_notion", "Eso ya no está en tu Notion"),
         ("crear_base_en_notion", "Esa página ya no está en tu Notion, así que no creé la base"),
+        ("sumar_filas_a_base_de_notion", "Esa base ya no está en tu Notion, así que no sumé"),
         ("agregar_a_pagina_de_notion", "Esa página ya no está en tu Notion"),
         ("cambiar_dato_en_notion", "Esa página ya no está en tu Notion"),
         ("mover_pagina_de_notion", "Esa página o la de destino ya no están en tu Notion"),
@@ -937,6 +940,22 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
                 "desde": "2026-12-01",
             },
             "hacen falta las dos fechas",
+        ),
+        (
+            "sumar_filas_a_base_de_notion",
+            {"id_base": PAGINA_DE_NOTION, "filas": [["Gas"]]},
+            "para sumarle filas tiene que ser una base",
+        ),
+        ("sumar_filas_a_base_de_notion", {"id_base": BASE_DE_NOTION}, "Faltan las filas"),
+        (
+            "sumar_filas_a_base_de_notion",
+            {"id_base": BASE_DE_NOTION, "columnas": ["Color"], "filas": [["Gas", "rojo"]]},
+            "no tiene un dato que se llame «Color»",
+        ),
+        (
+            "sumar_filas_a_base_de_notion",
+            {"id_base": BASE_DE_NOTION, "filas": [[f"F{n}"] for n in range(32)]},
+            "sólo nombres, sin datos: hasta 31",
         ),
         (
             "crear_pagina_en_notion",

@@ -966,8 +966,7 @@ async def test_si_se_corta_a_mitad_dice_cuantas_filas_quedaron_y_no_invita_a_rep
     assert texto == (
         f"Creé la base «Semana» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
         "Alcancé a crear 1 de 3 filas: «Miércoles». Faltan «Lunes», «Martes». Se pueden "
-        "sumar de a una, como filas nuevas de la base, de la última a la primera: así quedan "
-        "en orden."
+        "sumar todas juntas, en esta misma base, con sumar_filas_a_base_de_notion."
     )
     # La bitácora dice lo mismo: si el modelo se cae, la persona sabe qué falta.
     assert escena.contexto.acciones_realizadas == [texto]
@@ -1505,8 +1504,7 @@ async def test_si_las_filas_se_cortan_igual_ordena_y_si_no_puede_lo_dice() -> No
 
     texto = _respuesta(estado)
     assert texto.endswith(
-        "de la última a la primera: así quedan en orden. No pude ordenarlas por «Fecha»: se "
-        "puede desde Notion."
+        "con sumar_filas_a_base_de_notion. No pude ordenarlas por «Fecha»: se puede desde Notion."
     )
     assert escena.contexto.acciones_realizadas == [texto]
 
@@ -1703,3 +1701,238 @@ def test_que_cuenta_como_dato_propio(columna: Propiedad, celdas: list[str], espe
     ]
 
     assert _sin_datos_propios(filas, [FECHA, columna]) is esperado
+
+
+# --- Sumar filas a una base que ya existe (QA del 29/10) ---------------------------
+
+NOVIEMBRE_ID = "3c4d5e6f-7081-4923-a4b5-c6d7e8f90a1b"
+ESQUEMA_DE_NOVIEMBRE = (
+    Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO),
+    Propiedad(id="f1", nombre="Fecha", tipo=TipoDePropiedad.FECHA),
+    Propiedad(id="d1", nombre="Descripcion", tipo=TipoDePropiedad.TEXTO),
+    Propiedad(id="c1", nombre="Check", tipo=TipoDePropiedad.CASILLA),
+)
+
+
+def _con_noviembre(**opciones: Any) -> PaginasFalsas:
+    """El Notion de siempre, más la base del 1 al 10 que quedó de la QA."""
+    noviembre = _pagina(id=NOVIEMBRE_ID, titulo="Noviembre 1 al 10", tipo=TipoDePagina.BASE)
+    paginas = _notion(**opciones)
+    paginas.paginas = (*paginas.paginas, noviembre)
+    paginas.esquemas[NOVIEMBRE_ID] = ESQUEMA_DE_NOVIEMBRE
+    return paginas
+
+
+GASTOS_NUEVOS = {
+    "id_base": BASE_ID,
+    "columnas": ["Monto", "pagado"],
+    "filas": [["Gas", "1500", "no"], ["Agua", "800", "sí"], ["Luz", "2300", ""]],
+}
+
+
+async def test_sumar_filas_muestra_cada_una_y_pide_el_si() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", GASTOS_NUEVOS))
+
+    assert _pregunta(estado) == (
+        "Sumar a la base «Gastos» de tu Notion estas 3 filas:\n"
+        "1. Gas — Monto: 1.500 — Pagado: sin marcar\n"
+        "2. Agua — Monto: 800 — Pagado: marcada\n"
+        "3. Luz — Monto: 2.300"
+    )
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_con_el_si_las_suma_de_la_ultima_a_la_primera_en_esa_base() -> None:
+    escena = Escena()
+    await escena.pedir(("sumar_filas_a_base_de_notion", GASTOS_NUEVOS))
+
+    estado = await escena.decidir(True)
+
+    assert [(padre, titulo) for _, padre, titulo, _ in escena.paginas.creadas] == [
+        (BASE_ID, "Luz"),
+        (BASE_ID, "Agua"),
+        (BASE_ID, "Gas"),
+    ]
+    assert [[(c.id, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
+        [("m1", 2300.0)],
+        [("m1", 800.0), ("p1", True)],
+        [("m1", 1500.0), ("p1", False)],
+    ]
+    assert escena.paginas.bases_creadas == []  # nunca una base nueva
+    assert escena.paginas.tablas_ordenadas == []  # sin día no hay nada que ordenar
+    texto = _respuesta(estado)
+    assert texto.startswith(f"Sumé 3 filas a la base «Gastos» (id: {BASE_ID}) — link: ")
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_un_periodo_suma_un_dia_por_fila_y_ordena_por_la_fecha() -> None:
+    """La QA: «Noviembre 1 al 10» ya existe; los días del 11 al 30 van a esa misma base."""
+    escena = Escena(_con_noviembre())
+    args = {"id_base": NOVIEMBRE_ID, "desde": "2026-11-11", "hasta": "2026-11-30"}
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    assert _pregunta(estado) == (
+        "Sumar a la base «Noviembre 1 al 10» de tu Notion una fila por día, del miércoles 11 "
+        "al lunes 30 de noviembre de 2026: 20 filas, con el día también en «Fecha». Las otras "
+        "columnas quedan vacías.\n"
+        "\n"
+        "Y la tabla queda ordenada por «Fecha».\n"
+        "\n"
+        "Puede tardar cerca de medio minuto."
+    )
+    await escena.decidir(True)
+    titulos = [titulo for _, _, titulo, _ in escena.paginas.creadas]
+    assert (len(titulos), titulos[0], titulos[-1]) == (
+        20,
+        "Lunes 30 de noviembre",
+        "Miércoles 11 de noviembre",
+    )
+    assert [[(c.id, v) for c, v in d] for d in escena.paginas.datos_de_creadas][-1] == [
+        ("f1", date(2026, 11, 11))
+    ]
+    # Sólo el orden de las filas: las columnas de una base ajena no se tocan.
+    assert escena.paginas.tablas_ordenadas == [(NOVIEMBRE_ID, (), "Fecha")]
+
+
+async def test_si_no_puede_ordenar_lo_que_prometio_lo_dice() -> None:
+    escena = Escena(_con_noviembre(fallar_al_ordenar=ServiceUnavailableError("sin vistas")))
+    args = {"id_base": NOVIEMBRE_ID, "desde": "2026-11-11", "hasta": "2026-11-12"}
+    await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    estado = await escena.decidir(True)
+
+    assert _respuesta(estado).startswith(
+        "Sumé 2 filas a la base «Noviembre 1 al 10» "
+        f"(id: {NOVIEMBRE_ID}) (no pude ordenarlas por «Fecha»: se puede desde Notion)"
+    )
+
+
+async def test_filas_solo_con_nombre_y_sin_columnas() -> None:
+    escena = Escena()
+    args = {"id_base": BASE_ID, "filas": [["Leche"], ["Pan"]]}
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    assert (
+        _pregunta(estado)
+        == "Sumar a la base «Gastos» de tu Notion estas 2 filas:\n1. Leche\n2. Pan"
+    )
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        ({"id_base": PAGINA_ID, "filas": [["Gas"]]}, "es una página: para sumarle filas"),
+        ({"id_base": BASE_ID}, "Faltan las filas"),
+        (
+            {"id_base": BASE_ID, "filas": [["Gas"]], "desde": "2026-11-01", "hasta": "2026-11-02"},
+            "las dos cosas juntas no",
+        ),
+        ({"id_base": BASE_ID, "desde": "2026-11-30", "hasta": "2026-11-01"}, "anterior"),
+        (
+            {"id_base": BASE_ID, "columnas": ["Color"], "filas": [["Gas", "rojo"]]},
+            "no tiene un dato que se llame «Color»",
+        ),
+        (
+            {"id_base": BASE_ID, "columnas": ["Concepto"], "filas": [["Gas", "x"]]},
+            "El nombre de cada fila va primero",
+        ),
+        (
+            {"id_base": BASE_ID, "columnas": ["Monto", "monto"], "filas": [["Gas", "1", "2"]]},
+            "está dos veces",
+        ),
+        (
+            {"id_base": BASE_ID, "columnas": ["Rubro"], "filas": [["Gas", "Viajes"]]},
+            "no tiene la opción «Viajes»",
+        ),
+        (
+            {"id_base": BASE_ID, "columnas": ["Monto"], "filas": [["Gas", "1", "2"]]},
+            "cada fila lleva 2",
+        ),
+        (
+            {
+                "id_base": BASE_ID,
+                "columnas": ["Monto"],
+                "filas": [[f"F{n}", "1"] for n in range(11)],
+            },
+            "sumalas en tandas a esta misma base, de la última tanda a la primera",
+        ),
+        (
+            {
+                "id_base": BASE_ID,
+                "columnas": ["Vence", "Notas"],
+                "filas": [[f"{d} de noviembre", "", f"Día {d}"] for d in (11, 12, 13)],
+            },
+            "Son 3 días seguidos: usá desde y hasta",
+        ),
+    ],
+    ids=[
+        "pagina",
+        "sin_filas",
+        "rango_y_filas",
+        "rango_al_reves",
+        "columna_desconocida",
+        "el_titulo_como_columna",
+        "columna_repetida",
+        "opcion_inexistente",
+        "ancho",
+        "de_mas",
+        "dias_seguidos",
+    ],
+)
+async def test_sumar_filas_invalidas_se_explica_sin_pausa(
+    args: dict[str, Any], esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_si_no_sale_ninguna_es_una_escritura_que_no_salio() -> None:
+    """Nada cambió en la base: el remedio de siempre, y nada a la bitácora."""
+    escena = Escena(_notion(fallar_al_escribir=ServiceUnavailableError("caído")))
+    await escena.pedir(("sumar_filas_a_base_de_notion", GASTOS_NUEVOS))
+
+    estado = await escena.decidir(True)
+
+    assert _respuesta(estado) == "No pude sumar las filas ahora mismo. Probá de nuevo en un minuto."
+    assert escena.contexto.acciones_realizadas == []
+
+
+async def test_si_se_corta_a_mitad_cuenta_cuales_quedaron_en_la_misma_base() -> None:
+    escena = Escena(
+        _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=1)
+    )
+    await escena.pedir(("sumar_filas_a_base_de_notion", GASTOS_NUEVOS))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert texto == (
+        f"En la base «Gastos» (id: {BASE_ID}): Alcancé a crear 1 de 3 filas: «Luz». Faltan "
+        "«Gas», «Agua». Se pueden sumar todas juntas, en esta misma base, con "
+        "sumar_filas_a_base_de_notion."
+    )
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_los_nombres_de_una_base_ajena_se_muestran_saneados() -> None:
+    """Las columnas las nombró otro: un link en un nombre no llega a la pregunta."""
+    raro = Propiedad(id="x1", nombre="Ver sitio-falso.com", tipo=TipoDePropiedad.TEXTO)
+    paginas = _notion()
+    paginas.esquemas[BASE_ID] = (*DATOS_DE_LA_FILA, raro)
+    escena = Escena(paginas)
+    args = {"id_base": BASE_ID, "columnas": ["Ver sitio-falso.com"], "filas": [["Gas", "hola"]]}
+
+    estado = await escena.pedir(("sumar_filas_a_base_de_notion", args))
+
+    pregunta = _pregunta(estado)
+    assert "sitio-falso.com" not in pregunta
+    assert "[link quitado]" in pregunta

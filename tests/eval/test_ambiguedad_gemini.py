@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.application.dto.archivo_adjunto import ArchivoAdjunto
 from src.application.dto.consulta_del_usuario import ConsultaDelUsuario
@@ -49,6 +50,7 @@ from src.infrastructure.llm.agente_gemini import (
     AgenteGemini,
     crear_agente_gemini,
 )
+from src.infrastructure.llm.grafo import NODO_AGENTE
 from src.infrastructure.llm.herramientas import _MESES, _para_buscar
 from tests.dobles import (
     ArchivosFalsos,
@@ -1176,3 +1178,111 @@ async def test_lo_que_contesta_nombra_en_negrita_sin_comillas_ni_markdown() -> N
     assert "«" not in respuesta
     assert "**" not in respuesta
     assert not re.search(r"\*\S*https?://|https?://\S*\*", respuesta)
+
+
+# --- La QA del 29/10: copiar el historial, y las tandas en la misma base ---------------
+
+BASE_DEL_HISTORIAL = "3c4d5e6f-7081-4923-a4b5-c6d7e8f90a1b"
+ESQUEMA_DEL_HISTORIAL = (
+    Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO),
+    Propiedad(id="f1", nombre="Fecha", tipo=TipoDePropiedad.FECHA),
+    Propiedad(id="d1", nombre="Descripcion", tipo=TipoDePropiedad.TEXTO),
+    Propiedad(id="c1", nombre="Check", tipo=TipoDePropiedad.CASILLA),
+)
+
+
+def _primero_del_mes_que_viene() -> datetime:
+    hoy = datetime.now(ZONA_HORARIA)
+    return (hoy.replace(day=1) + timedelta(days=32)).replace(day=1)
+
+
+def _base_del_historial(titulo: str) -> Pagina:
+    return Pagina(
+        id=BASE_DEL_HISTORIAL,
+        titulo=titulo,
+        tipo=TipoDePagina.BASE,
+        editada=datetime.now(UTC) - timedelta(minutes=20),
+    )
+
+
+async def test_con_la_tabla_vieja_en_el_historial_igual_arma_el_mes_entero() -> None:
+    """La QA del 29/10: el modelo copió su llamada vieja (10 filas, «Día N») en vez del período."""
+    mes, _ = _mes_que_viene()
+    primero = _primero_del_mes_que_viene()
+    vieja = f"{mes.capitalize()} completo"
+    paginas = PaginasFalsas(
+        (RECETAS_DE_NOTION, _base_del_historial(vieja)),
+        esquemas={BASE_DEL_HISTORIAL: ESQUEMA_DEL_HISTORIAL},
+    )
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+    pedido = (
+        f"Crea una base de datos en mi página de recetas de Notion donde cada fila sea un día "
+        f"distinto del mes de {mes} (del primero al último). La segunda columna debe ser tipo "
+        "texto y la tercera tipo check"
+    )
+    filas = [
+        [f"{d} de {mes}", f"{primero.year}-{primero.month:02d}-{d:02d}", f"Día {d}", "no"]
+        for d in range(1, 11)
+    ]
+    llamada = {
+        "id_pagina": RECETAS_DE_NOTION.id,
+        "titulo": vieja,
+        "columnas": [
+            {"nombre": "Fecha", "tipo": "fecha"},
+            {"nombre": "Descripcion", "tipo": "texto"},
+            {"nombre": "Check", "tipo": "casilla"},
+        ],
+        "filas": filas,
+    }
+    # Lo que quedó en el hilo con la versión de antes: la base del 1 al 10, ya creada.
+    await modelo._grafo.aupdate_state(
+        {"configurable": {"thread_id": str(hilo)}},
+        {
+            "messages": [
+                HumanMessage(pedido),
+                AIMessage(
+                    "",
+                    tool_calls=[{"name": "crear_base_en_notion", "args": llamada, "id": "vieja"}],
+                ),
+                ToolMessage(
+                    f"Creé la base «{vieja}» adentro de «Recetas de la abuela» "
+                    f"(id: {BASE_DEL_HISTORIAL}), con 10 filas",
+                    tool_call_id="vieja",
+                    name="crear_base_en_notion",
+                ),
+                AIMessage(f"Listo, ya creé la base «{vieja}» con los primeros 10 días."),
+            ]
+        },
+        as_node=NODO_AGENTE,
+    )
+
+    pregunta = await _turno_en(modelo, hilo, pedido)
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert "una fila por día" in pregunta  # un período, en una base nueva o en la vieja
+    assert "estas 10 filas" not in pregunta
+    assert paginas.escrituras() == 0
+
+
+async def test_los_dias_que_faltan_se_suman_a_la_base_que_ya_existe() -> None:
+    """«Creá primero del 1 al 10 y después…»: lo que falta va a esa base, no a una nueva."""
+    mes, dias = _mes_que_viene()
+    base = f"{mes.capitalize()} 1 al 10"
+    paginas = PaginasFalsas(
+        (RECETAS_DE_NOTION, _base_del_historial(base)),
+        esquemas={BASE_DEL_HISTORIAL: ESQUEMA_DEL_HISTORIAL},
+    )
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+
+    pregunta = await _turno_en(
+        modelo, hilo, f"sumale a mi base {base} de Notion los días del 11 al {dias} de {mes}"
+    )
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert "una fila por día" in pregunta
+    await _turno_en(modelo, hilo, "sí")
+    assert paginas.bases_creadas == []
+    assert len(paginas.creadas) == dias - 10
+    assert {padre for _, padre, _, _ in paginas.creadas} == {BASE_DEL_HISTORIAL}

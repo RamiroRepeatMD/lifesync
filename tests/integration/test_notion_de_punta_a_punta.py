@@ -1250,3 +1250,60 @@ async def test_si_se_corta_un_rango_dice_que_dias_quedaron_y_cuales_faltan() -> 
     # El 429 no escribió nada: el 3 se reintentó una vez, y nada más. La sexta es la vista:
     # con la base a medias se ordena igual, y su 429 sólo se loguea.
     assert len(notion.escrituras()) == 6
+
+
+# --- Sumar filas a una base que ya existe (QA del 29/10) --------------------------------
+
+
+def _base_de_noviembre(notion: NotionFalso) -> str:
+    """La base «Noviembre 1 al 10» que quedó de la QA, con sus diez días: el id de su tabla."""
+    notion._crear_base(
+        {
+            "parent": {"type": "page_id", "page_id": RECETAS},
+            "title": [{"type": "text", "text": {"content": "Noviembre 1 al 10"}}],
+            "is_inline": True,
+            "initial_data_source": {
+                "properties": {
+                    "Nombre": {"title": {}},
+                    "Fecha": {"date": {}},
+                    "Descripción": {"rich_text": {}},
+                }
+            },
+        }
+    )
+    fuente_id, _ = notion.base_nueva()
+    for dia in range(10, 0, -1):
+        notion._crear(
+            {
+                "parent": {"type": "data_source_id", "data_source_id": fuente_id},
+                "properties": {
+                    "title": {"title": [{"type": "text", "text": {"content": f"Día {dia}"}}]},
+                    "col1": {"date": {"start": f"2026-11-{dia:02d}"}},
+                },
+            }
+        )
+    return fuente_id
+
+
+async def test_los_dias_que_faltan_van_a_la_misma_base_y_queda_ordenada() -> None:
+    """«Creá primero del 1 al 10 y después…»: todo en la base que ya existe, del 1 al 30."""
+    notion = NotionFalso()
+    fuente_id = _base_de_noviembre(notion)
+    args = {"id_base": fuente_id, "desde": "2026-11-11", "hasta": "2026-11-30"}
+    bot = Bot(notion, _llamadas(("sumar_filas_a_base_de_notion", args)), AIMessage("Listo."))
+
+    pregunta = await bot.decir("sumá a Noviembre 1 al 10 los días del 11 al 30")
+
+    assert "del miércoles 11 al lunes 30 de noviembre de 2026: 20 filas" in pregunta
+    assert "Y la tabla queda ordenada por «Fecha»." in pregunta
+    assert notion.escrituras() == []
+    await bot.decir("sí")
+    assert len(notion.bases_de_datos) == 1  # ninguna base nueva
+    fechas = sorted(f["properties"]["Fecha"]["date"]["start"] for f in notion.filas[fuente_id])
+    assert fechas == [f"2026-11-{dia:02d}" for dia in range(1, 31)]
+    # Las nuevas salen arriba: ordenada por la fecha, se lee del 1 al 30.
+    assert notion.vista_nueva()["sorts"] == [{"property": "col1", "direction": "ascending"}]
+    # De una base ajena sólo se toca el orden de las filas, nunca sus columnas.
+    assert notion.vista_nueva()["configuration"]["properties"] == []
+    [hecho] = await bot.respuestas_de_tools()
+    assert hecho.startswith(f"Sumé 20 filas a la base «Noviembre 1 al 10» (id: {fuente_id})")
