@@ -33,7 +33,7 @@ La documentación completa está en [`docs/`](docs/).
 | Base de datos + Auth | Supabase (PostgreSQL) · tokens OAuth2 **cifrados** · conversación **cifrada** (checkpointer) |
 | Integraciones | Google Calendar (completa) · Google Tasks (completa) · **Gmail** (buscar, leer, mandar, responder y reenviar) · **Google Drive** (buscar, subir lo que llega por WhatsApp, compartir, renombrar, mover y mandar a la papelera) · **Notion** (conectar por OAuth; buscar por título, leer páginas y consultar bases; crear páginas, filas con sus datos y bases nuevas, agregar texto, cambiar datos, mover, mandar a la papelera y subir archivos) |
 | Logging | structlog (estructurado, JSON en producción) |
-| Testing | pytest · ruff · mypy strict — 2242 tests (cobertura con ramas 93,5%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
+| Testing | pytest · ruff · mypy strict — 2270 tests (cobertura con ramas 93,6%, piso de 90% en CI) + 43 de evaluación contra el modelo real |
 | Hosting | Railway (desde Dockerfile) |
 
 ---
@@ -289,8 +289,9 @@ adentro de la página, con hasta 5 columnas (texto, número, casilla, fecha o se
 la primera, que en Notion es siempre texto y se llama como pida la persona ("que la primera
 columna sea la fecha"). Las filas: hasta 10 con datos, 31 si llevan sólo el nombre, o una por
 día de un período ("todos los días de noviembre", hasta 31), que arma el bot con el día en la
-primera columna y sin inventar nada en las otras. Si no entran, avisa y pregunta: nunca recorta
-la lista por su cuenta. Las filas se crean de la última a la primera, así se leen en orden, y la
+primera columna y sin inventar nada en las otras. Si el modelo manda tres o más días seguidos
+como filas sueltas, sin otro dato que el día, la herramienta lo lleva al período. Si no entran,
+avisa y pregunta: nunca recorta la lista por su cuenta. Las filas se crean de la última a la primera, así se leen en orden, y la
 vista queda con las columnas en el orden pedido (y ordenada por la fecha, si hay una columna de
 fecha del día). Todo en una sola confirmación. Las bases enteras no se mueven ni se borran, y una
 fila no sale de su base. Si Notion no confirma una escritura, el bot no dice

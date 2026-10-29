@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from email.utils import parseaddr
+from itertools import pairwise
 from typing import Literal, NotRequired
 from uuid import UUID
 
@@ -3230,6 +3231,10 @@ MAX_DIAS_DE_UNA_BASE = 31
 # Una columna de fecha con uno de estos nombres lleva el día de su fila. Con otro
 # («Vence»), es otra fecha y queda vacía.
 _NOMBRES_DEL_DIA = frozenset({"fecha", "dia", "date", "day"})
+# Tres o más días seguidos, sin otro dato que el día, son un período: van con
+# `desde` y `hasta` (hasta 31), no como filas sueltas (topadas en 10 con datos).
+# Así el modelo copió de su historial una tabla de 10 días con «Día N» (QA del 29/10).
+MIN_DIAS_SEGUIDOS = 3
 # Antes de reintentar una fila: lo que tarda en pasar un 429 o un 409 de Notion.
 ESPERA_PARA_REINTENTAR = 1.0
 # Cómo puede llegar el tipo de una columna, ya sin tildes ni mayúsculas.
@@ -3707,6 +3712,8 @@ def _filas_nuevas(
                 f"La fila {numero} tiene {len(fila)} valores y cada fila lleva {ancho}: el "
                 'nombre y uno por columna, en orden ("" si no tiene); o sólo el nombre.'
             )
+    if (dias := _dias_seguidos(filas, columnas)) and _sin_datos_propios(filas, columnas):
+        return _son_dias_seguidos(len(dias), con_primera_columna=True)
     if len(filas) > _tope_de_filas(filas):
         # Nunca "creala con las primeras": así el modelo recortó sin avisar (QA del 28/10).
         return (
@@ -3748,6 +3755,132 @@ def _filas_nuevas(
             celdas.append((columna, *validado))
         validadas.append((titulo, tuple(celdas)))
     return columnas, validadas
+
+
+# «domingo 1 de noviembre», «1 de noviembre de 2026», ya sin tildes ni mayúsculas.
+_DIA_EN_TEXTO = re.compile(
+    r"(?:(?P<semana>[a-z]+),? )?(?P<dia>[0-9]{1,2}) de (?P<mes>[a-z]+)(?: de (?P<anio>[0-9]{4}))?"
+)
+_MES_POR_NOMBRE = {mes: numero for numero, mes in enumerate(_MESES, start=1)} | {"setiembre": 9}
+# Lo que no es dato en una celda que sólo repite el día: «Día 11», «martes 11 de noviembre».
+_PALABRAS_DEL_DIA = frozenset(
+    {"de", "del", "el", "dia", *_MES_POR_NOMBRE, *(_para_buscar(dia) for dia in _DIAS)}
+)
+
+
+def _dia_del_nombre(texto: str, anio: int) -> date | None:
+    """La fecha que dice un texto («Domingo 1 de noviembre», 2026-11-01), o None.
+
+    Nunca lanza. Sin año, va `anio`. Si nombra el día de la semana y no coincide
+    con la fecha, no es una fecha (no se adivina cuál de las dos quiso decir).
+    """
+    limpio = _para_buscar(_en_una_linea(texto))
+    if _FECHA_ISO.fullmatch(limpio):
+        try:
+            return date.fromisoformat(limpio)
+        except ValueError:
+            return None
+    encontrado = _DIA_EN_TEXTO.fullmatch(limpio)
+    mes = _MES_POR_NOMBRE.get(encontrado["mes"]) if encontrado else None
+    if encontrado is None or mes is None:
+        return None
+    try:
+        fecha = date(int(encontrado["anio"] or anio), mes, int(encontrado["dia"]))
+    except ValueError:
+        return None
+    semana = encontrado["semana"]
+    if semana is not None and semana != _para_buscar(_DIAS[fecha.weekday()]):
+        return None
+    return fecha
+
+
+def _columna_del_dia(columnas: Sequence[Propiedad]) -> int | None:
+    """La posición de la primera columna de fecha que lleva el día de su fila."""
+    return next(
+        (
+            indice
+            for indice, columna in enumerate(columnas)
+            if columna.tipo is TipoDePropiedad.FECHA
+            and _para_buscar(columna.nombre) in _NOMBRES_DEL_DIA
+        ),
+        None,
+    )
+
+
+def _dias_seguidos(filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad]) -> list[date]:
+    """Los días de las filas si son `MIN_DIAS_SEGUIDOS` o más, seguidos y en orden; si no, [].
+
+    El día de cada fila sale de la columna del día («Fecha») o, si no tiene, de su
+    nombre. Corre sobre las filas crudas (ya con el ancho controlado): antes del
+    tope, que corta sin leer las celdas.
+    """
+    if len(filas) < MIN_DIAS_SEGUIDOS:
+        return []
+    del_dia = _columna_del_dia(columnas)
+    textos = [
+        fila[del_dia + 1] if del_dia is not None and len(fila) > del_dia + 1 else ""
+        for fila in filas
+    ]
+    # Sin año a la vista, el de hoy: sólo importa que sean seguidos.
+    anio = next(
+        (
+            int(t.strip()[:4])
+            for t in [*textos, *(f[0] for f in filas)]
+            if _FECHA_ISO.fullmatch(t.strip())
+        ),
+        datetime.now(ZONA_HORARIA).year,
+    )
+    dias: list[date] = []
+    for fila, texto in zip(filas, textos, strict=True):
+        dia = (_dia_del_nombre(texto, anio) if texto.strip() else None) or _dia_del_nombre(
+            fila[0], anio
+        )
+        if dia is None:
+            return []
+        dias.append(dia)
+    if any((despues - antes).days != 1 for antes, despues in pairwise(dias)):
+        return []
+    return dias
+
+
+def _sin_el_dia(texto: str) -> str:
+    """El texto sin números ni las palabras de una fecha: «Día 11» y «Día 12» quedan iguales."""
+    palabras = re.sub(r"[^a-z]+", " ", _para_buscar(texto)).split()
+    return " ".join(palabra for palabra in palabras if palabra not in _PALABRAS_DEL_DIA)
+
+
+def _sin_datos_propios(filas: Sequence[Sequence[str]], columnas: Sequence[Propiedad]) -> bool:
+    """Si, fuera del día, las filas no traen nada que parezca dicho por la persona.
+
+    Es relleno del modelo lo que se repite en todas una vez sacado el día («Día
+    11», «11 de noviembre») y una casilla en «no». Un texto distinto en cada
+    fila, una selección, una casilla en «sí» u otra fecha («Vence») son datos.
+    """
+    del_dia = _columna_del_dia(columnas)
+    for indice, columna in enumerate(columnas):
+        celdas = [_en_una_linea(f[indice + 1]) if len(f) > indice + 1 else "" for f in filas]
+        if indice == del_dia or not any(celdas):
+            continue
+        if columna.tipo is TipoDePropiedad.CASILLA:
+            if all(_para_buscar(celda) in _NO for celda in celdas if celda):
+                continue
+            return False
+        if columna.tipo in (TipoDePropiedad.TEXTO, TipoDePropiedad.NUMERO):
+            if len({_sin_el_dia(celda) for celda in celdas}) == 1:
+                continue
+        return False
+    return True
+
+
+def _son_dias_seguidos(cuantos: int, *, con_primera_columna: bool) -> str:
+    primera = " (con primera_columna, si la persona la nombró)" if con_primera_columna else ""
+    return (
+        f"Son {cuantos} días seguidos: usá desde y hasta, que arma hasta "
+        f"{MAX_DIAS_DE_UNA_BASE} filas de una vez con el día en la primera columna{primera}. "
+        "No repitas el día en otra columna ni pongas valores que la persona no dijo (como "
+        "«Día 1» o casillas en «no»): lo que no dijo queda vacío. Si pidió el mes entero, "
+        "pasá el mes entero."
+    )
 
 
 def _tope_de_filas(filas: Sequence[Sequence[str]]) -> int:
@@ -4050,7 +4183,9 @@ async def _crear_base_en_notion(
         cuantas = "esta fila" if len(filas_validas) == 1 else f"estas {len(filas_validas)} filas"
         if len(filas_validas) == _tope_de_filas(filas):
             # Si el modelo recortó la lista justo en el tope, que se note antes del sí.
-            cuantas += " (es lo máximo de una vez)"
+            cuantas += (
+                " (es lo máximo de una vez: las que falten se suman después a esta misma base)"
+            )
         lineas += ["", f"Y {cuantas}:"]
         lineas += [
             _linea_de_fila_nueva(numero, titulo_de_fila, celdas)

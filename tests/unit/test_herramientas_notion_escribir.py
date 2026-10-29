@@ -43,6 +43,9 @@ from src.infrastructure.llm.grafo import LOTE_DEMASIADO_LARGO, construir_grafo
 from src.infrastructure.llm.herramientas import (
     _bloques,
     _como_queda,
+    _dia_del_nombre,
+    _dias_seguidos,
+    _sin_datos_propios,
     construir_herramientas,
     mensaje_de_la_persona,
 )
@@ -943,8 +946,9 @@ async def test_la_pregunta_cuenta_lo_ya_hecho_en_el_turno() -> None:
     assert "demasiado largo" in _respuesta(estado)
 
 
+# Fechas no seguidas: tres días seguidos sólo con la fecha irían como período (QA del 29/10).
 TRES_DIAS = _con(
-    filas=[["Lunes", "2026-11-02"], ["Martes", "2026-11-03"], ["Miércoles", "2026-11-04"]]
+    filas=[["Lunes", "2026-11-02"], ["Martes", "2026-11-10"], ["Miércoles", "2026-11-18"]]
 )
 
 
@@ -1008,8 +1012,8 @@ async def test_una_falla_pasajera_en_una_fila_se_reintenta_una_vez() -> None:
     ]
     # El reintento lleva los mismos datos que la pregunta mostró.
     assert [[(c.nombre, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
-        [("Fecha", date(2026, 11, 4))],
-        [("Fecha", date(2026, 11, 3))],
+        [("Fecha", date(2026, 11, 18))],
+        [("Fecha", date(2026, 11, 10))],
         [("Fecha", date(2026, 11, 2))],
     ]
     assert ", con 3 filas — link: " in _respuesta(estado)
@@ -1394,7 +1398,10 @@ async def test_en_el_tope_la_pregunta_dice_que_es_lo_maximo() -> None:
 
     estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
 
-    assert "Y estas 10 filas (es lo máximo de una vez):" in _pregunta(estado)
+    assert (
+        "Y estas 10 filas (es lo máximo de una vez: las que falten se suman después a esta "
+        "misma base):"
+    ) in _pregunta(estado)
 
 
 async def test_hasta_31_filas_si_solo_llevan_el_nombre() -> None:
@@ -1404,7 +1411,7 @@ async def test_hasta_31_filas_si_solo_llevan_el_nombre() -> None:
     estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
 
     pregunta = _pregunta(estado)
-    assert "Y estas 31 filas (es lo máximo de una vez):" in pregunta
+    assert "Y estas 31 filas (es lo máximo de una vez: las que falten se suman" in pregunta
     assert pregunta.endswith("31. Tarea 31\n\nPuede tardar cerca de medio minuto.")
 
 
@@ -1552,3 +1559,147 @@ async def test_una_primera_columna_fecha_sin_rango_avisa_que_es_texto() -> None:
         "• Fecha (el nombre de cada fila, en texto: Notion no deja que la primera sea de tipo "
         "fecha)"
     )
+
+
+# --- Días seguidos: van como período (QA del 29/10) --------------------------------
+
+# Lo que mandó el modelo copiando su historial: del 11 al 20, con «Día N» y la casilla en «no».
+DEL_11_AL_20 = {
+    "id_pagina": PAGINA_ID,
+    "titulo": "Noviembre Dias",
+    "columnas": [
+        {"nombre": "Fecha", "tipo": "fecha"},
+        {"nombre": "Descripcion", "tipo": "texto"},
+        {"nombre": "Check", "tipo": "casilla"},
+    ],
+    "filas": [
+        [f"{dia} de noviembre", f"2026-11-{dia}", f"Día {dia}", "no"] for dia in range(11, 21)
+    ],
+}
+
+
+async def test_dias_seguidos_con_relleno_van_como_periodo_sin_pausa() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", DEL_11_AL_20))
+
+    assert "__interrupt__" not in estado
+    texto = _respuesta(estado)
+    assert texto.startswith("Son 10 días seguidos: usá desde y hasta, que arma hasta 31 filas")
+    assert "como «Día 1» o casillas en «no»" in texto
+    assert "Si pidió el mes entero, pasá el mes entero." in texto
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_mas_de_diez_dias_seguidos_tambien_van_como_periodo_y_no_como_tope() -> None:
+    """El aviso va antes del tope: si no, el modelo leería que entran 10 y partiría."""
+    escena = Escena()
+    args = {
+        **DEL_11_AL_20,
+        "filas": [[f"{d} de noviembre", f"2026-11-{d:02d}", "", ""] for d in range(1, 31)],
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert _respuesta(estado).startswith("Son 30 días seguidos: usá desde y hasta")
+
+
+async def test_dias_seguidos_con_datos_de_cada_dia_siguen_como_filas() -> None:
+    escena = Escena()
+    planes = ["dentista", "gimnasio", "cumpleaños de Ana"]
+    args = {
+        **DEL_11_AL_20,
+        "filas": [
+            [f"{d} de noviembre", f"2026-11-{d}", plan, "no"]
+            for d, plan in zip(range(11, 14), planes, strict=True)
+        ],
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert "Y estas 3 filas:" in _pregunta(estado)
+
+
+@pytest.mark.parametrize(
+    "filas",
+    [
+        [["Lunes"], ["Martes"], ["Miércoles"]],  # días de la semana sin fecha
+        [["11 de noviembre"], ["12 de noviembre"]],  # dos no alcanzan
+        [["11 de noviembre"], ["13 de noviembre"], ["14 de noviembre"]],  # con un hueco
+        [["13 de noviembre"], ["12 de noviembre"], ["11 de noviembre"]],  # al revés
+    ],
+    ids=["sin_fecha", "dos", "con_hueco", "al_reves"],
+)
+async def test_lo_que_no_es_un_periodo_sigue_como_filas(filas: list[list[str]]) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas, columnas=[])))
+
+    assert "__interrupt__" in estado
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        ("Domingo 1 de noviembre", date(2026, 11, 1)),
+        ("1 de noviembre", date(2026, 11, 1)),
+        ("domingo, 1 de noviembre de 2027", None),  # el 1/11/2027 es lunes
+        ("lunes 1 de noviembre de 2027", date(2027, 11, 1)),
+        ("2026-11-01", date(2026, 11, 1)),
+        ("1 de setiembre", date(2026, 9, 1)),
+        ("Lunes 1 de noviembre", None),  # el día de la semana no coincide
+        ("31 de noviembre", None),
+        ("2026-02-30", None),
+        ("noviembre", None),
+        ("Leche", None),
+    ],
+)
+def test_la_fecha_que_dice_el_nombre_de_una_fila(texto: str, esperado: date | None) -> None:
+    assert _dia_del_nombre(texto, 2026) == esperado
+
+
+def _columna(nombre: str, tipo: TipoDePropiedad) -> Propiedad:
+    return Propiedad(id=nombre, nombre=nombre, tipo=tipo)
+
+
+FECHA = _columna("Fecha", TipoDePropiedad.FECHA)
+
+
+def test_la_columna_del_dia_gana_al_nombre_de_la_fila() -> None:
+    filas = [[f"Turno {n}", f"2026-11-{d:02d}"] for n, d in enumerate((3, 4, 5))]
+
+    assert _dias_seguidos(filas, [FECHA]) == [date(2026, 11, d) for d in (3, 4, 5)]
+
+
+@pytest.mark.parametrize(
+    ("columna", "celdas", "esperado"),
+    [
+        (_columna("Check", TipoDePropiedad.CASILLA), ["no", "no", ""], True),
+        (_columna("Check", TipoDePropiedad.CASILLA), ["no", "sí", "no"], False),
+        (_columna("Notas", TipoDePropiedad.TEXTO), ["Día 3", "Día 4", "Día 5"], True),
+        (_columna("Notas", TipoDePropiedad.TEXTO), ["martes 3", "miércoles 4", "jueves 5"], True),
+        (_columna("Notas", TipoDePropiedad.TEXTO), ["dentista", "", ""], False),
+        (_columna("Monto", TipoDePropiedad.NUMERO), ["3", "4", "5"], True),
+        (_columna("Rubro", TipoDePropiedad.SELECCION), ["A", "A", "A"], False),
+        (_columna("Vence", TipoDePropiedad.FECHA), ["2026-11-30"] * 3, False),
+        (_columna("Notas", TipoDePropiedad.TEXTO), ["", "", ""], True),
+    ],
+    ids=[
+        "casillas_en_no",
+        "una_casilla_en_si",
+        "dia_n",
+        "el_dia_en_palabras",
+        "un_dato_real",
+        "numero_del_dia",
+        "seleccion",
+        "otra_fecha",
+        "vacias",
+    ],
+)
+def test_que_cuenta_como_dato_propio(columna: Propiedad, celdas: list[str], esperado: bool) -> None:
+    filas = [
+        [f"{d} de noviembre", f"2026-11-0{d}", celda]
+        for d, celda in zip((3, 4, 5), celdas, strict=True)
+    ]
+
+    assert _sin_datos_propios(filas, [FECHA, columna]) is esperado

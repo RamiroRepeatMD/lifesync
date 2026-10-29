@@ -951,26 +951,39 @@ PEDIDO_DEL_QA = {
 }
 
 
-async def test_el_pedido_del_qa_crea_la_base_adentro_de_la_pagina_y_sus_filas() -> None:
-    """ "Creá ahí dentro una base donde cada fila es un día de la semana que viene"."""
+async def test_el_pedido_del_qa_va_como_periodo_y_crea_la_base_con_sus_dias() -> None:
+    """ "Creá ahí dentro una base donde cada fila es un día de la semana que viene".
+
+    Si el modelo manda los siete días como filas, la tool lo lleva al período
+    (QA del 29/10), y con desde y hasta arma los días con su fecha, en orden.
+    """
     notion = NotionFalso()
-    bot = Bot(notion, _llamadas(("crear_base_en_notion", PEDIDO_DEL_QA)), AIMessage("Listo."))
+    por_periodo = {**PEDIDO_DEL_QA, "filas": None, "desde": "2026-11-02", "hasta": "2026-11-08"}
+    bot = Bot(
+        notion,
+        _llamadas(("crear_base_en_notion", PEDIDO_DEL_QA)),
+        _llamadas(("crear_base_en_notion", por_periodo)),
+        AIMessage("Listo."),
+    )
 
     pregunta = await bot.decir(
         "creá ahí dentro una base con un día de la semana que viene por fila"
     )
 
+    [aviso] = await bot.respuestas_de_tools()
+    assert aviso.startswith("Son 7 días seguidos: usá desde y hasta")
     assert CONFIRMAR in pregunta
-    assert "7. Domingo — Fecha: domingo 8 de noviembre de 2026" in pregunta
+    assert "del lunes 2 al domingo 8 de noviembre de 2026: 7 filas" in pregunta
     assert notion.escrituras() == []
     await bot.decir("sí")
-    crear, *filas = notion.escrituras()
+    crear, *_ = notion.escrituras()
+    filas = [p for p in notion.escrituras() if p.url.path == "/v1/pages"]
     assert (crear.method, crear.url.path) == ("POST", "/v1/databases")
     assert json.loads(crear.content) == {
         "parent": {"type": "page_id", "page_id": RECETAS},
         "title": [{"type": "text", "text": {"content": "Semana que viene"}}],
         "is_inline": True,
-        "initial_data_source": {"properties": {"Nombre": {"title": {}}, "Fecha": {"date": {}}}},
+        "initial_data_source": {"properties": {"Día": {"title": {}}, "Fecha": {"date": {}}}},
     }
     fuente_id, fuente = notion.base_nueva()
     [base_id] = notion.bases_de_datos
@@ -978,14 +991,19 @@ async def test_el_pedido_del_qa_crea_la_base_adentro_de_la_pagina_y_sus_filas() 
     assert [json.loads(f.content)["parent"] for f in filas] == [
         {"type": "data_source_id", "data_source_id": fuente_id}
     ] * 7
-    # De la última a la primera: arriba queda el lunes, como se lee.
-    pedidas = [json.loads(f.content)["properties"]["title"]["title"] for f in filas]
-    assert [titulo[0]["text"]["content"] for titulo in pedidas][:2] == ["Domingo", "Sábado"]
     assert [
         (_titulo(f), f["properties"]["Fecha"]["date"]["start"]) for f in notion.filas[fuente_id]
-    ] == [tuple(fila) for fila in SEMANA]
+    ] == [
+        (f"{dia.capitalize()} {n} de noviembre", f"2026-11-0{n}")
+        for dia, n in zip(
+            ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+            range(2, 9),
+            strict=True,
+        )
+    ]
+    assert notion.vista_nueva()["sorts"] == [{"property": "col1", "direction": "ascending"}]
     assert _titulo(fuente) == "Semana que viene"
-    [hecho] = await bot.respuestas_de_tools()
+    hecho = (await bot.respuestas_de_tools())[-1]
     assert hecho.startswith(
         f"Creé la base «Semana que viene» adentro de «Recetas» (id: {fuente_id})"
     )
@@ -1039,7 +1057,11 @@ async def test_si_notion_se_cae_a_mitad_cuenta_la_base_y_las_filas_que_quedaron(
     notion = NotionFalso()
     notion.fallar_al_escribir = _error(503, "service_unavailable")
     notion.escrituras_antes_de_fallar = 2  # la base y el miércoles, que va primero
-    args = {**PEDIDO_DEL_QA, "filas": SEMANA[:3]}
+    # Fechas no seguidas: tres días seguidos sólo con la fecha irían como período.
+    args = {
+        **PEDIDO_DEL_QA,
+        "filas": [SEMANA[0], ["Martes", "2026-11-10"], ["Miércoles", "2026-11-18"]],
+    }
     bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Cortó."))
 
     await bot.decir("creá la base")
