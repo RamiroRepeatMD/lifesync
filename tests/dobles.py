@@ -32,6 +32,7 @@ from src.application.ports.autorizador_notion import AutorizadorNotion, Credenci
 from src.application.ports.calendario import Calendario
 from src.application.ports.correos import Correos
 from src.application.ports.paginas import (
+    NOMBRE_DEL_TITULO,
     BaseConsultada,
     Bloque,
     FilaDeBase,
@@ -602,6 +603,8 @@ class PaginasFalsas(Paginas):
         fallar_con: Exception | None = None,
         fallar_al_escribir: Exception | None = None,
         escrituras_antes_de_fallar: int = 0,
+        fallar_al_ordenar: Exception | None = None,
+        fallar_una_sola_vez: bool = False,
     ) -> None:
         self.paginas = tuple(paginas)
         self.contenidos = contenidos or {}
@@ -612,6 +615,9 @@ class PaginasFalsas(Paginas):
         self.fallar_con = fallar_con
         self.fallar_al_escribir = fallar_al_escribir
         self.escrituras_antes_de_fallar = escrituras_antes_de_fallar
+        self.fallar_al_ordenar = fallar_al_ordenar
+        # Una falla pasajera (un 429): la escritura que sigue ya anda.
+        self.fallar_una_sola_vez = fallar_una_sola_vez
         self.busquedas: list[tuple[UUID, str, int]] = []
         self.leidas: list[str] = []
         self.consultadas: list[str] = []
@@ -619,6 +625,10 @@ class PaginasFalsas(Paginas):
         # Los datos de cada `crear`, en el mismo orden que `creadas`.
         self.datos_de_creadas: list[tuple[tuple[Propiedad, ValorDePropiedad], ...]] = []
         self.bases_creadas: list[tuple[UUID, str, str, tuple[Propiedad, ...]]] = []
+        # La primera columna de cada base, en el mismo orden que `bases_creadas`.
+        self.primeras_columnas: list[str] = []
+        # (base, columnas, ordenar_por) de cada `ordenar_tabla`.
+        self.tablas_ordenadas: list[tuple[str, tuple[str, ...], str | None]] = []
         self.agregados: list[tuple[UUID, str, tuple[Bloque, ...]]] = []
         self.cambios: list[tuple[UUID, str, str, ValorDePropiedad]] = []
         self.movidas: list[tuple[UUID, str, str]] = []
@@ -630,6 +640,7 @@ class PaginasFalsas(Paginas):
         return (
             len(self.creadas)
             + len(self.bases_creadas)
+            + len(self.tablas_ordenadas)
             + len(self.agregados)
             + len(self.cambios)
             + len(self.movidas)
@@ -695,10 +706,16 @@ class PaginasFalsas(Paginas):
         return nueva
 
     async def crear_base(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        columnas: tuple[Propiedad, ...],
+        primera_columna: str = NOMBRE_DEL_TITULO,
     ) -> Pagina:
         self._fallar(escritura=True)
         self.bases_creadas.append((usuario_id, padre.id, titulo, columnas))
+        self.primeras_columnas.append(primera_columna)
         nueva = Pagina(
             id=str(uuid4()),
             titulo=titulo,
@@ -707,8 +724,26 @@ class PaginasFalsas(Paginas):
             enlace="https://www.notion.so/base-nueva",
         )
         self.paginas = (*self.paginas, nueva)
-        self.esquemas[nueva.id] = columnas
+        # Como Notion: la columna de título, con su nombre, y después las otras.
+        titulo_de_la_base = Propiedad(
+            id="title", nombre=primera_columna, tipo=TipoDePropiedad.TITULO
+        )
+        self.esquemas[nueva.id] = (titulo_de_la_base, *columnas)
         return nueva
+
+    async def ordenar_tabla(
+        self,
+        usuario_id: UUID,
+        base_id: str,
+        columnas: tuple[str, ...],
+        ordenar_por: str | None = None,
+    ) -> None:
+        # Primero falla, después anota: un orden fallido no cuenta como escritura.
+        self._fallar(escritura=True)
+        if self.fallar_al_ordenar is not None:
+            raise self.fallar_al_ordenar
+        self._buscar_por_id(base_id, TipoDePagina.BASE)
+        self.tablas_ordenadas.append((base_id, columnas, ordenar_por))
 
     async def esquema(self, usuario_id: UUID, base_id: str) -> tuple[Propiedad, ...]:
         self._fallar()
@@ -748,7 +783,10 @@ class PaginasFalsas(Paginas):
             raise self.fallar_con
         hechas = self.escrituras() >= self.escrituras_antes_de_fallar
         if escritura and self.fallar_al_escribir is not None and hechas:
-            raise self.fallar_al_escribir
+            falla = self.fallar_al_escribir
+            if self.fallar_una_sola_vez:
+                self.fallar_al_escribir = None
+            raise falla
 
     def _buscar_por_id(self, identificador: str, tipo: TipoDePagina) -> Pagina:
         for pagina in self.paginas:

@@ -763,7 +763,8 @@ async def test_crear_una_base_muestra_columnas_y_filas_y_pide_el_si() -> None:
     assert escena.paginas.escrituras() == 0
 
 
-async def test_con_el_si_crea_la_base_y_despues_sus_filas_en_orden() -> None:
+async def test_con_el_si_crea_la_base_y_despues_sus_filas_de_la_ultima_a_la_primera() -> None:
+    """Notion muestra arriba la última fila creada: así se leen en el orden pedido."""
     escena = Escena()
     await escena.pedir(("crear_base_en_notion", SEMANA))
 
@@ -772,15 +773,18 @@ async def test_con_el_si_crea_la_base_y_despues_sus_filas_en_orden() -> None:
     [(usuario, padre, titulo, columnas)] = escena.paginas.bases_creadas
     assert (usuario, padre, titulo) == (USUARIO, PAGINA_ID, "Semana")
     assert [(c.nombre, c.tipo) for c in columnas] == [("Fecha", TipoDePropiedad.FECHA)]
+    assert escena.paginas.primeras_columnas == ["Nombre"]
     base_id = _base_nueva(escena)
     assert [(padre, titulo) for _, padre, titulo, _ in escena.paginas.creadas] == [
-        (base_id, "Lunes"),
         (base_id, "Martes"),
+        (base_id, "Lunes"),
     ]
     assert [[(c.nombre, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
-        [("Fecha", date(2026, 11, 2))],
         [("Fecha", date(2026, 11, 3))],
+        [("Fecha", date(2026, 11, 2))],
     ]
+    # Con una sola columna no hay nada que acomodar en la vista.
+    assert escena.paginas.tablas_ordenadas == []
     texto = _respuesta(estado)
     assert texto == (
         f"Creé la base «Semana» adentro de «Recetas» (id: {base_id}), con 2 filas "
@@ -834,9 +838,12 @@ async def test_cada_tipo_de_columna_y_las_opciones_que_traen_las_filas() -> None
     [(_, _, _, columnas)] = escena.paginas.bases_creadas
     assert columnas[0].opciones == ("Servicios", "Comida")
     assert [[v for _, v in datos] for datos in escena.paginas.datos_de_creadas] == [
-        ["Servicios", 1500.5, True],
         ["Comida", 2000.0, False, "con tarjeta"],
+        ["Servicios", 1500.5, True],
     ]
+    # Varias columnas: la vista las pone en el orden pedido, sin ordenar las filas.
+    [(_, en_orden, por)] = escena.paginas.tablas_ordenadas
+    assert (en_orden, por) == (("Rubro", "Monto", "Pagado", "Notas"), None)
 
 
 def _con(**cambios: Any) -> dict[str, Any]:
@@ -888,8 +895,8 @@ def _columnas(*tipos: str) -> list[dict[str, Any]]:
             ),
             "más de 20 opciones",
         ),
-        (_con(filas=[[f"F{n}", ""] for n in range(11)]), "lleva hasta 10"),
-        (_con(filas=[["Lunes"]]), "tiene 1 valores y cada fila lleva 2"),
+        (_con(filas=[[f"F{n}", "2026-11-02"] for n in range(11)]), "con datos van hasta 10"),
+        (_con(filas=[[f"F{n}"] for n in range(32)]), "sólo nombres, sin datos: hasta 31"),
         (_con(filas=[["Lunes", "2026-11-02", "extra"]]), "tiene 3 valores"),
         (_con(filas=[["", "2026-11-02"]]), "A la fila 1 le falta el nombre"),
         (_con(filas=[["Lunes", "2 de noviembre"]]), "Fila 1 («Lunes»), «Fecha»: La fecha va en"),
@@ -942,7 +949,7 @@ TRES_DIAS = _con(
 
 
 async def test_si_se_corta_a_mitad_dice_cuantas_filas_quedaron_y_no_invita_a_repetirla() -> None:
-    # Escrituras: la base (1) y el lunes (2); falla el martes.
+    # Escrituras: la base (1) y el miércoles (2), que va primero; falla el martes, dos veces.
     escena = Escena(
         _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=2)
     )
@@ -951,27 +958,89 @@ async def test_si_se_corta_a_mitad_dice_cuantas_filas_quedaron_y_no_invita_a_rep
     estado = await escena.decidir(True)
 
     base_id = _base_nueva(escena)
-    assert _respuesta(estado) == (
+    texto = _respuesta(estado)
+    assert texto == (
         f"Creé la base «Semana» (id: {base_id}): ya existe, no hay que crearla de nuevo. "
-        "Alcancé a crear 1 de 3 filas. Faltan: «Martes», «Miércoles». Se pueden sumar de a "
-        "una, como filas nuevas de la base."
+        "Alcancé a crear 1 de 3 filas: «Miércoles». Faltan «Lunes», «Martes». Se pueden "
+        "sumar de a una, como filas nuevas de la base, de la última a la primera: así quedan "
+        "en orden."
     )
-    assert escena.contexto.acciones_realizadas == [
-        f"Creé la base «Semana» adentro de «Recetas» (id: {base_id}), con 1 de 3 filas"
-    ]
+    # La bitácora dice lo mismo: si el modelo se cae, la persona sabe qué falta.
+    assert escena.contexto.acciones_realizadas == [texto]
 
 
-async def test_una_fila_en_duda_se_dice_aparte() -> None:
+async def test_una_fila_en_duda_se_dice_aparte_y_no_se_reintenta() -> None:
+    """Pudo haberse creado: otra vez la repetiría. Con un reintento, ésta habría andado."""
     escena = Escena(
-        _notion(fallar_al_escribir=EscrituraEnDudaError(), escrituras_antes_de_fallar=2)
+        _notion(
+            fallar_al_escribir=EscrituraEnDudaError(),
+            escrituras_antes_de_fallar=2,
+            fallar_una_sola_vez=True,
+        )
     )
     await escena.pedir(("crear_base_en_notion", TRES_DIAS))
 
     estado = await escena.decidir(True)
 
     texto = _respuesta(estado)
+    assert "Alcancé a crear 1 de 3 filas: «Miércoles»." in texto
     assert "La fila «Martes» puede haber quedado" in texto
-    assert "Faltan: «Miércoles»." in texto
+    assert "Falta «Lunes»." in texto
+    assert len(escena.paginas.creadas) == 1
+
+
+async def test_una_falla_pasajera_en_una_fila_se_reintenta_una_vez() -> None:
+    escena = Escena(
+        _notion(
+            fallar_al_escribir=ServiceUnavailableError("429"),
+            escrituras_antes_de_fallar=2,
+            fallar_una_sola_vez=True,
+        )
+    )
+    await escena.pedir(("crear_base_en_notion", TRES_DIAS))
+
+    estado = await escena.decidir(True)
+
+    assert [titulo for _, _, titulo, _ in escena.paginas.creadas] == [
+        "Miércoles",
+        "Martes",
+        "Lunes",
+    ]
+    # El reintento lleva los mismos datos que la pregunta mostró.
+    assert [[(c.nombre, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
+        [("Fecha", date(2026, 11, 4))],
+        [("Fecha", date(2026, 11, 3))],
+        [("Fecha", date(2026, 11, 2))],
+    ]
+    assert ", con 3 filas — link: " in _respuesta(estado)
+
+
+async def test_sin_ninguna_fila_creada_las_nombra_a_todas() -> None:
+    escena = Escena(
+        _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=1)
+    )
+    await escena.pedir(("crear_base_en_notion", TRES_DIAS))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert "No alcancé a crear ninguna de sus 3 filas. Faltan «Lunes», «Martes», «Miércoles»." in (
+        texto
+    )
+
+
+async def test_sin_permiso_a_mitad_no_invita_a_sumarlas_de_a_una() -> None:
+    """Puede ser el límite de bloques del plan gratis: de a una tampoco entrarían."""
+    escena = Escena(
+        _notion(fallar_al_escribir=NotionSinPermisoError(), escrituras_antes_de_fallar=2)
+    )
+    await escena.pedir(("crear_base_en_notion", TRES_DIAS))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert "Faltan «Lunes», «Martes». Notion no me dejó escribir ahí." in texto
+    assert "de a una" not in texto
 
 
 @pytest.mark.parametrize(
@@ -1083,3 +1152,403 @@ async def test_datos_que_no_sirven_se_explican_sin_pausa(
     assert "__interrupt__" not in estado
     assert esperado in _respuesta(estado)
     assert escena.paginas.escrituras() == 0
+
+
+# --- Una fila por día, la primera columna y sin recortar (QA del 28/10) -------------------
+
+NOVIEMBRE: dict[str, Any] = {
+    "id_pagina": PAGINA_ID,
+    "titulo": "Calendario Noviembre",
+    "columnas": [
+        {"nombre": "Descripción", "tipo": "texto"},
+        {"nombre": "Check", "tipo": "casilla"},
+    ],
+    "primera_columna": "Fecha",
+    "desde": "2026-11-01",
+    "hasta": "2026-11-30",
+}
+
+
+def _base_llamada(escena: Escena, titulo: str) -> str:
+    return next(
+        p.id for p in escena.paginas.paginas if p.tipo is TipoDePagina.BASE and p.titulo == titulo
+    )
+
+
+async def test_el_pedido_de_noviembre_arma_una_fila_por_dia_con_la_fecha_primero() -> None:
+    """El pedido de la QA: la primera columna es la fecha y hay una fila por cada día."""
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", NOVIEMBRE))
+
+    assert _pregunta(estado) == (
+        "Crear en tu Notion la base «Calendario Noviembre» adentro de «Recetas», con estas "
+        "columnas:\n"
+        "• Fecha (texto con el día, como «Domingo 1 de noviembre»: Notion no deja que la "
+        "primera sea de tipo fecha)\n"
+        "• Descripción (texto)\n"
+        "• Check (casilla)\n"
+        "\n"
+        "Y una fila por día, del domingo 1 al lunes 30 de noviembre de 2026: 30 filas. Las "
+        "otras columnas quedan vacías.\n"
+        "\n"
+        "Puede tardar cerca de medio minuto."
+    )
+    assert escena.paginas.escrituras() == 0
+
+    estado = await escena.decidir(True)
+
+    base_id = _base_llamada(escena, "Calendario Noviembre")
+    assert escena.paginas.primeras_columnas == ["Fecha"]
+    [(_, _, _, columnas)] = escena.paginas.bases_creadas
+    assert [c.nombre for c in columnas] == ["Descripción", "Check"]
+    titulos = [titulo for _, _, titulo, _ in escena.paginas.creadas]
+    assert len(titulos) == 30
+    assert (titulos[0], titulos[-1]) == ("Lunes 30 de noviembre", "Domingo 1 de noviembre")
+    # Nada inventado: ni descripciones ni casillas.
+    assert all(datos == () for datos in escena.paginas.datos_de_creadas)
+    assert escena.paginas.tablas_ordenadas == [(base_id, ("Descripción", "Check"), None)]
+    assert _respuesta(estado) == (
+        f"Creé la base «Calendario Noviembre» adentro de «Recetas» (id: {base_id}), con 30 "
+        "filas — link: https://www.notion.so/base-nueva"
+    )
+
+
+async def test_con_una_columna_fecha_lleva_el_dia_y_la_tabla_se_ordena_por_ella() -> None:
+    escena = Escena()
+    args = {
+        "id_pagina": PAGINA_ID,
+        "titulo": "Turnos",
+        "columnas": [{"nombre": "Fecha", "tipo": "fecha"}, {"nombre": "Notas", "tipo": "texto"}],
+        "desde": "2026-11-01",
+        "hasta": "2026-11-03",
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert _pregunta(estado).splitlines()[1:] == [
+        "• Día (texto con el día, como «Domingo 1 de noviembre»: Notion no deja que la primera "
+        "sea de tipo fecha)",
+        "• Fecha (fecha)",
+        "• Notas (texto)",
+        "",
+        "Y una fila por día, del domingo 1 al martes 3 de noviembre de 2026: 3 filas, con el "
+        "día también en «Fecha», y ordenadas por «Fecha». Las otras columnas quedan vacías.",
+    ]
+    await escena.decidir(True)
+    assert escena.paginas.primeras_columnas == ["Día"]
+    assert [[(c.nombre, v) for c, v in datos] for datos in escena.paginas.datos_de_creadas] == [
+        [("Fecha", date(2026, 11, 3))],
+        [("Fecha", date(2026, 11, 2))],
+        [("Fecha", date(2026, 11, 1))],
+    ]
+    [(_, columnas, por)] = escena.paginas.tablas_ordenadas
+    assert (columnas, por) == (("Fecha", "Notas"), "Fecha")
+
+
+async def test_una_columna_de_fecha_con_el_nombre_de_la_primera_se_saca() -> None:
+    """Lo más probable del modelo con el pedido de la QA: la fecha primero, y también aparte."""
+    escena = Escena()
+    columnas = [{"nombre": "fecha", "tipo": "date"}, *NOVIEMBRE["columnas"]]
+
+    estado = await escena.pedir(("crear_base_en_notion", {**NOVIEMBRE, "columnas": columnas}))
+
+    assert "• fecha (fecha)" not in _pregunta(estado)
+    await escena.decidir(True)
+    [(_, _, _, creadas)] = escena.paginas.bases_creadas
+    assert [c.nombre for c in creadas] == ["Descripción", "Check"]
+
+
+async def test_otra_fecha_no_lleva_el_dia_ni_ordena() -> None:
+    """«Vence» es otra fecha: queda vacía, y la tabla no se ordena por ella."""
+    escena = Escena()
+    args = {
+        **NOVIEMBRE,
+        "hasta": "2026-11-02",
+        "columnas": [{"nombre": "Vence", "tipo": "fecha"}],
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert _pregunta(estado).endswith(
+        "Y una fila por día, del domingo 1 al lunes 2 de noviembre de 2026: 2 filas. Las otras "
+        "columnas quedan vacías."
+    )
+    await escena.decidir(True)
+    assert all(datos == () for datos in escena.paginas.datos_de_creadas)
+    assert escena.paginas.tablas_ordenadas == []
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "esperado"),
+    [
+        ("2026-11-15", "2026-11-31", "del domingo 15 al lunes 30 de noviembre de 2026: 16 filas"),
+        (
+            "2026-11-20",
+            "2026-12-05",
+            "del viernes 20 de noviembre al sábado 5 de diciembre de 2026: 16 filas",
+        ),
+        (
+            "2026-12-15",
+            "2027-01-10",
+            "del martes 15 de diciembre de 2026 al domingo 10 de enero de 2027: 27 filas",
+        ),
+        ("2026-11-01", "2026-11-01", "el domingo 1 de noviembre de 2026: una fila"),
+        (
+            "2026-11-01",
+            "2026-12-01",
+            "del domingo 1 de noviembre al martes 1 de diciembre de 2026: 31 filas",
+        ),
+    ],
+    ids=["fin_de_mes", "dos_meses", "cruza_el_año", "un_dia", "tope"],
+)
+async def test_el_periodo_se_muestra_sin_repetir_mes_ni_año(
+    desde: str, hasta: str, esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("crear_base_en_notion", {**NOVIEMBRE, "desde": desde, "hasta": hasta})
+    )
+
+    assert f"Y una fila por día, {esperado}." in _pregunta(estado)
+
+
+@pytest.mark.parametrize(
+    ("cambios", "esperado"),
+    [
+        ({"hasta": ""}, "hacen falta las dos fechas"),
+        ({"desde": ""}, "hacen falta las dos fechas"),
+        ({"desde": "1 de noviembre"}, "«desde» va en AAAA-MM-DD"),
+        ({"hasta": "2026-13-01"}, "«hasta» no es una fecha"),
+        ({"desde": "2026-12-20", "hasta": "2026-01-10"}, "«hasta» es del año siguiente"),
+        ({"hasta": "2026-12-02"}, "Son 32 días"),
+        ({"filas": [["Lunes"]]}, "las dos cosas juntas no"),
+        ({"primera_columna": "Ver sitio.example"}, "primera columna no puede tener links"),
+        ({"primera_columna": "x" * 81}, "va hasta 80 caracteres"),
+        (
+            {"primera_columna": "", "columnas": [{"nombre": "Día", "tipo": "texto"}]},
+            "No hace falta la columna «Día»: el nombre de cada fila ya va en la primera "
+            "columna, «Día»",
+        ),
+        (
+            {"columnas": [{"nombre": "Fecha", "tipo": "texto"}]},
+            "pasá otro nombre en primera_columna",
+        ),
+    ],
+)
+async def test_un_rango_que_no_sirve_se_explica_sin_pausa(
+    cambios: dict[str, Any], esperado: str
+) -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(("crear_base_en_notion", {**NOVIEMBRE, **cambios}))
+
+    assert "__interrupt__" not in estado
+    assert esperado in _respuesta(estado)
+    assert escena.paginas.escrituras() == 0
+
+
+async def test_sin_rango_una_fecha_que_se_llama_como_la_primera_choca() -> None:
+    escena = Escena()
+    args = _con(primera_columna="Fecha", filas=None)
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert "No hace falta la columna «Fecha»" in _respuesta(estado)
+
+
+async def test_con_otra_primera_columna_una_que_se_llame_nombre_vale() -> None:
+    escena = Escena()
+    args = {
+        **_con(primera_columna="Tarea", filas=None),
+        "columnas": [{"nombre": "Nombre", "tipo": "texto"}],
+    }
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert _pregunta(estado).splitlines()[1:3] == [
+        "• Tarea (el nombre de cada fila)",
+        "• Nombre (texto)",
+    ]
+
+
+async def test_una_fila_puede_traer_solo_su_nombre() -> None:
+    escena = Escena()
+
+    estado = await escena.pedir(
+        ("crear_base_en_notion", _con(filas=[["Leche"], ["Pan", "2026-11-02"]]))
+    )
+
+    assert _pregunta(estado).endswith(
+        "Y estas 2 filas:\n1. Leche\n2. Pan — Fecha: lunes 2 de noviembre de 2026"
+    )
+    await escena.decidir(True)
+    assert [len(datos) for datos in escena.paginas.datos_de_creadas] == [1, 0]
+
+
+async def test_en_el_tope_la_pregunta_dice_que_es_lo_maximo() -> None:
+    """Si el modelo recortó la lista justo en el tope, la persona lo ve antes del sí."""
+    escena = Escena()
+    filas = [[f"F{n}", "2026-11-02"] for n in range(10)]
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
+
+    assert "Y estas 10 filas (es lo máximo de una vez):" in _pregunta(estado)
+
+
+async def test_hasta_31_filas_si_solo_llevan_el_nombre() -> None:
+    escena = Escena()
+    filas = [[f"Tarea {n}"] for n in range(1, 32)]
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
+
+    pregunta = _pregunta(estado)
+    assert "Y estas 31 filas (es lo máximo de una vez):" in pregunta
+    assert pregunta.endswith("31. Tarea 31\n\nPuede tardar cerca de medio minuto.")
+
+
+async def test_con_mas_filas_de_las_que_entran_nunca_dice_que_se_recorten() -> None:
+    """«Creala con las primeras» hizo que el modelo cortara en 10 sin avisar (QA del 28/10)."""
+    escena = Escena()
+    filas = [[f"F{n}", "2026-11-02"] for n in range(14)]
+
+    estado = await escena.pedir(("crear_base_en_notion", _con(filas=filas)))
+
+    texto = _respuesta(estado)
+    assert "las primeras" not in texto
+    assert (
+        "NO las recortes ni les saques datos para que entren: decile a la persona cuántas "
+        "entran y preguntale cómo seguir."
+    ) in texto
+    # Partirla, sólo si la persona lo pide, y con las últimas: así se leen en orden.
+    assert "Recién si la persona te dice que la partas: creá la base con las ÚLTIMAS" in texto
+
+
+@pytest.mark.parametrize("tipo", ["check", "Tilde", "checkbox"])
+async def test_check_y_tilde_son_casillas(tipo: str) -> None:
+    escena = Escena()
+    args = _con(columnas=[{"nombre": "Hecho", "tipo": tipo}], filas=None)
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert "• Hecho (casilla)" in _pregunta(estado)
+
+
+async def test_si_se_corta_un_rango_dice_que_dias_faltan() -> None:
+    # Escrituras: la base (1), el 5 (2) y el 4 (3); falla el 3, dos veces.
+    escena = Escena(
+        _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=3)
+    )
+    await escena.pedir(("crear_base_en_notion", {**NOVIEMBRE, "hasta": "2026-11-05"}))
+
+    estado = await escena.decidir(True)
+
+    assert (
+        "Alcancé a crear 2 de 5 filas: las del miércoles 4 al jueves 5 de noviembre de 2026. "
+        "Faltan las del domingo 1 al martes 3 de noviembre de 2026."
+    ) in _respuesta(estado)
+
+
+async def test_si_no_se_puede_ordenar_por_la_fecha_prometida_lo_dice() -> None:
+    escena = Escena(_notion(fallar_al_ordenar=ServiceUnavailableError("sin vistas")))
+    args = {
+        **NOVIEMBRE,
+        "hasta": "2026-11-02",
+        "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+        "primera_columna": "",
+    }
+    await escena.pedir(("crear_base_en_notion", args))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert ", con 2 filas (no pude ordenarlas por «Fecha»: se puede desde Notion) — link: " in (
+        texto
+    )
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_si_no_se_pueden_acomodar_las_columnas_no_se_dice_nada() -> None:
+    """Nadie lo prometió: la base quedó bien igual."""
+    escena = Escena(_notion(fallar_al_ordenar=ServiceUnavailableError("sin vistas")))
+    await escena.pedir(("crear_base_en_notion", NOVIEMBRE))
+
+    estado = await escena.decidir(True)
+
+    assert _respuesta(estado).endswith(", con 30 filas — link: https://www.notion.so/base-nueva")
+
+
+TURNOS: dict[str, Any] = {
+    **NOVIEMBRE,
+    "hasta": "2026-11-03",
+    "primera_columna": "",
+    "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+}
+
+
+async def test_si_las_filas_se_cortan_igual_ordena_y_si_no_puede_lo_dice() -> None:
+    """La pregunta prometió el orden por «Fecha»: con filas a medias, también."""
+    escena = Escena(
+        _notion(fallar_al_escribir=ServiceUnavailableError("caído"), escrituras_antes_de_fallar=2)
+    )
+    await escena.pedir(("crear_base_en_notion", TURNOS))
+
+    estado = await escena.decidir(True)
+
+    texto = _respuesta(estado)
+    assert texto.endswith(
+        "de la última a la primera: así quedan en orden. No pude ordenarlas por «Fecha»: se "
+        "puede desde Notion."
+    )
+    assert escena.contexto.acciones_realizadas == [texto]
+
+
+async def test_con_filas_a_medias_la_tabla_queda_ordenada_si_se_puede() -> None:
+    """Ordenada por la fecha, lo que se sume después cae en su lugar."""
+    escena = Escena(
+        _notion(
+            fallar_al_escribir=EscrituraEnDudaError(),
+            escrituras_antes_de_fallar=2,
+            fallar_una_sola_vez=True,
+        )
+    )
+    await escena.pedir(("crear_base_en_notion", TURNOS))
+
+    estado = await escena.decidir(True)
+
+    [(_, _, por)] = escena.paginas.tablas_ordenadas
+    assert por == "Fecha"
+    texto = _respuesta(estado)
+    assert "puede haber quedado" in texto
+    assert "ordenarlas" not in texto
+    # Ordenada por la fecha, lo que se sume sin su día iría al final.
+    assert texto.endswith(
+        "La tabla quedó ordenada por «Fecha»: al sumar las que faltan, poné su día también "
+        "en «Fecha»."
+    )
+
+
+async def test_un_orden_en_duda_no_se_da_por_fallido() -> None:
+    """Un 5xx al ordenar pudo haber quedado: no se dice «no pude»."""
+    escena = Escena(_notion(fallar_al_ordenar=EscrituraEnDudaError()))
+    await escena.pedir(("crear_base_en_notion", TURNOS))
+
+    estado = await escena.decidir(True)
+
+    assert ", con 3 filas (no sé si quedaron ordenadas por «Fecha»: Notion no lo confirmó) — " in (
+        _respuesta(estado)
+    )
+
+
+async def test_una_primera_columna_fecha_sin_rango_avisa_que_es_texto() -> None:
+    escena = Escena()
+    args = _con(primera_columna="Fecha", columnas=[{"nombre": "Monto", "tipo": "número"}])
+    args["filas"] = [["2026-11-02", "1500"]]
+
+    estado = await escena.pedir(("crear_base_en_notion", args))
+
+    assert _pregunta(estado).splitlines()[1] == (
+        "• Fecha (el nombre de cada fila, en texto: Notion no deja que la primera sea de tipo "
+        "fecha)"
+    )

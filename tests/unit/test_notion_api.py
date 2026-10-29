@@ -732,11 +732,15 @@ def _padre(tipo: TipoDePagina = TipoDePagina.PAGINA) -> Pagina:
 
 def _acepta(pedido: httpx.Request) -> httpx.Response:
     """Un Notion que acepta todo: las subidas con su id, una base con su data
-    source, y lo demás con una página."""
+    source (con nombre y una sola vista), y lo demás con una página."""
     if pedido.url.path.startswith("/v1/file_uploads"):
         return httpx.Response(200, json={"object": "file_upload", "id": SUBIDA_ID})
     if pedido.url.path == "/v1/databases":
         return httpx.Response(200, json=_base_creada())
+    if pedido.url.path.startswith("/v1/data_sources/"):
+        return httpx.Response(200, json=_fuente_nueva())
+    if pedido.url.path == "/v1/views":
+        return httpx.Response(200, json=_vistas(VISTA_ID))
     return httpx.Response(200, json=_pagina())
 
 
@@ -926,6 +930,7 @@ _TITULO = Propiedad(id="title", nombre="Nombre", tipo=TipoDePropiedad.TITULO)
         lambda api: api.a_la_papelera(USUARIO, _INVALIDO),
         lambda api: api.subir(USUARIO, _INVALIDO, "a.pdf", "application/pdf", b"x"),
         lambda api: api.esquema(USUARIO, _INVALIDO),
+        lambda api: api.ordenar_tabla(USUARIO, _INVALIDO, ("Notas",)),
         lambda api: api.crear_base(
             USUARIO,
             Pagina(id=_INVALIDO, titulo="x", tipo=TipoDePagina.PAGINA, editada=datetime.now(UTC)),
@@ -1168,6 +1173,7 @@ async def test_al_escribir_no_se_loguea_lo_escrito() -> None:
         await api.cambiar(USUARIO, PAGINA_ID, _TITULO, "Biopsia")
         await api.subir(USUARIO, PAGINA_ID, "biopsia.pdf", "application/pdf", b"diagnostico")
         await api.crear_base(USUARIO, _padre(), "Biopsias", columnas)
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Biopsia",), ordenar_por="Vence")
 
     assert eventos
     registrado = json.dumps(eventos, default=str)
@@ -1213,7 +1219,8 @@ async def test_crear_base_manda_el_esquema_y_devuelve_el_data_source() -> None:
 
     base = await api.crear_base(USUARIO, _padre(), "Gastos", COLUMNAS)
 
-    [pedido] = pedidos
+    pedido, leer = pedidos  # la tabla ya tiene nombre: no hace falta ponérselo
+    assert (leer.method, leer.url.path) == ("GET", f"/v1/data_sources/{DATA_SOURCE_NUEVO_ID}")
     assert (pedido.method, pedido.url.path) == ("POST", "/v1/databases")
     assert _cuerpo(pedido) == {
         "parent": {"type": "page_id", "page_id": PAGINA_ID},
@@ -1230,6 +1237,15 @@ async def test_crear_base_manda_el_esquema_y_devuelve_el_data_source() -> None:
             }
         },
     }
+    # En el orden pedido: la igualdad de dicts de arriba no lo mira.
+    assert list(_cuerpo(pedido)["initial_data_source"]["properties"]) == [
+        "Nombre",
+        "Notas",
+        "Monto",
+        "Pagado",
+        "Vence",
+        "Rubro",
+    ]
     # El id del data source, no el de la base: es el que usa todo el bot.
     assert (base.id, base.tipo, base.titulo) == (DATA_SOURCE_NUEVO_ID, TipoDePagina.BASE, "Gastos")
     assert base.enlace == f"https://www.notion.so/{BASE_NUEVA_ID.replace('-', '')}"
@@ -1251,6 +1267,7 @@ async def test_con_una_respuesta_parcial_pide_la_base_entera() -> None:
     assert [(p.method, p.url.path) for p in pedidos] == [
         ("POST", "/v1/databases"),
         ("GET", f"/v1/databases/{BASE_NUEVA_ID}"),
+        ("GET", f"/v1/data_sources/{DATA_SOURCE_NUEVO_ID}"),
     ]
     assert base.id == DATA_SOURCE_NUEVO_ID
 
@@ -1386,3 +1403,223 @@ async def test_datos_que_no_van_no_generan_pedido(padre: TipoDePagina, dato: Pro
         await api.crear(USUARIO, _padre(padre), "Gas", (), ((dato, "x"),))
 
     assert pedidos == []
+
+
+# --- La primera columna, el nombre de la tabla y el orden de la vista (QA del 28/10) ---
+
+VISTA_ID = "6f708192-a3b4-4c5d-8e6f-708192a3b4c5"
+OTRA_VISTA_ID = "708192a3-b4c5-4d6e-8f70-8192a3b4c5d6"
+
+
+def _fuente_nueva(**cambios: Any) -> dict[str, Any]:
+    """El data source de la base nueva, con ids propios para cada columna."""
+    datos: dict[str, Any] = {
+        "object": "data_source",
+        "id": DATA_SOURCE_NUEVO_ID,
+        "title": _texto("Gastos"),
+        "last_edited_time": EDITADA,
+        "parent": {"type": "database_id", "database_id": BASE_NUEVA_ID},
+        "properties": {
+            "Nombre": {"id": "title", "name": "Nombre", "type": "title", "title": {}},
+            "Notas": {"id": "n%40", "name": "Notas", "type": "rich_text", "rich_text": {}},
+            "Vence": {"id": "v%3A", "name": "Vence", "type": "date", "date": {}},
+        },
+    }
+    datos.update(cambios)
+    return datos
+
+
+def _vistas(*ids: str, hay_mas: bool = False) -> dict[str, Any]:
+    resultados = [{"object": "view", "id": identificador} for identificador in ids]
+    return {"object": "list", "results": resultados, "has_more": hay_mas, "next_cursor": None}
+
+
+async def test_la_primera_columna_lleva_el_nombre_pedido() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+
+    await api.crear_base(USUARIO, _padre(), "Noviembre", COLUMNAS[:1], primera_columna="Fecha")
+
+    esquema = _cuerpo(pedidos[0])["initial_data_source"]["properties"]
+    assert list(esquema) == ["Fecha", "Notas"]
+    assert esquema["Fecha"] == {"title": {}}
+
+
+async def test_una_columna_con_el_nombre_de_la_primera_no_genera_pedido() -> None:
+    """Con la misma clave en el esquema, la columna pisaría al título."""
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _acepta)
+    fecha = Propiedad(id="Fecha", nombre="Fecha", tipo=TipoDePropiedad.FECHA)
+
+    with pytest.raises(NotionRechazoError):
+        await api.crear_base(USUARIO, _padre(), "Noviembre", (fecha,), primera_columna="Fecha")
+
+    assert pedidos == []
+
+
+async def test_si_la_tabla_vino_sin_nombre_se_lo_pone() -> None:
+    """La búsqueda y la cabecera muestran el nombre del data source: sin él, «(sin título)»."""
+    pedidos: list[httpx.Request] = []
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path == "/v1/databases":
+            return httpx.Response(200, json=_base_creada())
+        if pedido.method == "GET":
+            return httpx.Response(200, json=_fuente_nueva(title=[]))
+        return httpx.Response(200, json=_fuente_nueva())
+
+    api, _ = await _api(pedidos, responder)
+
+    await api.crear_base(USUARIO, _padre(), "Gastos", ())
+
+    _, _, nombrar = pedidos
+    assert (nombrar.method, nombrar.url.path) == (
+        "PATCH",
+        f"/v1/data_sources/{DATA_SOURCE_NUEVO_ID}",
+    )
+    assert _cuerpo(nombrar) == {"title": _rico("Gastos")}
+
+
+async def test_si_no_se_puede_nombrar_la_tabla_la_base_igual_queda() -> None:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path == "/v1/databases":
+            return httpx.Response(200, json=_base_creada())
+        return httpx.Response(500, json={"code": "internal_server_error"})
+
+    api, _ = await _api([], responder)
+
+    with structlog.testing.capture_logs() as eventos:
+        base = await api.crear_base(USUARIO, _padre(), "Gastos", ())
+
+    assert base.id == DATA_SOURCE_NUEVO_ID
+    assert "notion.tabla_sin_nombre" in [e["event"] for e in eventos]
+
+
+def _con_vistas(vistas: dict[str, Any], **por_ruta: httpx.Response) -> Manejador:
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path.startswith("/v1/data_sources/"):
+            return httpx.Response(200, json=_fuente_nueva())
+        if pedido.url.path == "/v1/views":
+            return httpx.Response(200, json=vistas)
+        cuerpo = _cuerpo(pedido)
+        clave = "sorts" if "sorts" in cuerpo else "configuration"
+        return por_ruta.get(clave, httpx.Response(200, json={"object": "view", "id": VISTA_ID}))
+
+    return responder
+
+
+async def test_ordenar_la_tabla_va_por_ids_y_lista_las_vistas_de_la_base() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _con_vistas(_vistas(VISTA_ID)))
+
+    await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Vence", "Notas"), "Vence")
+
+    leer, listar, filas, columnas = pedidos
+    assert (leer.method, leer.url.path) == ("GET", f"/v1/data_sources/{DATA_SOURCE_NUEVO_ID}")
+    # Por la base, no por el data source: así trae sólo las vistas de esta base.
+    assert (listar.method, listar.url.path) == ("GET", "/v1/views")
+    assert dict(listar.url.params) == {"database_id": BASE_NUEVA_ID}
+    assert (filas.method, filas.url.path) == ("PATCH", f"/v1/views/{VISTA_ID}")
+    assert _cuerpo(filas) == {"sorts": [{"property": "v%3A", "direction": "ascending"}]}
+    assert _cuerpo(columnas) == {
+        "configuration": {
+            "type": "table",
+            "properties": [
+                {"property_id": "title", "visible": True},
+                {"property_id": "v%3A", "visible": True},
+                {"property_id": "n%40", "visible": True},
+            ],
+        }
+    }
+
+
+async def test_sin_fecha_para_ordenar_solo_acomoda_las_columnas() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _con_vistas(_vistas(VISTA_ID)))
+
+    await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas", "Vence"))
+
+    assert [p.method for p in pedidos] == ["GET", "GET", "PATCH"]
+    assert "sorts" not in _cuerpo(pedidos[-1])
+
+
+@pytest.mark.parametrize(
+    "vistas",
+    [
+        _vistas(),
+        _vistas(VISTA_ID, OTRA_VISTA_ID),
+        _vistas(VISTA_ID, hay_mas=True),
+        _vistas("../x"),
+    ],
+    ids=["ninguna", "dos", "paginada", "id_raro"],
+)
+async def test_sin_una_sola_vista_no_se_toca_nada(vistas: dict[str, Any]) -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _con_vistas(vistas))
+
+    with pytest.raises(ServiceUnavailableError):
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas",), "Vence")
+
+    assert [p.method for p in pedidos] == ["GET", "GET"]
+
+
+async def test_una_tabla_que_no_dice_su_base_no_se_ordena() -> None:
+    pedidos: list[httpx.Request] = []
+    fuente = _fuente_nueva(parent={"type": "workspace", "workspace": True})
+    api, _ = await _api(pedidos, lambda _: httpx.Response(200, json=fuente))
+
+    with pytest.raises(ServiceUnavailableError):
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas",))
+
+    assert len(pedidos) == 1
+
+
+async def test_una_fecha_que_no_esta_en_la_base_no_se_ordena() -> None:
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, _con_vistas(_vistas(VISTA_ID)))
+
+    with pytest.raises(ServiceUnavailableError):
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas",), "Otra")
+
+    assert [p.method for p in pedidos] == ["GET", "GET"]
+
+
+async def test_si_no_deja_ordenar_las_filas_lo_dice() -> None:
+    """Ordenar por la fecha se promete en la pregunta: si falla, se tiene que saber."""
+    rechazo = httpx.Response(400, json={"code": "validation_error"})
+    api, _ = await _api([], _con_vistas(_vistas(VISTA_ID), sorts=rechazo))
+
+    with pytest.raises(NotionRechazoError):
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas",), "Vence")
+
+
+async def test_si_no_deja_acomodar_las_columnas_solo_se_loguea() -> None:
+    """Que el orden de la lista sea el de la pantalla no está documentado: nunca tumba nada."""
+    rechazo = httpx.Response(400, json={"code": "validation_error"})
+    api, _ = await _api([], _con_vistas(_vistas(VISTA_ID), configuration=rechazo))
+
+    with structlog.testing.capture_logs() as eventos:
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas", "Vence"))
+
+    assert "notion.columnas_sin_ordenar" in [e["event"] for e in eventos]
+
+
+@pytest.mark.parametrize(
+    ("status", "esperado"),
+    [(400, ServiceUnavailableError), (404, EntityNotFoundError)],
+)
+async def test_sin_api_de_vistas_falla_al_leer(status: int, esperado: type[Exception]) -> None:
+    """Si la conexión no puede usar las vistas, Notion contesta un 400 o un 404 al listarlas."""
+
+    def responder(pedido: httpx.Request) -> httpx.Response:
+        if pedido.url.path == "/v1/views":
+            return httpx.Response(status, json={"code": "invalid_request_url"})
+        return httpx.Response(200, json=_fuente_nueva())
+
+    pedidos: list[httpx.Request] = []
+    api, _ = await _api(pedidos, responder)
+
+    with pytest.raises(esperado):
+        await api.ordenar_tabla(USUARIO, DATA_SOURCE_NUEVO_ID, ("Notas",), "Vence")
+
+    assert all(p.method == "GET" for p in pedidos)

@@ -903,9 +903,40 @@ DIRECCIONES_LARGAS = ", ".join(f"persona{i}.{'x' * 150}@ejemplo.com" for i in ra
                 "id_pagina": PAGINA_DE_NOTION,
                 "titulo": "Semana",
                 "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
-                "filas": [["Lunes"]],
+                "filas": [["Lunes", "2026-11-02", "de más"]],
             },
             "cada fila lleva 2",
+        ),
+        (
+            "crear_base_en_notion",
+            {
+                "id_pagina": PAGINA_DE_NOTION,
+                "titulo": "Semana",
+                "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+                "filas": [[f"F{n}", "2026-11-02"] for n in range(11)],
+            },
+            "NO las recortes",
+        ),
+        (
+            "crear_base_en_notion",
+            {
+                "id_pagina": PAGINA_DE_NOTION,
+                "titulo": "Diciembre",
+                "columnas": [],
+                "desde": "2026-12-01",
+                "hasta": "2027-01-15",
+            },
+            "Son 46 días",
+        ),
+        (
+            "crear_base_en_notion",
+            {
+                "id_pagina": PAGINA_DE_NOTION,
+                "titulo": "Diciembre",
+                "columnas": [],
+                "desde": "2026-12-01",
+            },
+            "hacen falta las dos fechas",
         ),
         (
             "crear_pagina_en_notion",

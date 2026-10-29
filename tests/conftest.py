@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from src.application.services.manejador_de_comandos import ManejadorDeComandos
 from src.application.use_cases.procesar_mensaje_entrante import ProcesarMensajeEntrante
 from src.infrastructure.config.settings import Environment, Settings
+from src.infrastructure.llm import herramientas
 from src.infrastructure.persistence.encryption import TokenCipher
 from src.interfaces.api.app import create_app
 from src.interfaces.api.dependencies import get_procesador_de_mensajes
@@ -25,6 +26,12 @@ from tests.payloads_meta import PHONE_NUMBER_ID
 # Credenciales de mentira, compartidas por los tests que firman peticiones.
 APP_SECRET = "app-secret-de-prueba"
 VERIFY_TOKEN = "verify-token-de-prueba"
+
+
+@pytest.fixture(autouse=True)
+def _reintentos_sin_espera(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Una fila de una base nueva se reintenta al segundo (RF-07): en los tests, ya."""
+    monkeypatch.setattr(herramientas, "ESPERA_PARA_REINTENTAR", 0)
 
 
 @pytest.fixture

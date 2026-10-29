@@ -103,7 +103,11 @@ class NotionFalso:
     Una base nueva tiene dos ids distintos, el suyo y el de su data source, y
     su esquema guarda ids propios para cada columna: una fila que llega con
     una columna o un valor que el esquema no tiene contesta 400, como Notion.
-    Con `base_parcial`, crear una base contesta sólo el id.
+    Con `base_parcial`, crear una base contesta sólo el id; con
+    `fuente_sin_titulo`, su data source nace sin nombre. Cada base nueva trae
+    una vista de tabla, que acepta orden sólo por una columna (por id) y
+    columnas que existan; con `sin_vistas` (400 o 404), la conexión no puede
+    usar vistas. Las filas nuevas quedan arriba, como se vio en la QA.
     """
 
     def __init__(self) -> None:
@@ -148,7 +152,10 @@ class NotionFalso:
         self.bloques: dict[str, list[dict[str, Any]]] = {}
         self.subidas: dict[str, dict[str, Any]] = {}
         self.bases_de_datos: dict[str, dict[str, Any]] = {}
+        self.vistas: dict[str, dict[str, Any]] = {}
         self.base_parcial = False
+        self.fuente_sin_titulo = False
+        self.sin_vistas: int | None = None
         self.fallar_al_escribir: httpx.Response | None = None
         self.escrituras_antes_de_fallar = 0
         self.access_vigente = "access-1"
@@ -172,6 +179,8 @@ class NotionFalso:
         identificador, _, sub = resto.partition("/")
         if recurso == "databases" and identificador in self.bases_de_datos and not sub:
             return httpx.Response(200, json=self.bases_de_datos[identificador])
+        if pedido.url.path == "/v1/views" and pedido.method == "GET":
+            return self._listar_vistas(pedido)
         if pedido.url.path == "/v1/users/me":
             limites = {"max_file_upload_size_in_bytes": LIMITE_DEL_ESPACIO}
             return httpx.Response(
@@ -219,6 +228,11 @@ class NotionFalso:
             return self._crear(cuerpo)
         if recurso == "databases" and not identificador:
             return self._crear_base(cuerpo)
+        if recurso == "views" and not sub:
+            return self._cambiar_vista(identificador, cuerpo)
+        if recurso == "data_sources" and identificador in self.bases and not sub:
+            self.bases[identificador]["title"] = _plano(cuerpo["title"])
+            return httpx.Response(200, json=self.bases[identificador])
         pagina = self.paginas.get(identificador)
         if pagina is None or pagina.get("in_trash"):
             return _error(404, "object_not_found")
@@ -248,9 +262,11 @@ class NotionFalso:
             return _error(404, "object_not_found")
         nueva = str(uuid4())
         titulo = _plano(cuerpo["properties"]["title"]["title"])
-        propiedades = {"Nombre": {"id": "title", "type": "title", "title": titulo}}
+        esquema = self.bases.get(padre.get("data_source_id", ""), {}).get("properties", {})
+        # El título de la fila, con el nombre de la primera columna de su base.
+        nombre = next((n for n, p in esquema.items() if p["type"] == "title"), "Nombre")
+        propiedades = {nombre: {"id": "title", "type": "title", "title": titulo}}
         if padre["type"] == "data_source_id":
-            esquema = self.bases[padre["data_source_id"]]["properties"]
             for clave, valor in cuerpo["properties"].items():
                 if clave == "title":
                     continue
@@ -297,7 +313,7 @@ class NotionFalso:
         self.bases[fuente_id] = {
             "object": "data_source",
             "id": fuente_id,
-            "title": titulo,
+            "title": [] if self.fuente_sin_titulo else titulo,
             "last_edited_time": EDITADA,
             "parent": {"type": "database_id", "database_id": base_id},
             "properties": propiedades,
@@ -313,9 +329,54 @@ class NotionFalso:
             "parent": cuerpo["parent"],
             "data_sources": [{"id": fuente_id, "name": _titulo(self.bases[fuente_id])}],
         }
+        vista_id = str(uuid4())
+        self.vistas[vista_id] = {
+            "object": "view",
+            "id": vista_id,
+            "name": "Default view",
+            "type": "table",
+            "parent": {"type": "database_id", "database_id": base_id},
+            "data_source_id": fuente_id,
+            "sorts": [],
+            "configuration": {"type": "table", "properties": []},
+        }
         if self.base_parcial:
             return httpx.Response(200, json={"object": "database", "id": base_id})
         return httpx.Response(200, json=self.bases_de_datos[base_id])
+
+    def _listar_vistas(self, pedido: httpx.Request) -> httpx.Response:
+        if self.sin_vistas is not None:
+            return _error(self.sin_vistas, "invalid_request_url")
+        base_id = pedido.url.params.get("database_id")
+        vistas = [v for v in self.vistas.values() if v["parent"]["database_id"] == base_id]
+        return httpx.Response(
+            200, json={"object": "list", "results": vistas, "has_more": False, "next_cursor": None}
+        )
+
+    def _cambiar_vista(self, vista_id: str, cuerpo: dict[str, Any]) -> httpx.Response:
+        vista = self.vistas.get(vista_id)
+        if vista is None or self.sin_vistas is not None:
+            return _error(404, "object_not_found")
+        ids = {p["id"] for p in self.bases[vista["data_source_id"]]["properties"].values()}
+        for orden in cuerpo.get("sorts", []):
+            # Sólo por una columna, como dice la doc del PATCH: por fecha de creación, no.
+            if set(orden) != {"property", "direction"} or orden["property"] not in ids:
+                return _error(400, "validation_error")
+            if orden["direction"] not in ("ascending", "descending"):
+                return _error(400, "validation_error")
+        configuracion = cuerpo.get("configuration")
+        if configuracion is not None:
+            if configuracion.get("type") != vista["type"]:
+                return _error(400, "validation_error")
+            if any(p.get("property_id") not in ids for p in configuracion.get("properties", [])):
+                return _error(400, "validation_error")
+        vista.update({k: v for k, v in cuerpo.items() if k in ("sorts", "configuration")})
+        return httpx.Response(200, json=vista)
+
+    def vista_nueva(self) -> dict[str, Any]:
+        """La vista de la única base creada."""
+        [vista] = self.vistas.values()
+        return vista
 
     def base_nueva(self) -> tuple[str, dict[str, Any]]:
         """El id del data source de la única base creada, y el data source."""
@@ -917,9 +978,11 @@ async def test_el_pedido_del_qa_crea_la_base_adentro_de_la_pagina_y_sus_filas() 
     assert [json.loads(f.content)["parent"] for f in filas] == [
         {"type": "data_source_id", "data_source_id": fuente_id}
     ] * 7
+    # De la última a la primera: arriba queda el lunes, como se lee.
+    pedidas = [json.loads(f.content)["properties"]["title"]["title"] for f in filas]
+    assert [titulo[0]["text"]["content"] for titulo in pedidas][:2] == ["Domingo", "Sábado"]
     assert [
-        (_titulo(f), f["properties"]["Fecha"]["date"]["start"])
-        for f in reversed(notion.filas[fuente_id])
+        (_titulo(f), f["properties"]["Fecha"]["date"]["start"]) for f in notion.filas[fuente_id]
     ] == [tuple(fila) for fila in SEMANA]
     assert _titulo(fuente) == "Semana que viene"
     [hecho] = await bot.respuestas_de_tools()
@@ -948,7 +1011,7 @@ async def test_una_base_con_seleccion_y_numero_guarda_las_opciones_y_los_valores
     fuente_id, fuente = notion.base_nueva()
     opciones = fuente["properties"]["Pasillo"]["select"]["options"]
     assert opciones == [{"name": "Lácteos"}, {"name": "Panadería"}]
-    [pan, leche] = notion.filas[fuente_id]
+    [leche, pan] = notion.filas[fuente_id]
     assert (leche["properties"]["Pasillo"]["select"], leche["properties"]["Precio"]["number"]) == (
         {"name": "Lácteos"},
         1200,
@@ -975,7 +1038,7 @@ async def test_si_notion_se_cae_a_mitad_cuenta_la_base_y_las_filas_que_quedaron(
     """Un 503 en una escritura puede haberse guardado: esa fila queda en duda."""
     notion = NotionFalso()
     notion.fallar_al_escribir = _error(503, "service_unavailable")
-    notion.escrituras_antes_de_fallar = 2  # la base y el lunes
+    notion.escrituras_antes_de_fallar = 2  # la base y el miércoles, que va primero
     args = {**PEDIDO_DEL_QA, "filas": SEMANA[:3]}
     bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Cortó."))
 
@@ -985,10 +1048,10 @@ async def test_si_notion_se_cae_a_mitad_cuenta_la_base_y_las_filas_que_quedaron(
     fuente_id, _ = notion.base_nueva()
     [texto] = await bot.respuestas_de_tools()
     assert texto.startswith(f"Creé la base «Semana que viene» (id: {fuente_id}): ya existe")
-    assert "Alcancé a crear 1 de 3 filas." in texto
+    assert "Alcancé a crear 1 de 3 filas: «Miércoles»." in texto
     assert "La fila «Martes» puede haber quedado" in texto
-    assert "Faltan: «Miércoles»." in texto
-    assert len(notion.escrituras()) == 3  # no reintenta nada
+    assert "Falta «Lunes»." in texto
+    assert len(notion.escrituras()) == 3  # no reintenta nada: pudo haber quedado
 
 
 async def test_una_fila_nueva_lleva_sus_datos_por_el_id_de_cada_columna() -> None:
@@ -1018,3 +1081,150 @@ async def test_una_fila_nueva_lleva_sus_datos_por_el_id_de_cada_columna() -> Non
         1500,
         {"name": "Pendiente"},
     )
+
+
+# --- Una fila por día, la primera columna y el orden (QA del 28/10) ---------------------
+
+NOVIEMBRE = {
+    "id_pagina": RECETAS,
+    "titulo": "Calendario Noviembre",
+    "columnas": [
+        {"nombre": "Descripción", "tipo": "texto"},
+        {"nombre": "Check", "tipo": "casilla"},
+    ],
+    "primera_columna": "Fecha",
+    "desde": "2026-11-01",
+    "hasta": "2026-11-30",
+}
+
+
+async def test_el_pedido_de_noviembre_crea_un_dia_por_fila_en_orden_y_con_la_fecha_primero() -> (
+    None
+):
+    """El de la QA: «la primera columna sea fecha y estén todos los días de noviembre»."""
+    notion = NotionFalso()
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", NOVIEMBRE)), AIMessage("Listo."))
+
+    pregunta = await bot.decir("creame una base con todos los días de noviembre")
+
+    assert "del domingo 1 al lunes 30 de noviembre de 2026: 30 filas" in pregunta
+    assert notion.escrituras() == []
+    await bot.decir("sí")
+    crear, *filas, vista = notion.escrituras()
+    esquema = json.loads(crear.content)["initial_data_source"]["properties"]
+    assert list(esquema.items()) == [
+        ("Fecha", {"title": {}}),
+        ("Descripción", {"rich_text": {}}),
+        ("Check", {"checkbox": {}}),
+    ]
+    fuente_id, _ = notion.base_nueva()
+    assert len(filas) == 30
+    # Las 30 sólo con el día: nada inventado.
+    assert all(list(json.loads(f.content)["properties"]) == ["title"] for f in filas)
+    # Como se ve en Notion (la última creada, arriba): del 1 al 30.
+    assert [_titulo(f) for f in notion.filas[fuente_id]][:2] == [
+        "Domingo 1 de noviembre",
+        "Lunes 2 de noviembre",
+    ]
+    assert _titulo(notion.filas[fuente_id][-1]) == "Lunes 30 de noviembre"
+    assert all("Fecha" in f["properties"] for f in notion.filas[fuente_id])
+    # Sin fecha para ordenar: sólo las columnas, en el orden pedido.
+    assert (vista.method, vista.url.path) == ("PATCH", f"/v1/views/{notion.vista_nueva()['id']}")
+    assert notion.vista_nueva()["sorts"] == []
+    assert notion.vista_nueva()["configuration"]["properties"] == [
+        {"property_id": "title", "visible": True},
+        {"property_id": "col1", "visible": True},
+        {"property_id": "col2", "visible": True},
+    ]
+    [hecho] = await bot.respuestas_de_tools()
+    assert ", con 30 filas — link: https://www.notion.so/" in hecho
+
+
+async def test_un_rango_con_columna_de_fecha_la_llena_y_ordena_la_tabla() -> None:
+    notion = NotionFalso()
+    args = {
+        "id_pagina": RECETAS,
+        "titulo": "Turnos",
+        "columnas": [{"nombre": "Fecha", "tipo": "fecha"}, {"nombre": "Notas", "tipo": "texto"}],
+        "desde": "2026-11-01",
+        "hasta": "2026-11-03",
+    }
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Listo."))
+
+    await bot.decir("una base de turnos del 1 al 3 de noviembre")
+    await bot.decir("sí")
+
+    fuente_id, _ = notion.base_nueva()
+    assert [
+        (_titulo(f), f["properties"]["Fecha"]["date"]["start"]) for f in notion.filas[fuente_id]
+    ] == [
+        ("Domingo 1 de noviembre", "2026-11-01"),
+        ("Lunes 2 de noviembre", "2026-11-02"),
+        ("Martes 3 de noviembre", "2026-11-03"),
+    ]
+    assert notion.vista_nueva()["sorts"] == [{"property": "col1", "direction": "ascending"}]
+
+
+@pytest.mark.parametrize("status", [400, 404])
+async def test_sin_vistas_las_filas_quedan_igual_y_avisa_lo_prometido(status: int) -> None:
+    notion = NotionFalso()
+    notion.sin_vistas = status
+    args = {
+        "id_pagina": RECETAS,
+        "titulo": "Turnos",
+        "columnas": [{"nombre": "Fecha", "tipo": "fecha"}],
+        "desde": "2026-11-01",
+        "hasta": "2026-11-02",
+    }
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Listo."))
+
+    await bot.decir("una base de turnos")
+    await bot.decir("sí")
+
+    fuente_id, _ = notion.base_nueva()
+    assert len(notion.filas[fuente_id]) == 2
+    [hecho] = await bot.respuestas_de_tools()
+    assert ", con 2 filas (no pude ordenarlas por «Fecha»: se puede desde Notion) — link: " in (
+        hecho
+    )
+    assert not [p for p in notion.escrituras() if p.url.path.startswith("/v1/views")]
+
+
+async def test_si_la_tabla_nace_sin_nombre_se_lo_pone() -> None:
+    """Sin nombre, la base aparece como «(sin título)» en la búsqueda."""
+    notion = NotionFalso()
+    notion.fuente_sin_titulo = True
+    args = {**PEDIDO_DEL_QA, "filas": None}
+    bot = Bot(notion, _llamadas(("crear_base_en_notion", args)), AIMessage("Listo."))
+
+    await bot.decir("creá la base")
+    await bot.decir("sí")
+
+    fuente_id, fuente = notion.base_nueva()
+    assert _titulo(fuente) == "Semana que viene"
+    assert ("PATCH", f"/v1/data_sources/{fuente_id}") in [
+        (p.method, p.url.path) for p in notion.escrituras()
+    ]
+
+
+async def test_si_se_corta_un_rango_dice_que_dias_quedaron_y_cuales_faltan() -> None:
+    notion = NotionFalso()
+    notion.fallar_al_escribir = _error(429, "rate_limited")
+    notion.escrituras_antes_de_fallar = 3  # la base, el 5 y el 4
+    bot = Bot(
+        notion,
+        _llamadas(("crear_base_en_notion", {**NOVIEMBRE, "hasta": "2026-11-05"})),
+        AIMessage("Cortó."),
+    )
+
+    await bot.decir("creá la base")
+    await bot.decir("sí")
+
+    [texto] = await bot.respuestas_de_tools()
+    assert (
+        "Alcancé a crear 2 de 5 filas: las del miércoles 4 al jueves 5 de noviembre de 2026. "
+        "Faltan las del domingo 1 al martes 3 de noviembre de 2026."
+    ) in texto
+    # El 429 no escribió nada: el 3 se reintentó una vez, y nada más. La sexta es la vista:
+    # con la base a medias se ordena igual, y su 429 sólo se loguea.
+    assert len(notion.escrituras()) == 6

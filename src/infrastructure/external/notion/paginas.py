@@ -31,6 +31,10 @@ Lo que conviene saber antes de tocarlo:
   data source. Todo el bot usa el del data source (buscar, consultar, crear una
   fila): `crear_base` devuelve ése, y la `Pagina` se arma a mano, porque
   `_a_pagina` tomaría el otro.
+- **El orden de una tabla en pantalla casi no está documentado** (QA del
+  28/10): las filas por una fecha sí (`sorts` de la vista); el de las
+  columnas no (que el orden de `configuration.properties` sea el de la
+  pantalla es una apuesta). Por eso ordenar es cosmético y nunca tumba nada.
 """
 
 from __future__ import annotations
@@ -239,7 +243,12 @@ class NotionApi(Paginas):
         return creada
 
     async def crear_base(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        columnas: tuple[Propiedad, ...],
+        primera_columna: str = NOMBRE_DEL_TITULO,
     ) -> Pagina:
         """`POST /v1/databases`, adentro de la página y a la vista (inline).
 
@@ -247,7 +256,10 @@ class NotionApi(Paginas):
         no tienen id. Después del 200 la base existe: lo que falle de ahí en más
         queda en duda, nunca como "no se hizo nada".
         """
-        esquema: dict[str, Any] = {NOMBRE_DEL_TITULO: {"title": {}}}
+        if any(columna.nombre == primera_columna for columna in columnas):
+            # Con la misma clave, la columna pisaría al título en el esquema.
+            raise NotionRechazoError("Una columna se llama como la primera.")
+        esquema: dict[str, Any] = {primera_columna: {"title": {}}}
         for columna in columnas:
             esquema[columna.nombre] = _columna_json(columna)
         cuerpo = {
@@ -271,12 +283,84 @@ class NotionApi(Paginas):
             logger.error("notion.base_sin_data_source")
             raise EscrituraEnDudaError("Notion no dijo cuál es el data source de la base.")
         logger.info("notion.base_creada", usuario_id=str(usuario_id), columnas=len(columnas))
+        await self._nombrar_la_tabla(usuario_id, fuente, titulo)
         return Pagina(
             id=fuente,
             titulo=titulo,
             tipo=TipoDePagina.BASE,
             editada=_fecha(datos.get("last_edited_time")) or datetime.now(UTC),
             enlace=_enlace(datos.get("url")),
+        )
+
+    async def _nombrar_la_tabla(self, usuario_id: UUID, fuente: str, titulo: str) -> None:
+        """Que la tabla de la base lleve el nombre de la base: la doc no dice si lo hereda.
+
+        La cabecera de una base muestra el título de su data source, y la
+        búsqueda también: sin él, la base nueva sale «(sin título)». Cosmético:
+        si algo falla, la base ya existe y sólo se loguea.
+        """
+        url = f"{BASE}/data_sources/{fuente}"
+        try:
+            if _texto((await self._pedir(usuario_id, "GET", url)).get("title")):
+                return
+            cuerpo = {"title": _texto_enriquecido(titulo)}
+            await self._pedir(usuario_id, "PATCH", url, cuerpo, escritura=True)
+            logger.info("notion.tabla_nombrada", usuario_id=str(usuario_id))
+        except LifeSyncError as exc:
+            logger.warning("notion.tabla_sin_nombre", tipo=type(exc).__name__)
+
+    async def ordenar_tabla(
+        self,
+        usuario_id: UUID,
+        base_id: str,
+        columnas: tuple[str, ...],
+        ordenar_por: str | None = None,
+    ) -> None:
+        """La vista de una base nueva: las filas por una fecha y las columnas en orden.
+
+        Todo por ids, no por nombres (la doc acepta los dos, pero un nombre puede
+        ser el id de otra). Las vistas se listan por la base, que trae sólo las
+        suyas; con más de una, no se toca nada. Dos PATCH: ordenar las filas está
+        documentado y se avisa si falla; el orden de las columnas no lo está, y
+        si falla sólo se loguea.
+        """
+        datos = await self._pedir(usuario_id, "GET", f"{BASE}/data_sources/{_id_valido(base_id)}")
+        ids = {columna.nombre: columna.id for columna in _columnas_del_esquema(datos)}
+        padre = datos.get("parent")
+        base = padre.get("database_id") if isinstance(padre, dict) else None
+        if not isinstance(base, str) or not _ID_DE_NOTION.fullmatch(base):
+            raise ServiceUnavailableError("Notion no dijo de qué base es la tabla.")
+        # El id ya está validado: no sale de la URL.
+        vistas = await self._pedir(
+            usuario_id, "GET", f"{BASE}/views?database_id={_id_valido(base)}"
+        )
+        encontradas = [v.get("id") for v in _lista(vistas.get("results")) if isinstance(v, dict)]
+        if len(encontradas) != 1 or vistas.get("has_more") is True:
+            logger.warning("notion.vista_no_encontrada", cantidad=len(encontradas))
+            raise ServiceUnavailableError("La base no tiene una sola vista.")
+        vista = encontradas[0]
+        if not isinstance(vista, str) or not _ID_DE_NOTION.fullmatch(vista):
+            raise ServiceUnavailableError("Notion devolvió una vista sin un id válido.")
+        url = f"{BASE}/views/{_id_valido(vista)}"
+        if ordenar_por is not None:
+            columna = ids.get(ordenar_por)
+            if columna is None:
+                raise ServiceUnavailableError("La columna para ordenar no está en la base.")
+            orden = {"sorts": [{"property": columna, "direction": "ascending"}]}
+            await self._pedir(usuario_id, "PATCH", url, orden, escritura=True)
+        if columnas and all(nombre in ids for nombre in columnas):
+            propiedades = [{"property_id": "title", "visible": True}]
+            propiedades += [{"property_id": ids[nombre], "visible": True} for nombre in columnas]
+            cuerpo = {"configuration": {"type": "table", "properties": propiedades}}
+            try:
+                await self._pedir(usuario_id, "PATCH", url, cuerpo, escritura=True)
+            except LifeSyncError as exc:
+                logger.warning("notion.columnas_sin_ordenar", tipo=type(exc).__name__)
+        logger.info(
+            "notion.tabla_ordenada",
+            usuario_id=str(usuario_id),
+            columnas=len(columnas),
+            por_fecha=ordenar_por is not None,
         )
 
     async def esquema(self, usuario_id: UUID, base_id: str) -> tuple[Propiedad, ...]:

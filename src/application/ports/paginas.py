@@ -220,9 +220,19 @@ class Paginas(ABC):
 
     @abstractmethod
     async def crear_base(
-        self, usuario_id: UUID, padre: Pagina, titulo: str, columnas: tuple[Propiedad, ...]
+        self,
+        usuario_id: UUID,
+        padre: Pagina,
+        titulo: str,
+        columnas: tuple[Propiedad, ...],
+        primera_columna: str = NOMBRE_DEL_TITULO,
     ) -> Pagina:
-        """Crea una base adentro de una página: `NOMBRE_DEL_TITULO` y estas columnas.
+        """Crea una base adentro de una página: la columna de título y estas otras.
+
+        Args:
+            primera_columna: Cómo se llama la columna de título, la del nombre
+                de cada fila. Siempre es texto: Notion no deja que sea de otro
+                tipo.
 
         Returns:
             La base nueva, con el id de su data source: el que usan buscar,
@@ -231,6 +241,32 @@ class Paginas(ABC):
         Raises:
             EscrituraEnDudaError: Si Notion no confirmó, o si la creó pero no se
                 pudo saber cuál es: en los dos casos, la base puede existir.
+            (y las de `crear`)
+        """
+
+    @abstractmethod
+    async def ordenar_tabla(
+        self,
+        usuario_id: UUID,
+        base_id: str,
+        columnas: tuple[str, ...],
+        ordenar_por: str | None = None,
+    ) -> None:
+        """Acomoda la vista de una base recién creada: las filas por una fecha y las columnas.
+
+        Es cosmético: si falla, la base y sus filas ya existen. Que las columnas
+        queden en el orden pedido no está garantizado (la API no lo documenta):
+        si eso falla, sólo se loguea.
+
+        Args:
+            columnas: Los nombres de las columnas, sin la del título, en el orden
+                en que se quieren ver.
+            ordenar_por: El nombre de una columna de fecha para ordenar las
+                filas de la primera a la última; None para no ordenarlas.
+
+        Raises:
+            ServiceUnavailableError: Si la base no tiene una sola vista, o si no
+                se pudo ordenar por la fecha.
             (y las de `crear`)
         """
 

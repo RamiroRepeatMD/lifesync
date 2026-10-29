@@ -16,6 +16,7 @@ decide el modelo: darse cuenta de que falta un dato ANTES de llamar la tool.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -47,6 +48,7 @@ from src.infrastructure.llm.agente_gemini import (
     AgenteGemini,
     crear_agente_gemini,
 )
+from src.infrastructure.llm.herramientas import _MESES, _para_buscar
 from tests.dobles import (
     ArchivosFalsos,
     CalendarioFalso,
@@ -993,7 +995,11 @@ async def test_la_base_de_la_semana_que_viene_pide_el_si_y_queda_con_las_fechas_
     await _turno_en(modelo, hilo, "sí")
     assert len(paginas.bases_creadas) == 1
     fechas = [valor for datos in paginas.datos_de_creadas for _, valor in datos]
-    assert proximo_lunes in fechas  # el dato, no sólo la cantidad (§9, tests 7)
+    # El dato, no sólo la cantidad (§9, tests 7): en una columna de fecha, o en el
+    # nombre de la fila si la armó con un día por fila («Lunes 2 de noviembre»).
+    dia = f"lunes {proximo_lunes.day} de {_MESES[proximo_lunes.month - 1]}"
+    titulos = [titulo.lower() for _, _, titulo, _ in paginas.creadas]
+    assert proximo_lunes in fechas or dia in titulos
 
 
 async def test_una_base_del_tamano_maximo_llega_entera_a_la_pregunta() -> None:
@@ -1044,3 +1050,107 @@ async def test_una_fila_con_sus_datos_se_confirma_una_sola_vez() -> None:
     assert SENAL_DE_CONFIRMACION in respuesta
     assert "1.500" in respuesta
     assert paginas.escrituras() == 0
+
+
+# --- Un día por fila, sin recortar ni inventar (QA del 28/10) ---------------------------
+
+
+def _mes_que_viene() -> tuple[str, int]:
+    """El nombre del mes que viene y cuántos días tiene: el caso no envejece."""
+    hoy = datetime.now(ZONA_HORARIA).date()
+    primero = (hoy.replace(day=1) + timedelta(days=32)).replace(day=1)
+    return _MESES[primero.month - 1], calendar.monthrange(primero.year, primero.month)[1]
+
+
+async def test_todos_los_dias_del_mes_con_la_fecha_primero_y_sin_inventar() -> None:
+    """El pedido de la QA: antes salieron 3 filas, después 10, y con descripciones inventadas."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+    mes, dias = _mes_que_viene()
+
+    pregunta = await _turno_en(
+        modelo,
+        hilo,
+        f"creá en mi página de recetas de Notion una base de datos en donde la primera "
+        f"columna sea fecha y estén todos los días de {mes} (o sea que cada fila sea un día, "
+        f"hasta el último día del mes), y después una columna Descripción y otra Check",
+    )
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert paginas.escrituras() == 0
+    await _turno_en(modelo, hilo, "sí")
+    [(_, _, _, columnas)] = paginas.bases_creadas
+    assert [_para_buscar(p) for p in paginas.primeras_columnas] == ["fecha"]
+    assert [c.tipo for c in columnas] == [TipoDePropiedad.TEXTO, TipoDePropiedad.CASILLA]
+    titulos = [titulo.lower() for _, _, titulo, _ in paginas.creadas]
+    assert len(titulos) == dias
+    # De la última a la primera, así se leen en orden: todos los días, seguidos.
+    assert [
+        f" {numero} de {mes}" in titulo
+        for numero, titulo in zip(range(dias, 0, -1), titulos, strict=True)
+    ] == [True] * dias
+    # Nada inventado: ni descripciones ni casillas.
+    escritos = [c.tipo for datos in paginas.datos_de_creadas for c, _ in datos]
+    assert TipoDePropiedad.TEXTO not in escritos
+    assert TipoDePropiedad.CASILLA not in escritos
+
+
+async def test_con_mas_filas_de_las_que_entran_avisa_y_no_recorta() -> None:
+    """Con 14 filas con datos no entran todas: se avisa y se pregunta, nunca se cortan."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+
+    respuesta = await _turno(
+        modelo,
+        "creá en mi página de recetas de Notion una base «Gastos» con una columna Monto "
+        "(número) y estas filas: Luz 1500, Gas 2300, Agua 800, Internet 5000, Súper 12000, "
+        "Verdulería 3500, Nafta 9000, Seguro 15000, Gimnasio 7000, Farmacia 2500, Cable 4000, "
+        "Celular 6000, Expensas 30000, Patente 8000",
+    )
+
+    # Avisa y pregunta: ni una pregunta de confirmación con menos filas o sin los montos.
+    assert SENAL_DE_CONFIRMACION not in respuesta
+    assert "estas 10 filas" not in respuesta
+
+
+async def test_una_base_de_gastos_del_mes_no_es_un_dia_por_fila() -> None:
+    """Que el nombre traiga un mes no la vuelve un calendario."""
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+    mes, _ = _mes_que_viene()
+
+    pregunta = await _turno_en(
+        modelo,
+        hilo,
+        f"creá en mi página de recetas de Notion una base «Gastos de {mes}» con las columnas "
+        "Monto (número) y Pagado (casilla)",
+    )
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    assert "una fila por día" not in pregunta
+    await _turno_en(modelo, hilo, "sí")
+    assert len(paginas.bases_creadas) == 1
+    assert paginas.creadas == []
+
+
+async def test_una_fila_sin_dato_queda_vacia_y_no_se_inventa() -> None:
+    paginas = PaginasFalsas((RECETAS_DE_NOTION,))
+    modelo = _agente_con_notion(paginas)
+    hilo = uuid4()
+
+    pregunta = await _turno_en(
+        modelo,
+        hilo,
+        "creá en mi página de recetas de Notion una base «Compras» con una columna Cantidad "
+        "(número) y estas filas: Leche 2, Pan, Huevos 12",
+    )
+
+    assert SENAL_DE_CONFIRMACION in pregunta
+    await _turno_en(modelo, hilo, "sí")
+    datos = {
+        titulo.lower(): [valor for _, valor in celdas]
+        for (_, _, titulo, _), celdas in zip(paginas.creadas, paginas.datos_de_creadas, strict=True)
+    }
+    assert datos == {"leche": [2], "pan": [], "huevos": [12]}
